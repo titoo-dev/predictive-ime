@@ -1,0 +1,5 @@
+# artefacts de build (compilés à la main pendant le spike)
+/daemon/bench_ngram
+/daemon/predictord
+result
+result-*
