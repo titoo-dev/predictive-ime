@@ -17,6 +17,7 @@
 #include <QImage>
 #include <QString>
 #include <QStringList>
+#include <QVariantList>
 #include <QVariantMap>
 
 class QQuickView;
@@ -35,8 +36,10 @@ public:
 
     // Nouvel état de la barre (à chaque update fcitx). Déclenche les
     // animations : apparition si la barre était cachée, morph du pill si seul
-    // le surlignage a bougé (mêmes candidats).
-    void update(const QStringList &candidates, int highlight);
+    // le surlignage a bougé (mêmes candidats). `autoMark[i]` dit si le
+    // candidat i sera appliqué par l'Espace (liseré accent).
+    void update(const QStringList &candidates, int highlight,
+                const QVariantList &autoMark = {});
     // La barre vient d'être cachée (preedit vide / focus perdu).
     void hidden();
     // Une animation est-elle en cours ? (→ re-rendre à la prochaine frame)
@@ -64,4 +67,5 @@ private:
     bool shown_ = false;
     int highlight_ = -1;
     QStringList cands_;
+    QVariantList autoMark_;   // candidat appliqué par l'Espace (par index)
 };

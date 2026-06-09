@@ -178,14 +178,19 @@ std::string applyCase(const std::string &cand, const std::string &buffer) {
 }
 
 // Les `maxWords` derniers mots d'un texte (pour amorcer le contexte depuis le
-// texte environnant de l'application).
+// texte environnant de l'application). S'ARRÊTE aux fins de phrase « . ! ? » :
+// le contexte ne traverse jamais une frontière de phrase.
 std::vector<std::string> lastWords(const std::vector<uint32_t> &cps,
                                    int maxWords) {
   std::vector<std::string> out;
   size_t i = cps.size();
   while (i > 0 && (int)out.size() < maxWords) {
-    while (i > 0 && !isLetterCp(cps[i - 1]))
+    while (i > 0 && !isLetterCp(cps[i - 1])) {
+      uint32_t c = cps[i - 1];
+      if (c == '.' || c == '!' || c == '?')
+        return out; // frontière de phrase
       --i; // saute les non-lettres
+    }
     size_t end = i;
     while (i > 0 && (isLetterCp(cps[i - 1]) || cps[i - 1] == '\'' ||
                      cps[i - 1] == 0x2019 || cps[i - 1] == '-'))
@@ -280,13 +285,23 @@ struct PredictState : public fcitx::InputContextProperty {
   bool navigating = false;           // l'utilisateur a commencé à choisir (Tab)
   bool literalIsWord = false;        // le préfixe tapé est-il déjà un vrai mot ?
   std::string autocomplete;          // mot appliqué sur Espace (haute confiance)
+  // Fenêtre de REVERT d'une auto-application (Backspace juste après) :
+  std::string lastAutoLit;           // le littéral qui a été remplacé
+  uint32_t lastAutoCps = 0;          // points de code committés à effacer
+  bool vetoAuto = false;             // l'utilisateur a refusé : Espace garde le littéral
 };
 
 class PredictCandidate : public fcitx::CandidateWord {
 public:
-  explicit PredictCandidate(std::string text)
+  // `autoApply` : ce candidat sera appliqué par l'Espace — marqué en GRAS dans
+  // le Text fcitx, l'UI (qmlpanel) le rend distinctement pour que
+  // l'utilisateur sache toujours ce que l'Espace va faire.
+  explicit PredictCandidate(std::string text, bool autoApply = false)
       : text_(std::move(text)) {
-    setText(fcitx::Text(text_));
+    fcitx::Text t;
+    t.append(text_, autoApply ? fcitx::TextFormatFlags{fcitx::TextFormatFlag::Bold}
+                              : fcitx::TextFormatFlags{});
+    setText(std::move(t));
   }
   void select(fcitx::InputContext *) const override {} // sélection gérée à part
   const std::string &word() const { return text_; }
@@ -329,8 +344,37 @@ public:
               sym, cp, state->buffer.c_str(), int(state->navigating),
               state->cands.size());
 
+    // (0) Fenêtre de REVERT : Backspace IMMÉDIATEMENT après une
+    // auto-application efface le mot appliqué, restaure le littéral tapé et
+    // ré-ouvre la composition — et le prochain Espace gardera le littéral
+    // (vetoAuto). C'est l'« undo » de l'autocorrection, façon Gboard.
+    uint32_t autoCps = state->lastAutoCps;
+    state->lastAutoCps = 0; // la fenêtre ne dure qu'une touche
+    if (sym == FcitxKey_BackSpace && !mod && state->buffer.empty() &&
+        autoCps > 0 &&
+        ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText) &&
+        ic->surroundingText().isValid()) {
+      ic->deleteSurroundingText(-int(autoCps), autoCps);
+      state->buffer = state->lastAutoLit;
+      state->vetoAuto = true;
+      if (!state->ctx.empty())
+        state->ctx.pop_back(); // le mot remplacé n'est plus dans le texte
+      state->navigating = false;
+      updateCompletion(ic, state);
+      event.filterAndAccept();
+      return;
+    }
+
     // (1) Caractère de mot (sans Ctrl/Alt/Super) → prolonge le buffer.
+    //     Exception : en NAVIGATION, les chiffres 1-6 sélectionnent
+    //     directement le candidat correspondant.
     if (!mod && cp && isWordExtender(cp, state->buffer.empty())) {
+      if (state->navigating && cp >= '1' && cp <= '6' &&
+          int(cp - '1') < (int)state->cands.size()) {
+        commitWord(ic, state, state->cands[cp - '1'], /*trailingSpace=*/true);
+        event.filterAndAccept();
+        return;
+      }
       appendCp(state->buffer, cp);
       state->navigating = false;
       updateCompletion(ic, state);
@@ -352,18 +396,33 @@ public:
 
     // (3) Composition active (buffer non vide).
     if (!state->buffer.empty()) {
-      if (sym == FcitxKey_Tab) {
+      if (sym == FcitxKey_Tab || sym == FcitxKey_Down) {
         navigate(ic, state, +1);
         event.filterAndAccept();
         return;
       }
-      if (sym == FcitxKey_ISO_Left_Tab) {
-        navigate(ic, state, -1);
+      if (sym == FcitxKey_ISO_Left_Tab || sym == FcitxKey_Up) {
+        navigate(ic, state, -1); // ⇧Tab/↑ : entre par la DROITE de la barre
+        event.filterAndAccept();
+        return;
+      }
+      // en navigation, la barre étant horizontale, ←/→ s'y déplacent aussi
+      if (state->navigating &&
+          (sym == FcitxKey_Left || sym == FcitxKey_Right)) {
+        navigate(ic, state, sym == FcitxKey_Right ? +1 : -1);
         event.filterAndAccept();
         return;
       }
       if (sym == FcitxKey_space) {
-        commitWord(ic, state, chooseOnSpace(state), /*trailingSpace=*/true);
+        std::string lit = state->buffer;
+        std::string chosen = chooseOnSpace(state);
+        bool autoApplied = !state->navigating && chosen != lit;
+        std::string committed = applyCase(chosen, lit);
+        commitWord(ic, state, chosen, /*trailingSpace=*/true);
+        if (autoApplied) { // arme la fenêtre de revert (cf (0))
+          state->lastAutoLit = lit;
+          state->lastAutoCps = uint32_t(decodeUtf8(committed).size()) + 1;
+        }
         event.filterAndAccept();
         return;
       }
@@ -386,8 +445,14 @@ public:
         return;
       }
       // toute autre touche (ponctuation, flèches, Home/End…) : termine le mot
-      // littéral SANS espace puis laisse la touche filer vers l'application.
-      commitWord(ic, state, state->buffer, /*space=*/false);
+      // SANS espace puis laisse la touche filer vers l'application. La
+      // PONCTUATION applique la même correction que l'Espace (« teh. » →
+      // « the. ») — sauf en mode emoji (« :xyz, » reste littéral).
+      bool punctFix = (cp == '.' || cp == ',' || cp == ';' || cp == ':' ||
+                       cp == '!' || cp == '?') &&
+                      state->buffer[0] != ':';
+      commitWord(ic, state, punctFix ? chooseOnSpace(state) : state->buffer,
+                 /*space=*/false);
       if (cp == '.' || cp == '!' || cp == '?')
         state->ctx.clear(); // fin de phrase → on repart à neuf
       return;
@@ -409,13 +474,21 @@ public:
       return;
     }
     if (state->navigating && hasList) {
-      if (sym == FcitxKey_Tab) {
+      if (sym == FcitxKey_Tab || sym == FcitxKey_Down ||
+          sym == FcitxKey_Right) {
         navigate(ic, state, +1);
         event.filterAndAccept();
         return;
       }
-      if (sym == FcitxKey_ISO_Left_Tab) {
+      if (sym == FcitxKey_ISO_Left_Tab || sym == FcitxKey_Up ||
+          sym == FcitxKey_Left) {
         navigate(ic, state, -1);
+        event.filterAndAccept();
+        return;
+      }
+      if (cp >= '1' && cp <= '6' &&
+          int(cp - '1') < (int)state->cands.size()) {
+        commitWord(ic, state, state->cands[cp - '1'], /*space=*/true);
         event.filterAndAccept();
         return;
       }
@@ -434,8 +507,9 @@ public:
       clearPanel(ic);
       return;
     }
-    if (hasList && sym == FcitxKey_Tab) {
-      navigate(ic, state, 0); // surligne le 1er (navigate met navigating=true)
+    if (hasList && (sym == FcitxKey_Tab || sym == FcitxKey_ISO_Left_Tab)) {
+      // Tab entre par la gauche, ⇧Tab par la DROITE de la barre.
+      navigate(ic, state, sym == FcitxKey_ISO_Left_Tab ? -1 : 0);
       event.filterAndAccept();
       return;
     }
@@ -445,6 +519,11 @@ public:
       clearPanel(ic);
     if (cp == '.' || cp == '!' || cp == '?')
       state->ctx.clear();
+    // Espace sur buffer vide (après ponctuation, typiquement) : la touche file
+    // à l'appli ET on affiche la barre de suggestion — contexte vide compris
+    // (le daemon répond avec les amorces de phrase <s>).
+    if (sym == FcitxKey_space)
+      showNextWord(ic, state);
   }
 
   void reset(const fcitx::InputMethodEntry &,
@@ -459,6 +538,9 @@ public:
     state->ctx.clear();
     state->cands.clear();
     state->navigating = false;
+    state->vetoAuto = false;
+    state->lastAutoCps = 0;
+    state->lastAutoLit.clear();
     clearPanel(ic);
   }
 
@@ -507,6 +589,10 @@ private:
   std::string chooseOnSpace(PredictState *state) {
     if (state->navigating && !state->cands.empty())
       return highlighted(state);
+    // l'utilisateur vient de refuser une auto-application (revert Backspace) :
+    // on respecte son choix, le littéral reste.
+    if (state->vetoAuto)
+      return state->buffer;
     // auto-application haute confiance seulement (complétion de préfixe, ou
     // faute simple) ; sinon on garde le littéral — jamais "j'ai" → "jail".
     if (!state->literalIsWord && !state->autocomplete.empty())
@@ -514,14 +600,16 @@ private:
     return state->buffer;
   }
 
-  // Surligne un candidat. dir : +1 suivant, -1 précédent, 0 (1er appui) → le 1er.
+  // Surligne un candidat. dir : +1 suivant, -1 précédent, 0 (1er appui) → le
+  // 1er. Premier appui en ARRIÈRE (⇧Tab/↑) → on entre par la droite (dernier).
   // On calcule l'index nous-mêmes (robuste, indépendant de nextCandidate()).
   void navigate(fcitx::InputContext *ic, PredictState *state, int dir) {
     auto list = ic->inputPanel().candidateList();
     if (!list || list->size() == 0)
       return;
     int sz = list->size();
-    int next = state->navigating ? state->navIndex + dir : 0;
+    int next = state->navigating ? state->navIndex + dir
+                                 : (dir < 0 ? sz - 1 : 0);
     if (next < 0)
       next = sz - 1;
     if (next >= sz)
@@ -565,6 +653,7 @@ private:
     state->buffer.clear();
     state->cands.clear();
     state->navigating = false;
+    state->vetoAuto = false; // le veto ne vaut que pour le mot en cours
     if (trailingSpace)
       showNextWord(ic, state);
     else
@@ -594,13 +683,13 @@ private:
   }
 
   // Mode mot-suivant : candidats prédits depuis le contexte (display-only).
+  // Un contexte VIDE est une requête valide : le daemon répond avec les
+  // amorces de phrase (<s>) — début de champ, ou après « . ! ? ».
   void showNextWord(fcitx::InputContext *ic, PredictState *state) {
     ic->inputPanel().reset();
+    state->autocomplete.clear(); // pas de marquage « auto » en mot-suivant
+    state->literalIsWord = false;
     auto ctx = contextFor(ic, state);
-    if (ctx.empty()) {
-      clearPanel(ic);
-      return;
-    }
     auto reply = queryDaemon(ctx, "");
     state->cands = reply.candidates;
     if (state->cands.empty()) {
@@ -615,8 +704,12 @@ private:
   void setCandidates(fcitx::InputContext *ic, PredictState *state) {
     auto list = std::make_unique<fcitx::CommonCandidateList>();
     list->setPageSize(6);
+    // le candidat que l'Espace appliquera est marqué (gras → liseré dans l'UI)
+    bool willAuto = !state->buffer.empty() && !state->literalIsWord &&
+                    !state->autocomplete.empty() && !state->vetoAuto;
     for (auto &w : state->cands)
-      list->append<PredictCandidate>(applyCase(w, state->buffer));
+      list->append<PredictCandidate>(applyCase(w, state->buffer),
+                                     willAuto && w == state->autocomplete);
     list->setGlobalCursorIndex(-1); // aucun surlignage tant qu'on ne navigue pas
     ic->inputPanel().setCandidateList(std::move(list));
   }

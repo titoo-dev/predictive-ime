@@ -101,10 +101,10 @@ public:
         if (show)
             showPanel(ic);
         else
-            hidePanel();
+            unmapPanel();
     }
     bool available() override { return true; }
-    void suspend() override { hidePanel(); }
+    void suspend() override { destroyPanel(); }
     void resume() override {}
 
     // appelés par les callbacks registry (thread principal)
@@ -141,26 +141,41 @@ private:
             QP_DEBUG() << "PanelView not ok (QML/Qt error)";
             return;
         }
-        if (!surface_ || ic != currentIc_) {
-            hidePanel(); // remet aussi l'anim d'apparition à zéro
+        // La surface/popup PERSISTE entre les mots (masquée par un buffer NULL,
+        // cf unmapPanel) : zéro churn create/destroy pendant la frappe. On ne
+        // recrée que si le contexte d'entrée (ou son input-method) change.
+        if (!surface_ || ic != currentIc_ || im != currentIm_) {
+            destroyPanel(); // remet aussi l'anim d'apparition à zéro
             surface_ = wl_compositor_create_surface(compositor_);
             popup_ = zwp_input_method_v2_get_input_popup_surface(im, surface_);
             currentIc_ = ic;
+            currentIm_ = im;
         }
-        // candidats + index surligné depuis l'input panel de fcitx
+        // candidats + surlignage + marquage « auto-appliqué » (flag Bold posé
+        // par l'engine sur le candidat que l'Espace va appliquer)
         auto list = ic->inputPanel().candidateList();
         QStringList cands;
+        QVariantList autoMark;
         int highlight = -1;
         if (list) {
             highlight = list->cursorIndex();
             for (int i = 0; i < list->size(); i++) {
-                cands << QString::fromStdString(
-                    list->candidate(i).text().toString());
+                const fcitx::Text &t = list->candidate(i).text();
+                cands << QString::fromStdString(t.toString());
+                bool bold = false;
+                for (size_t s = 0; s < t.size(); s++) {
+                    if (t.formatAt(s).test(TextFormatFlag::Bold)) {
+                        bold = true;
+                        break;
+                    }
+                }
+                autoMark << bold;
             }
         }
-        view_->update(cands, highlight);
+        view_->update(cands, highlight, autoMark);
         if (!renderFrame())
             return;
+        mapped_ = true;
         QP_DEBUG() << "panel shown, " << cands.size() << " cands";
     }
 
@@ -200,11 +215,27 @@ private:
             self->renderFrame();
     }
 
-    void hidePanel() {
+    // Masque SANS détruire : buffer NULL → le compositeur démappe la popup,
+    // mais surface/popup/rôle restent prêts pour le mot suivant.
+    void unmapPanel() {
         if (frameCb_) {
             wl_callback_destroy(frameCb_);
             frameCb_ = nullptr;
         }
+        if (surface_ && mapped_) {
+            wl_surface_attach(surface_, nullptr, 0, 0);
+            wl_surface_commit(surface_);
+            mapped_ = false;
+            if (display_)
+                wl_display_flush(display_);
+        }
+        if (view_)
+            view_->hidden();
+    }
+
+    // Destruction réelle (changement de contexte d'entrée, suspend).
+    void destroyPanel() {
+        unmapPanel();
         if (popup_) {
             zwp_input_popup_surface_v2_destroy(popup_);
             popup_ = nullptr;
@@ -214,8 +245,7 @@ private:
             surface_ = nullptr;
         }
         currentIc_ = nullptr;
-        if (view_)
-            view_->hidden();
+        currentIm_ = nullptr;
         if (display_)
             wl_display_flush(display_);
     }
@@ -229,7 +259,9 @@ private:
     wl_surface *surface_ = nullptr;
     zwp_input_popup_surface_v2 *popup_ = nullptr;
     wl_callback *frameCb_ = nullptr;
+    bool mapped_ = false;
     InputContext *currentIc_ = nullptr;
+    zwp_input_method_v2 *currentIm_ = nullptr;
     std::unique_ptr<PanelView> view_;
 
     static constexpr wl_registry_listener registryListener_ = {

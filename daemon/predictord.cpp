@@ -141,6 +141,7 @@ std::string foldStr(const std::string &in) {
       out.push_back('y'); break;
     case 0xDF: out += "ss"; break;
     case 0x152: case 0x153: out += "oe"; break;
+    case 0x2019: out.push_back('\''); break; // apostrophe typographique
     default: appendCp(out, cp); break;
     }
   }
@@ -148,6 +149,7 @@ std::string foldStr(const std::string &in) {
 }
 
 // Minuscule en gardant les accents (clé des n-grammes, construits en .lower()).
+// Normalise aussi l'apostrophe typographique (les n-grammes sont en ').
 std::string lowerKeep(const std::string &in) {
   std::string out;
   for (uint32_t cp : decodeUtf8(in)) {
@@ -155,6 +157,8 @@ std::string lowerKeep(const std::string &in) {
       appendCp(out, cp + 32);
     else if (cp >= 0xC0 && cp <= 0xDE && cp != 0xD7)
       appendCp(out, cp + 0x20); // latin-1 majuscule → minuscule
+    else if (cp == 0x2019)
+      out.push_back('\'');
     else
       appendCp(out, cp);
   }
@@ -216,6 +220,13 @@ struct Model {
   static constexpr double CH_TRANSPOSE = 0.12; // inversion de 2 lettres
   static constexpr double CH_SUBST = 0.10;     // voisin AZERTY
   static constexpr double CH_EXTRA = 0.07;     // lettre en trop
+  // Garde-fous d'AUTO-application sur Espace (les candidats restent affichés,
+  // seul le remplacement automatique est bridé) :
+  static constexpr size_t AUTO_MIN_LEN = 3; // préfixe trop court → littéral
+  static constexpr double AUTO_DOM = 2.0;   // le top doit dominer le 2e ×2
+  // Un mot APPRIS hors vocabulaire doit avoir été vu >= 2 fois avant de passer
+  // devant le modèle (sinon un seul commit d'un fragment pollue à vie).
+  static constexpr uint64_t USER_MIN = 2;
 
   uint32_t intern(const std::string &w) {
     auto it = id_.find(w);
@@ -413,6 +424,33 @@ struct Model {
     }
   }
 
+  // Un mot appris est « de confiance » s'il est un vrai mot du vocabulaire ou
+  // s'il a été committé au moins USER_MIN fois — un fragment committé une
+  // seule fois (Entrée en plein mot, par ex.) ne pollue pas les suggestions.
+  bool userTrusted(const std::string &word, uint64_t count) const {
+    return count >= USER_MIN || caseWords.count(lowerKeep(word)) > 0;
+  }
+
+  // Oublie un mot appris (userUni + tous ses bigrammes) et réécrit le journal.
+  size_t forget(const std::string &word) {
+    size_t removed = userUni.erase(word);
+    for (auto &kv : userBi)
+      removed += kv.second.erase(word);
+    if (!userLog.empty()) {
+      std::ifstream in(userLog);
+      std::string line, keep;
+      while (std::getline(in, line)) {
+        size_t tab = line.find('\t');
+        if (tab == std::string::npos || line.substr(tab + 1) != word)
+          keep += line + '\n';
+      }
+      in.close();
+      std::ofstream out(userLog, std::ios::trunc);
+      out << keep;
+    }
+    return removed;
+  }
+
   // Borne [lo,hi) des mots dont le repli commence par `fp`.
   std::pair<std::vector<uint32_t>::const_iterator,
             std::vector<uint32_t>::const_iterator>
@@ -598,9 +636,11 @@ private:
         ranked[it->second].second = s; // même mot via 2 fautes → la + probable
     };
 
-    // (1) mots APPRIS dont le repli commence par le préfixe → priorité absolue.
+    // (1) mots APPRIS (de confiance) dont le repli commence par le préfixe →
+    //     priorité absolue.
     for (auto &kv : userUni)
-      if (foldStr(kv.first).compare(0, fp.size(), fp) == 0)
+      if (userTrusted(kv.first, kv.second) &&
+          foldStr(kv.first).compare(0, fp.size(), fp) == 0)
         offer(kv.first, 1e18 + double(kv.second));
 
     // (2) correspondances exactes du modèle.
@@ -619,15 +659,27 @@ private:
     for (auto &p : ranked)
       push(p.first);
 
-    // Auto-complétion sur Espace (haute confiance) : le meilleur candidat s'il
-    // PROLONGE le préfixe ; sinon (correction floue) seulement si le préfixe ne
-    // contient pas d'apostrophe/trait d'union — on ne mutile pas une contraction.
-    if (!res.candidates.empty()) {
+    // Auto-complétion sur Espace (haute confiance seulement — les candidats
+    // restent affichés, on bride uniquement le REMPLACEMENT automatique) :
+    //  - préfixe assez long (un sigle de 2 lettres « az » ne devient pas
+    //    « aziz ») ;
+    //  - le top doit DOMINER le 2e candidat (ambigu → on garde le littéral,
+    //    Tab choisit) — sauf mot appris (priorité voulue) ;
+    //  - une correction FLOUE ne raccourcit jamais la frappe (« pcq » ne
+    //    devient pas « pc ») et jamais à travers une apostrophe/trait d'union
+    //    (on ne mutile pas une contraction, « j'ai » ≠ jail).
+    if (!res.candidates.empty() && fp.size() >= AUTO_MIN_LEN) {
       const std::string &top = res.candidates.front();
-      bool topIsPrefix = foldStr(top).compare(0, fp.size(), fp) == 0;
+      const std::string ftop = foldStr(top);
+      bool topIsPrefix = ftop.compare(0, fp.size(), fp) == 0;
       bool fpHasPunct =
           fp.find('\'') != std::string::npos || fp.find('-') != std::string::npos;
-      if (topIsPrefix || !fpHasPunct)
+      bool isUser = ranked.size() >= 1 && ranked[0].second >= 1e18;
+      bool dominant =
+          isUser || ranked.size() < 2 ||
+          ranked[0].second >= AUTO_DOM * std::max(ranked[1].second, 1e-300);
+      bool fuzzyOk = ftop.size() >= fp.size() && !fpHasPunct;
+      if (dominant && (topIsPrefix || fuzzyOk))
         res.autocomplete = top;
     }
 
@@ -704,19 +756,23 @@ private:
 
   // Mot-suivant : P_KN(w|u,v) sur l'union des suiveurs observés (trigramme +
   // bigramme) + le pool des meilleurs P1 (contexte inconnu → mots probables).
-  // L'apprentissage utilisateur passe toujours devant.
+  // Contexte VIDE = début de phrase → contexte synthétique "<s>" (le builder
+  // compte les bigrammes d'amorce). L'apprentissage utilisateur passe devant.
   template <class Push>
   void predictNext(const std::vector<std::string> &context, int k,
                    Push &&push) {
-    if (context.empty())
-      return;
-    const std::string prev = lowerKeep(context.back());
+    std::vector<std::string> ctx = context;
+    if (ctx.empty())
+      ctx.push_back("<s>");
+    const std::string prev = lowerKeep(ctx.back());
 
-    // (1) bigrammes APPRIS pour ce contexte → priorité.
+    // (1) bigrammes APPRIS (de confiance) pour ce contexte → priorité.
     auto ub = userBi.find(prev);
     if (ub != userBi.end()) {
-      std::vector<std::pair<std::string, uint64_t>> v(ub->second.begin(),
-                                                      ub->second.end());
+      std::vector<std::pair<std::string, uint64_t>> v;
+      for (auto &p : ub->second)
+        if (userTrusted(p.first, p.second))
+          v.push_back(p);
       std::sort(v.begin(), v.end(),
                 [](auto &a, auto &b) { return a.second > b.second; });
       for (auto &p : v)
@@ -725,7 +781,7 @@ private:
 
     // (2) modèle : score exact P_KN(w|ctx) sur le pool de candidats.
     CtxScorer ctxScore;
-    ctxScore.init(*this, context);
+    ctxScore.init(*this, ctx);
     std::unordered_set<uint32_t> pool;
     for (auto &pr : ctxScore.tri)
       pool.insert(pr.first);
@@ -815,6 +871,12 @@ int main(int argc, char **argv) {
             auto l = req["learn"];
             model.learn(l.value("prev", std::string{}),
                         l.value("word", std::string{}));
+            resp["ok"] = true;
+          } else if (req.contains("forget")) {
+            // outil d'hygiène : oublier un mot appris (et réécrire le journal)
+            //   echo '{"forget":{"word":"bonjo"}}' | nc -U $SOCK
+            resp["removed"] =
+                model.forget(req["forget"].value("word", std::string{}));
             resp["ok"] = true;
           } else {
             std::vector<std::string> ctx =

@@ -72,12 +72,26 @@ Item {
                     required property string modelData
                     readonly property bool emoji:
                         modelData.length > 0 && modelData.codePointAt(0) > 0x2100
-                    width: label.implicitWidth + 16
+                    readonly property bool isAuto:
+                        index < autoMark.length && autoMark[index] === true
+                    width: label.width + 16
                     height: 26
+                    // liseré accent = « l'Espace appliquera CE candidat »
+                    Rectangle {
+                        anchors.fill: parent
+                        radius: 8
+                        color: "transparent"
+                        border.width: 1
+                        border.color: colors.accent
+                        opacity: 0.9
+                        visible: isAuto && hlPos < 0
+                    }
                     Text {
                         id: label
                         anchors.centerIn: parent
                         text: modelData
+                        width: Math.min(implicitWidth, 190)
+                        elide: Text.ElideRight
                         color: hlPos >= 0 && index === Math.round(hlPos)
                                ? colors.onAccent : colors.onSurface
                         font.pixelSize: emoji ? 17 : 14
@@ -128,17 +142,39 @@ qint64 colorsStamp() {
 
 // Palette = défauts Catppuccin → écrasés par DMS (matugen) → écrasés par un
 // override explicite. Material You : accent = primary, surface = container.
+// Mode CLAIR/SOMBRE : "mode" explicite dans l'override > détection DMS (dans
+// dank16, la valeur "default" de chaque couleur suit le mode courant) > sombre.
 QVariantMap loadColors() {
+    QJsonObject root = readJson(dmsColorsPath());
+    QJsonObject ov = readJson(overrideColorsPath());
+    bool dark = true;
+    QString mode = ov.value("mode").toString();
+    if (mode == "light" || mode == "dark") {
+        dark = (mode == "dark");
+    } else {
+        QJsonObject d16 = root.value("dank16").toObject();
+        for (const QString &k : d16.keys()) {
+            QJsonObject col = d16.value(k).toObject();
+            QString dv = col.value("dark").toString();
+            QString lv = col.value("light").toString();
+            if (!dv.isEmpty() && dv != lv) {
+                dark = (col.value("default").toString() == dv);
+                break;
+            }
+        }
+    }
+
+    // défauts Catppuccin (mocha/latte) selon le mode détecté
     QVariantMap c;
-    c["surface"] = "#1e1e2e";
-    c["onSurface"] = "#cdd6f4";
-    c["accent"] = "#89b4fa";
-    c["onAccent"] = "#11111b";
-    c["outline"] = "#45455a";
+    c["surface"] = dark ? "#1e1e2e" : "#eff1f5";
+    c["onSurface"] = dark ? "#cdd6f4" : "#4c4f69";
+    c["accent"] = dark ? "#89b4fa" : "#1e66f5";
+    c["onAccent"] = dark ? "#11111b" : "#ffffff";
+    c["outline"] = dark ? "#45455a" : "#bcc0cc";
 
     // 1) couleurs DMS/matugen (régénérées à chaque changement de thème)
-    QJsonObject d =
-        readJson(dmsColorsPath()).value("colors").toObject().value("dark").toObject();
+    QJsonObject d = root.value("colors").toObject()
+                        .value(dark ? "dark" : "light").toObject();
     if (!d.isEmpty()) {
         auto pick = [&](std::initializer_list<const char *> keys) -> QString {
             for (auto *k : keys)
@@ -158,12 +194,11 @@ QVariantMap loadColors() {
         if (!onAccent.isEmpty()) c["onAccent"] = onAccent;
         if (!outline.isEmpty()) c["outline"] = outline;
     }
-    // 2) override explicite {surface,onSurface,accent,onAccent,outline}
-    QJsonObject o = readJson(overrideColorsPath());
+    // 2) override explicite {surface,onSurface,accent,onAccent,outline,mode}
     for (const QString &k :
          {"surface", "onSurface", "accent", "onAccent", "outline"})
-        if (o.contains(k))
-            c[k] = o.value(k).toString();
+        if (ov.contains(k))
+            c[k] = ov.value(k).toString();
     return c;
 }
 
@@ -234,6 +269,7 @@ PanelView::PanelView() {
     ctx->setContextProperty("highlight", -1);
     ctx->setContextProperty("hlPos", -1.0);
     ctx->setContextProperty("appear", 1.0);
+    ctx->setContextProperty("autoMark", QVariantList{});
 
     component_ = new QQmlComponent(view_->engine());
     component_->setData(kPanelQml, QUrl());
@@ -258,7 +294,8 @@ void PanelView::setColors(const QVariantMap &colors) {
     }
 }
 
-void PanelView::update(const QStringList &candidates, int highlight) {
+void PanelView::update(const QStringList &candidates, int highlight,
+                       const QVariantList &autoMark) {
     auto now = Clock::now();
     if (!shown_) {
         appear_ = {0.0, 1.0, now, animMs(140)};
@@ -273,6 +310,7 @@ void PanelView::update(const QStringList &candidates, int highlight) {
     }
     cands_ = candidates;
     highlight_ = highlight;
+    autoMark_ = autoMark;
 }
 
 void PanelView::hidden() {
@@ -304,6 +342,7 @@ QImage PanelView::render() {
     ctx->setContextProperty("highlight", highlight_);
     ctx->setContextProperty("hlPos", hl_.at(now));
     ctx->setContextProperty("appear", appear_.at(now));
+    ctx->setContextProperty("autoMark", autoMark_);
     QCoreApplication::processEvents(); // laisse bindings + resize se résoudre
     QImage img = view_->grabWindow();
     return img.convertToFormat(QImage::Format_ARGB32_Premultiplied);

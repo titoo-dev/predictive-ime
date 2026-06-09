@@ -65,8 +65,21 @@ P1(w)    = 0.7·Pcont(w) + 0.3·Pfreq(w)
 - **Autocorrection en noisy-channel** : `P(w|ctx)·P(frappe|w)`, canal pondéré
   par type de faute (transposition 0.12 > voisin AZERTY 0.10 > lettre en trop
   0.07), jamais à travers apostrophe/trait d'union (`j'ai` intouchable).
-- **Apprentissage utilisateur** prioritaire et persistant
-  (`$XDG_DATA_HOME/ime-predictord/user.log`, rejoué au démarrage).
+- **Garde-fous d'auto-application** (l'Espace ne remplace que sûr de lui ; les
+  candidats restent toujours affichés) : préfixe ≥ 3 lettres (`az` ne devient
+  pas « aziz »), le top doit dominer le 2ᵉ ×2 (ambigu → littéral, Tab choisit),
+  une faute floue ne raccourcit jamais la frappe (`pcq` ↛ « pc »). Un **lexique
+  d'abréviations** FR/EN (pcq, bcp, tkt, mdr, btw, imo…) est au vocabulaire →
+  jamais « corrigées ».
+- **Amorce de phrase** : bigrammes `<s>` comptés au build → suggestions en
+  début de champ et après `. ! ?` (le contexte ne traverse jamais une frontière
+  de phrase, surrounding-text compris).
+- **Apprentissage utilisateur** persistant
+  (`$XDG_DATA_HOME/ime-predictord/user.log`, rejoué au démarrage). Un mot
+  hors-vocabulaire doit être committé **≥ 2 fois** avant de passer devant le
+  modèle (un fragment isolé ne pollue plus). Hygiène :
+  `echo '{"forget":{"word":"x"}}' | nc -U /tmp/ime-predictord.sock`.
+- **Apostrophe typographique** `’` normalisée en `'` partout (repli + n-grammes).
 
 ### Datasets (épinglés par hash → build pur)
 
@@ -91,13 +104,22 @@ P1(w)    = 0.7·Pcont(w) + 0.3·Pfreq(w)
 - Espace committe l'emoji du haut, Tab navigue. En complétion normale, un mot
   qui est exactement un mot-clé (« coeur ») propose l'emoji en fin de barre.
 
-## Échap — fermer/annuler
+## Interactions
 
-- **En composition** : Échap ferme la barre et ANNULE la suggestion — le
-  littéral tapé est committé tel quel (on ne perd jamais la frappe) et le
-  fragment n'est PAS appris (annuler ≠ valider).
-- **Barre mot-suivant** : Échap la ferme, la touche est avalée (elle n'atteint
-  pas l'application — un 2e Échap, barre fermée, passe normalement).
+- **Navigation** : Tab / ↓ entrent dans la barre par la **gauche**, ⇧Tab / ↑
+  par la **droite** ; en navigation, ←/→ se déplacent aussi et **1-6**
+  sélectionnent directement. Espace/Entrée valident le surligné.
+- **Espace** : complète/corrige (garde-fous ci-dessus) — le candidat qui sera
+  appliqué porte un **liseré accent** dans la barre ; sans marquage, Espace
+  garde le littéral. La **ponctuation** (`. , ; : ! ?`) corrige aussi
+  (« teh. » → « the. »).
+- **Backspace juste après une auto-application** : REVERT — le mot remplacé
+  est effacé, le littéral tapé revient en composition, et l'Espace suivant le
+  respecte (pas de re-correction).
+- **Échap en composition** : ferme la barre et ANNULE la suggestion — le
+  littéral est committé tel quel, rien n'est appris (annuler ≠ valider).
+- **Échap sur la barre mot-suivant** : la ferme, touche avalée (un 2ᵉ Échap,
+  barre fermée, passe normalement à l'application).
 
 ## Résultats mesurés (i5-1335U, CPU-only)
 
@@ -109,10 +131,15 @@ Harness `eval_model.py`, held-out **Leipzig news 2023** (année ≠ training,
 | mot-suivant hit@1             | 13,8 %               | 14,3 %    | **15,1 %**             |
 | mot-suivant hit@3             | 21,5 %               | 22,8 %    | **24,1 %**             |
 | mot-suivant hit@6             | 26,2 %               | 28,6 %    | **30,4 %**             |
-| complétion auto-KSR (Espace)  | 17,2 %               | 31,7 %    | **34,7 %**             |
-| complétion top3@2             | 18,3 %               | 29,1 %    | **30,5 %**             |
-| autocorrection top-1          | 83,5 %               | 89,5 %    | **91,6 %**             |
-| latence socket p50            | 80 µs                | 90 µs     | 124 µs                 |
+| complétion auto-KSR (Espace)  | 17,2 %               | 31,7 %    | **21,8 %** ¹           |
+| complétion top3@2             | 18,3 %               | 29,1 %    | **50,1 %**             |
+| autocorrection top-1          | 83,5 %               | 89,5 %    | **91,7 %**             |
+| latence socket p50            | 80 µs                | 90 µs     | ~190 µs                |
+
+¹ l'auto-KSR descend de 34,7 % (sans garde-fous) à 21,8 % : choix assumé —
+l'Espace ne remplace que quand le top domine ×2 (zéro « az »→aziz, « pcq »→pc),
+le reste se prend au Tab (un mot sur deux est dans le top-3 dès 2 lettres) et
+le revert Backspace couvre les erreurs résiduelles. Précision > agressivité.
 
 Repères production (litt.) : le 5-gram FST historique de Gboard mesurait
 13,0/22,1 % (hit@1/3), son remplaçant neural CIFG-LSTM 16,4/27,0 %. En

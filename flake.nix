@@ -70,6 +70,16 @@
         cat ${fr50k} ${en50k} \
           | awk 'NF==2 && length($1)>=2 && $1 !~ /^[0-9]+$/ { f[$1]+=$2 } END { for (w in f) print w, f[w] }' \
           | sort -k2,2nr > $out/words.tsv
+        # + lexique d'abréviations FR/EN (chat) : leur PRÉSENCE au vocabulaire
+        # (literalIsWord) les protège de l'autocorrection — « pcq » ne devient
+        # plus jamais « pc ». Fréquence modeste : visibles, pas envahissantes.
+        # (loadWords CUMULE les fréquences si le mot existe déjà.)
+        for w in pcq bcp tkt mdr ptdr jsp jpp dsl slt stp auj rdv qd qq qqn \
+                 qqch nrml askip osef oklm vrmt grv bjr bsr dak ftg wsh frr \
+                 btw imo imho idk tbh brb omg lol wtf asap fyi rn ty np thx \
+                 pls dm irl afaik ikr smh tbd eta atm fr ong icl; do
+          echo "$w 3000"
+        done >> $out/words.tsv
         echo "words.tsv: $(wc -l < $out/words.tsv) mots" >&2
 
         # 2) n-grammes Kneser-Ney — news (300K/langue) + Tatoeba conversationnel

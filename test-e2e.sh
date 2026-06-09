@@ -81,13 +81,16 @@ expect() {  # $1=libellé  $2=chaîne tapée  $3=résultat attendu
   sleep 5
   inj() { XDG_RUNTIME_DIR="$RUN" WAYLAND_DISPLAY=wayland-1 "$WTYPE" "$@" 2>>"$WT/wtype.log"; }
   inj "q"; sleep 0.3; inj -k BackSpace; sleep 0.3   # warm-up (drop focus, bug fcitx #5815)
-  # la chaîne peut contenir <ESC> → touche Échap injectée entre les segments
+  # la chaîne peut contenir <ESC> / <BS> → touches spéciales entre les segments
   local rest="$keys" seg
   while [ -n "$rest" ]; do
-    seg="${rest%%<ESC>*}"
-    [ -n "$seg" ] && inj -d 70 -- "$seg"
-    if [ "$seg" = "$rest" ]; then rest=""
-    else sleep 0.3; inj -k Escape; sleep 0.3; rest="${rest#*<ESC>}"; fi
+    case "$rest" in
+      "<ESC>"*) sleep 0.3; inj -k Escape;    sleep 0.3; rest="${rest#<ESC>}" ;;
+      "<BS>"*)  sleep 0.3; inj -k BackSpace; sleep 0.3; rest="${rest#<BS>}" ;;
+      *) seg="${rest%%<*}"
+         if [ "$seg" = "$rest" ]; then inj -d 70 -- "$rest"; rest=""
+         else [ -n "$seg" ] && inj -d 70 -- "$seg"; rest="${rest#"$seg"}"; fi ;;
+    esac
   done
   sleep 0.4; inj -k Return
   for t in $(seq 1 60); do [ -s "$res" ] && break; sleep 0.1; done
@@ -115,6 +118,9 @@ expect "emoji picker ':coeur'+espace"  ":coeur "                "❤️ "
 expect "':' nu reste littéral"         ": ok "                  ": ok "
 expect "Échap annule la suggestion"    "bonjou<ESC> ok "        "bonjou ok "
 expect "Échap ferme la barre (avalé)"  "je <ESC>vais "          "je vais "
+expect "ponctuation corrige aussi"     "teh. ok "               "the. ok "
+expect "abréviation protégée (pcq)"    "pcq "                   "pcq "
+expect "revert: Backspace défait l'auto" "vias <BS>"            "vias"
 
 echo
 [ -d /proc/$DPID ] && echo "daemon survécu (SIGPIPE OK)" || { echo "DAEMON MORT"; FAILS=$((FAILS+1)); }

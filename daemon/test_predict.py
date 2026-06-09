@@ -18,12 +18,14 @@ WORDS = {
     "le": 99000, "les": 80000, "the": 100000, "quand": 15000,
     "interesting": 2000, "internet": 2500, "développement": 1500,
     "travail": 6000, "travailler": 4000, "aujourd'hui": 7000,
+    "pc": 3000,
 }
 # Format modèle KN précalculé (cf build_ngrams.py) : probabilités interpolées
 # + poids de backoff γ par contexte + continuation unigramme.
 BIGRAMS = [("je", "veux", 0.30), ("je", "vais", 0.35), ("je", "vous", 0.12),
-           ("je", "va", 0.02), ("ne", "pas", 0.60), ("il", "faut", 0.40)]
-BIGRAMS_BO = [("je", 0.2), ("ne", 0.2), ("il", 0.3)]
+           ("je", "va", 0.02), ("ne", "pas", 0.60), ("il", "faut", 0.40),
+           ("<s>", "the", 0.50), ("<s>", "bonjour", 0.20)]
+BIGRAMS_BO = [("je", 0.2), ("ne", 0.2), ("il", 0.3), ("<s>", 0.2)]
 TRIGRAMS = [("je", "ne", "sais", 0.50), ("je", "ne", "veux", 0.12),
             ("ne", "sais", "pas", 0.70)]
 TRIGRAMS_BO = [("je", "ne", 0.3), ("ne", "sais", 0.2)]
@@ -151,6 +153,47 @@ try:
           auto("aujourd'") == "aujourd'hui", auto("aujourd'"))
     check("autocomplete: apostrophe SANS complétion → '' (garde le littéral)",
           auto("z'x") == "", repr(auto("z'x")))
+
+    # 7bis) GARDE-FOUS d'auto-application (les candidats restent affichés,
+    #       seul le remplacement automatique est bridé).
+    check("garde-fou: préfixe < 3 lettres → pas d'auto ('v')", auto("v") == "",
+          repr(auto("v")))
+    check("garde-fou: top non dominant → pas d'auto ('comm': comme vs comment)",
+          auto("comm") == "", repr(auto("comm")))
+    c = cands("comm")
+    check("garde-fou: les candidats restent listés ('comm')",
+          "comme" in c and "comment" in c, str(c))
+    check("garde-fou: dominant → auto OK ('conten' → content)",
+          auto("conten") == "content", repr(auto("conten")))
+    c = cands("pcq")
+    check("garde-fou: une faute floue ne RACCOURCIT pas ('pcq' ↛ 'pc')",
+          auto("pcq") == "" and "pc" in c, f"auto={auto('pcq')!r} cands={c}")
+    c = cands("aujourd’")
+    check("apostrophe typographique: \"aujourd’\" → aujourd'hui",
+          "aujourd'hui" in c, str(c))
+
+    # 7ter) SEUIL D'APPRENTISSAGE : un fragment committé UNE fois ne passe pas
+    #       devant le modèle ; deux fois → confiance.
+    req({"learn": {"prev": "", "word": "bonjo"}})
+    c = cands("bonj")
+    check("seuil: 1 commit de 'bonjo' → 'bonjour' reste premier",
+          c and c[0] == "bonjour", str(c))
+    req({"learn": {"prev": "", "word": "bonjo"}})
+    c = cands("bonj")
+    check("seuil: 2 commits de 'bonjo' → il passe devant",
+          c and c[0] == "bonjo", str(c))
+
+    # 7quater) FORGET : oublier un mot appris (et réécrire le journal).
+    r = req({"forget": {"word": "bonjo"}})
+    check("forget: 'bonjo' retiré", r.get("ok") and r.get("removed", 0) >= 1,
+          str(r))
+    c = cands("bonj")
+    check("forget: 'bonjour' redevient premier", c and c[0] == "bonjour", str(c))
+
+    # 7quinquies) AMORCE DE PHRASE : contexte vide → bigrammes <s>.
+    c = cands("", [])
+    check("amorce <s>: contexte vide → 'the' en tête", c and c[0] == "the",
+          str(c))
 
     # 8) EMOJI PICKER (préfixe ':') — mots-clés CLDR repliés, favoris appris.
     c = cands(":coeur")

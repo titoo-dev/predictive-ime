@@ -46,6 +46,11 @@ with open(vocabpath, encoding="utf-8") as f:
         if p and p[0] not in wid:
             wid[p[0]] = len(words)
             words.append(p[0])
+# pseudo-token de DÉBUT DE PHRASE : contexte des bigrammes d'amorce
+# ("<s>" → premier mot), jamais cible — le daemon l'utilise quand le contexte
+# est vide (début de champ, après . ! ?).
+S_ID = len(words)
+words.append("<s>")
 assert len(words) < (1 << 21), "vocab > 2M : élargir le packing"
 
 # ----------------------------------------------------------- comptage brut ---
@@ -65,6 +70,8 @@ for path in sentence_files:
             for i, w in enumerate(ids):
                 if w is None:
                     continue
+                if i == 0:
+                    bi[(S_ID << SH) | w] += 1  # amorce de phrase
                 if i >= 1 and ids[i - 1] is not None:
                     v = ids[i - 1]
                     bi[(v << SH) | w] += 1
