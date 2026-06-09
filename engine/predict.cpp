@@ -395,6 +395,34 @@ private:
   std::string text_;
 };
 
+// Liste de candidats MAISON : CommonCandidateList ABORT fcitx (FatalLog
+// « invalid label idx ») au-delà de 10 candidats (ses labels « 1. »… « 0. »
+// sont fixes) — la grille emoji en montre 24. Pas de pagination, pas de
+// labels, un curseur : exactement ce que notre UI consomme.
+class PredictCandidateList : public fcitx::CandidateList {
+public:
+  void append(std::string text, bool autoApply) {
+    cands_.push_back(
+        std::make_unique<PredictCandidate>(std::move(text), autoApply));
+  }
+  void setCursorIndex(int i) { cursor_ = i; }
+
+  const fcitx::Text &label(int) const override { return emptyLabel_; }
+  const fcitx::CandidateWord &candidate(int idx) const override {
+    return *cands_[idx];
+  }
+  int size() const override { return (int)cands_.size(); }
+  int cursorIndex() const override { return cursor_; }
+  fcitx::CandidateLayoutHint layoutHint() const override {
+    return fcitx::CandidateLayoutHint::Horizontal;
+  }
+
+private:
+  std::vector<std::unique_ptr<PredictCandidate>> cands_;
+  fcitx::Text emptyLabel_;
+  int cursor_ = -1;
+};
+
 } // namespace
 
 class PredictEngine : public fcitx::InputMethodEngineV2 {
@@ -484,13 +512,26 @@ public:
 
     // (3) Composition active (buffer non vide).
     if (!state->buffer.empty()) {
-      if (sym == FcitxKey_Tab || sym == FcitxKey_Down) {
+      // mode emoji : la barre est une GRILLE de 8 colonnes (cf panelview) →
+      // ↑/↓ sautent d'une LIGNE (±8, wrap), ←/→/Tab restent ±1.
+      int rowJump = state->buffer[0] == ':' ? 8 : 1;
+      if (sym == FcitxKey_Tab) {
         navigate(ic, state, +1);
         event.filterAndAccept();
         return;
       }
-      if (sym == FcitxKey_ISO_Left_Tab || sym == FcitxKey_Up) {
-        navigate(ic, state, -1); // ⇧Tab/↑ : entre par la DROITE de la barre
+      if (sym == FcitxKey_ISO_Left_Tab) {
+        navigate(ic, state, -1); // ⇧Tab : entre par la DROITE de la barre
+        event.filterAndAccept();
+        return;
+      }
+      if (sym == FcitxKey_Down) {
+        navigate(ic, state, +rowJump);
+        event.filterAndAccept();
+        return;
+      }
+      if (sym == FcitxKey_Up) {
+        navigate(ic, state, -rowJump);
         event.filterAndAccept();
         return;
       }
@@ -705,17 +746,18 @@ private:
     int sz = list->size();
     int next = state->navigating ? state->navIndex + dir
                                  : (dir < 0 ? sz - 1 : 0);
-    if (next < 0)
-      next = sz - 1;
-    if (next >= sz)
-      next = 0;
+    next = ((next % sz) + sz) % sz; // wrap (marche aussi pour ±8 en grille)
     state->navigating = true;
     state->navIndex = next;
-    if (auto *cl = dynamic_cast<fcitx::CommonCandidateList *>(list.get()))
-      cl->setGlobalCursorIndex(next);
-    // reflète le candidat surligné dans la préédition (mode complétion).
+    if (auto *cl = dynamic_cast<PredictCandidateList *>(list.get()))
+      cl->setCursorIndex(next);
+    // reflète le candidat surligné dans la préédition (mode complétion) —
+    // SAUF en mode emoji : le préedit reste ":requête" (le pill de la grille
+    // montre déjà la sélection, et l'UI déduit le mode grille du préfixe ':').
     if (!state->buffer.empty() && next < (int)state->cands.size()) {
-      std::string shown = applyCase(state->cands[next], state->buffer);
+      std::string shown = state->buffer[0] == ':'
+                              ? state->buffer
+                              : applyCase(state->cands[next], state->buffer);
       fcitx::Text preedit(shown, fcitx::TextFormatFlag::Underline);
       preedit.setCursor(shown.size());
       ic->inputPanel().setClientPreedit(preedit);
@@ -831,15 +873,16 @@ private:
   }
 
   void setCandidates(fcitx::InputContext *ic, PredictState *state) {
-    auto list = std::make_unique<fcitx::CommonCandidateList>();
-    list->setPageSize(6);
+    // liste maison : jusqu'à 24 candidats (grille emoji) sans la limite de
+    // 10 labels de CommonCandidateList (qui FATAL-abort fcitx au-delà).
+    auto list = std::make_unique<PredictCandidateList>();
     // le candidat que l'Espace appliquera est marqué (gras → liseré dans l'UI)
     bool willAuto = !state->buffer.empty() && !state->literalIsWord &&
                     !state->autocomplete.empty() && !state->vetoAuto;
     for (auto &w : state->cands)
-      list->append<PredictCandidate>(applyCase(w, state->buffer),
-                                     willAuto && w == state->autocomplete);
-    list->setGlobalCursorIndex(-1); // aucun surlignage tant qu'on ne navigue pas
+      list->append(applyCase(w, state->buffer),
+                   willAuto && w == state->autocomplete);
+    list->setCursorIndex(-1); // aucun surlignage tant qu'on ne navigue pas
     ic->inputPanel().setCandidateList(std::move(list));
   }
 

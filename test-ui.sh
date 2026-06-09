@@ -109,8 +109,11 @@ inj -k Escape; sleep 0.3
 for _ in 1 2 3 4 5 6; do inj -k BackSpace; sleep 0.1; done
 inj -d 60 -- "je "; sleep 3.5; shot 4-nextword.png
 
-# 5) emoji picker
+# 5) emoji : GRILLE 3×8 + navigation 2D (Tab entre, ↓ saute une LIGNE)
 inj -d 60 -- ":coeur"; sleep 3.5; shot 5-emoji.png
+inj -k Tab; sleep 3.0; shot 5b-emoji-nav.png
+inj -k Down; sleep 3.0; shot 5c-emoji-row2.png
+differ 5b-emoji-nav.png 5c-emoji-row2.png
 inj -k Escape; sleep 0.3
 
 # 7) FONDU de fermeture : Échap → barre en cours de fondu (anim ×20 = 1.8s)

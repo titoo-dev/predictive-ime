@@ -329,6 +329,7 @@ struct Model {
   std::vector<std::string> emojis_;             // eid -> glyphe
   std::unordered_map<std::string, uint32_t> emojiId_;
   std::unordered_map<std::string, uint32_t> emojiExact_; // clé exacte -> meilleur eid
+  std::vector<uint32_t> topEmojis_;             // populaires (grille ':' vide)
 
   void loadEmoji(const std::string &dir) {
     std::ifstream f(dir + "emoji.tsv");
@@ -356,6 +357,20 @@ struct Model {
               });
     for (const auto &ek : emojiKeys_)
       emojiExact_.try_emplace(ek.key, ek.eid);
+    // populaires : top par poids max (le prior de popularité Unicode est déjà
+    // dans les poids) — remplit la grille quand ':' est tapé seul.
+    std::vector<std::pair<float, uint32_t>> byW(emojis_.size(),
+                                                {0.f, 0u});
+    for (const auto &ek : emojiKeys_) {
+      byW[ek.eid].second = ek.eid;
+      if (ek.w > byW[ek.eid].first)
+        byW[ek.eid].first = ek.w;
+    }
+    std::sort(byW.begin(), byW.end(),
+              [](auto &a, auto &b) { return a.first > b.first; });
+    topEmojis_.clear();
+    for (size_t i = 0; i < byW.size() && topEmojis_.size() < 32; i++)
+      topEmojis_.push_back(byW[i].second);
     if (!emojiKeys_.empty())
       fprintf(stderr, "[predictord] %zu clés emoji, %zu emojis\n",
               emojiKeys_.size(), emojis_.size());
@@ -759,6 +774,9 @@ struct Model {
   Result predict(const std::vector<std::string> &context,
                  const std::string &prefix, int k = 6) {
     Result res;
+    // mode emoji : la barre devient une GRILLE (3×8) → 24 candidats.
+    if (!prefix.empty() && prefix[0] == ':')
+      k = 24;
     std::unordered_set<std::string> seen;
     auto push = [&](const std::string &w) {
       if ((int)res.candidates.size() < k && seen.insert(w).second)
@@ -792,11 +810,9 @@ private:
       std::sort(fav.begin(), fav.end(),
                 [](auto &a, auto &b) { return a.second > b.second; });
       for (auto &p : fav)
-        push(p.first);
-      static const char *defaults[] = {"😂", "❤️", "😊", "👍", "😭", "🙏"};
-      for (const char *d : defaults)
-        if (emojiId_.count(d))
-          push(d);
+        push(p.first); // tes favoris d'abord…
+      for (uint32_t eid : topEmojis_)
+        push(emojis_[eid]); // …puis les populaires (remplit la grille)
       return; // pas d'autocomplete : Espace après ':' garde le littéral
     }
     auto lo = std::lower_bound(

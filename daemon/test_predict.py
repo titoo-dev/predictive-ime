@@ -268,6 +268,8 @@ try:
     req({"learn": {"prev": "", "word": "⭐"}})
     c = cands(":")
     check("emoji: favoris — ':' liste ⭐ après usage", c and c[0] == "⭐", str(c))
+    check("emoji: grille — ':' remplit avec les populaires (tout le set)",
+          len(c) == 5, str(c))
     c = cands(":s")
     check("emoji: favori remonte — ':s' → ⭐ (star) avant 😊", c and c[0] == "⭐",
           str(c))

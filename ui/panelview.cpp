@@ -35,7 +35,7 @@ Item {
         y: 5 + (1 - appear) * 6        // slide-up à l'apparition
         opacity: appear
         width: row.width + 18
-        height: 34
+        height: row.height + 8         // 1 ligne = 34 ; grille emoji = 3 lignes
         radius: 11
         color: colors.surface
         border.width: 1
@@ -52,7 +52,8 @@ Item {
             color: composing ? colors.accent : colors.outline
         }
 
-        // pill de surlignage : interpole position/largeur entre les chips
+        // pill de surlignage : interpole position/taille entre les chips —
+        // en x ET en y (la grille emoji a plusieurs lignes)
         Rectangle {
             id: pill
             visible: hlPos >= 0 && rep.count > 0
@@ -63,18 +64,20 @@ Item {
             property Item b: rep.count > 0
                 ? rep.itemAt(Math.min(i0 + 1, rep.count - 1)) : null
             x: a ? row.x + a.x + (b ? (b.x - a.x) * f : 0) : 0
+            y: a ? row.y + a.y + (b ? (b.y - a.y) * f : 0) : 0
             width: a ? a.width + (b ? (b.width - a.width) * f : 0) : 0
             height: 26
             radius: 8
-            anchors.verticalCenter: parent.verticalCenter
             color: colors.accent
         }
 
-        Row {
+        Grid {
             id: row
             x: 12
             spacing: 1
             anchors.verticalCenter: parent.verticalCenter
+            // grille emoji : 8 colonnes ; sinon une seule ligne
+            columns: gridMode ? 8 : Math.max(1, rep.count)
             Repeater {
                 id: rep
                 model: candidates
@@ -85,7 +88,7 @@ Item {
                         modelData.length > 0 && modelData.codePointAt(0) > 0x2100
                     readonly property bool isAuto:
                         index < autoMark.length && autoMark[index] === true
-                    width: label.width + 16
+                    width: gridMode ? 30 : label.width + 16
                     height: 26
                     // liseré accent = « l'Espace appliquera CE candidat »
                     Rectangle {
@@ -282,6 +285,7 @@ PanelView::PanelView() {
     ctx->setContextProperty("appear", 1.0);
     ctx->setContextProperty("autoMark", QVariantList{});
     ctx->setContextProperty("composing", false);
+    ctx->setContextProperty("gridMode", false);
 
     component_ = new QQmlComponent(view_->engine());
     component_->setData(kPanelQml, QUrl());
@@ -307,7 +311,8 @@ void PanelView::setColors(const QVariantMap &colors) {
 }
 
 void PanelView::update(const QStringList &candidates, int highlight,
-                       const QVariantList &autoMark, bool composing) {
+                       const QVariantList &autoMark, bool composing,
+                       bool grid) {
     auto now = Clock::now();
     hiding_ = false; // un nouveau contenu annule un fondu de fermeture en cours
     if (!shown_) {
@@ -325,6 +330,7 @@ void PanelView::update(const QStringList &candidates, int highlight,
     cands_ = candidates;
     highlight_ = highlight;
     autoMark_ = autoMark;
+    grid_ = grid;
 }
 
 bool PanelView::startHide() {
@@ -376,6 +382,7 @@ QImage PanelView::render() {
                             hiding_ ? hide_.at(now) : appear_.at(now));
     ctx->setContextProperty("autoMark", autoMark_);
     ctx->setContextProperty("composing", composing_);
+    ctx->setContextProperty("gridMode", grid_);
     QCoreApplication::processEvents(); // laisse bindings + resize se résoudre
     QImage img = view_->grabWindow();
     return img.convertToFormat(QImage::Format_ARGB32_Premultiplied);

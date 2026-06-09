@@ -173,8 +173,10 @@ private:
                 autoMark << bold;
             }
         }
-        bool composing = !ic->inputPanel().clientPreedit().toString().empty();
-        view_->update(cands, highlight, autoMark, composing);
+        std::string pre = ic->inputPanel().clientPreedit().toString();
+        bool composing = !pre.empty();
+        bool grid = !pre.empty() && pre[0] == ':'; // mode emoji → grille
+        view_->update(cands, highlight, autoMark, composing, grid);
         if (!renderFrame())
             return;
         mapped_ = true;

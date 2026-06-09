@@ -40,7 +40,8 @@ public:
     // candidat i sera appliqué par l'Espace (liseré accent) ; `composing` :
     // un mot est en cours (indicateur de mode).
     void update(const QStringList &candidates, int highlight,
-                const QVariantList &autoMark = {}, bool composing = false);
+                const QVariantList &autoMark = {}, bool composing = false,
+                bool grid = false);
     // Démarre le FONDU de fermeture ; false si la barre n'était pas visible.
     // Pendant le fondu, animating() reste vrai ; à la fin hideDone() == true
     // et l'appelant démappe la surface.
@@ -77,4 +78,5 @@ private:
     QStringList cands_;
     QVariantList autoMark_;   // candidat appliqué par l'Espace (par index)
     bool composing_ = false;  // mot en cours (indicateur de mode)
+    bool grid_ = false;       // mode emoji : grille 8 colonnes
 };
