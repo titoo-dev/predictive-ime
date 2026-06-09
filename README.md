@@ -147,8 +147,36 @@ Couleurs : automatiques depuis DMS/matugen (`dms-colors.json`, clés `primary`/
 
 Test visuel headless (screenshot grim, sans toucher la session) : `/tmp/ime-ui1.sh`.
 
-## Activer (quand on passera au test live)
+## Activation sur NixOS (flake input)
 
-Dans la config système : importer `nixosModules.default` du flake + s'assurer
-de `i18n.inputMethod.type = "fcitx5"`. Le module ajoute l'addon à
-`i18n.inputMethod.fcitx5.addons` et lance `predictord` en service utilisateur.
+`nixosModules.default` est **turn-key** : l'importer câble tout (fcitx5 patché +
+addons engine/UI + daemon + profil sûr).
+
+```nix
+# flake.nix
+inputs.predictive-ime = {
+  url = "github:titoo-dev/predictive-ime";
+  inputs.nixpkgs.follows = "nixpkgs";   # IMPÉRATIF : ABI fcitx5/Qt partagé
+};
+
+# dans les modules de l'hôte
+inputs.predictive-ime.nixosModules.default
+```
+
+Sur un WM nu (Hyprland…), lance fcitx5 toi-même pour choisir l'UI QML :
+
+```lua
+hl.exec_cmd("fcitx5 -d --ui qmlpanel")   -- dans hyprland.start
+```
+
+### Sûreté clavier (par défaut)
+
+- `i18n.inputMethod.fcitx5.waylandFrontend = true` → **ne force pas**
+  `GTK_IM_MODULE`/`QT_IM_MODULE`. Si fcitx est absent/planté, les apps reçoivent
+  les touches brutes (text-input-v3) → **jamais de clavier bloqué**.
+- Profil par défaut = **clavier** ; la prédiction (+ barre QML) est en **opt-in
+  via Ctrl+Espace**. Pour l'avoir d'office : `DefaultIM = "predict"` dans
+  `settings.inputMethod` du module.
+- Réversible : retirer l'import du module.
+
+Après `nixos-rebuild switch`, **relogin** (pour l'autostart + l'env), puis teste.
