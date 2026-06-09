@@ -19,20 +19,42 @@ WORDS = {
     "interesting": 2000, "internet": 2500, "développement": 1500,
     "travail": 6000, "travailler": 4000, "aujourd'hui": 7000,
 }
-BIGRAMS = [("je", "veux", 800), ("je", "vais", 900), ("je", "vous", 300),
-           ("je", "va", 50), ("ne", "pas", 5000), ("il", "faut", 400)]
-TRIGRAMS = [("je", "ne", "sais", 200), ("je", "ne", "veux", 50),
-            ("ne", "sais", "pas", 300)]
+# Format modèle KN précalculé (cf build_ngrams.py) : probabilités interpolées
+# + poids de backoff γ par contexte + continuation unigramme.
+BIGRAMS = [("je", "veux", 0.30), ("je", "vais", 0.35), ("je", "vous", 0.12),
+           ("je", "va", 0.02), ("ne", "pas", 0.60), ("il", "faut", 0.40)]
+BIGRAMS_BO = [("je", 0.2), ("ne", 0.2), ("il", 0.3)]
+TRIGRAMS = [("je", "ne", "sais", 0.50), ("je", "ne", "veux", 0.12),
+            ("ne", "sais", "pas", 0.70)]
+TRIGRAMS_BO = [("je", "ne", 0.3), ("ne", "sais", 0.2)]
 
 with open(f"{tmp}/words.tsv", "w", encoding="utf-8") as f:
     for w, c in WORDS.items():
         f.write(f"{w} {c}\n")
 with open(f"{tmp}/bigrams.tsv", "w", encoding="utf-8") as f:
-    for a, b, c in BIGRAMS:
-        f.write(f"{a}\t{b}\t{c}\n")
+    for a, b, p in BIGRAMS:
+        f.write(f"{a}\t{b}\t{p}\n")
+with open(f"{tmp}/bigrams.bo.tsv", "w", encoding="utf-8") as f:
+    for a, g in BIGRAMS_BO:
+        f.write(f"{a}\t{g}\n")
 with open(f"{tmp}/trigrams.tsv", "w", encoding="utf-8") as f:
-    for a, b, d, c in TRIGRAMS:
-        f.write(f"{a}\t{b}\t{d}\t{c}\n")
+    for a, b, d, p in TRIGRAMS:
+        f.write(f"{a}\t{b}\t{d}\t{p}\n")
+with open(f"{tmp}/trigrams.bo.tsv", "w", encoding="utf-8") as f:
+    for a, b, g in TRIGRAMS_BO:
+        f.write(f"{a}\t{b}\t{g}\n")
+with open(f"{tmp}/pcont.tsv", "w", encoding="utf-8") as f:
+    tot = sum(WORDS.values())
+    for w, c in WORDS.items():
+        f.write(f"{w}\t{c / tot:.6g}\n")
+
+# Index emoji (clé repliée -> emoji, poids), cf build_emoji.py.
+EMOJI = [("coeur", "❤️", 3), ("heart", "❤️", 3), ("etoile", "⭐", 3),
+         ("star", "⭐", 3), ("sourire", "😊", 3), ("souris", "🐭", 3),
+         ("feu", "🔥", 3), ("fire", "🔥", 3)]
+with open(f"{tmp}/emoji.tsv", "w", encoding="utf-8") as f:
+    for k, e, w in EMOJI:
+        f.write(f"{k}\t{e}\t{w}\n")
 
 env = dict(os.environ, XDG_DATA_HOME=f"{tmp}/xdg")
 proc = subprocess.Popen([BIN, f"{tmp}/words.tsv", sock], env=env)
@@ -130,7 +152,30 @@ try:
     check("autocomplete: apostrophe SANS complétion → '' (garde le littéral)",
           auto("z'x") == "", repr(auto("z'x")))
 
-    # 8) ROBUSTESSE SIGPIPE : l'engine envoie "learn" en fire-and-forget (écrit
+    # 8) EMOJI PICKER (préfixe ':') — mots-clés CLDR repliés, favoris appris.
+    c = cands(":coeur")
+    check("emoji: ':coeur' → ❤️ en tête", c and c[0] == "❤️", str(c))
+    check("emoji: autocomplete ':coeur' → ❤️ (Espace committe l'emoji)",
+          auto(":coeur") == "❤️", auto(":coeur"))
+    c = cands(":cœur")
+    check("emoji: ':cœur' (ligature) → ❤️", "❤️" in c, str(c))
+    c = cands(":sour")
+    check("emoji: préfixe ':sour' → sourire ET souris", "😊" in c and "🐭" in c,
+          str(c))
+    check("emoji: ':' seul → pas d'autocomplete (Espace garde le littéral)",
+          auto(":") == "", repr(auto(":")))
+    req({"learn": {"prev": "", "word": "⭐"}})
+    req({"learn": {"prev": "", "word": "⭐"}})
+    c = cands(":")
+    check("emoji: favoris — ':' liste ⭐ après usage", c and c[0] == "⭐", str(c))
+    c = cands(":s")
+    check("emoji: favori remonte — ':s' → ⭐ (star) avant 😊", c and c[0] == "⭐",
+          str(c))
+    c = cands("coeur")
+    check("emoji: hint — 'coeur' (mot normal) propose ❤️ en fin de barre",
+          "❤️" in c, str(c))
+
+    # 9) ROBUSTESSE SIGPIPE : l'engine envoie "learn" en fire-and-forget (écrit
     #    puis ferme SANS lire la réponse). Sans SIG_IGN, le write du daemon sur
     #    le socket fermé lèverait SIGPIPE et TUERAIT le daemon — les prédictions
     #    mourraient après quelques mots. On simule 200 commits et on vérifie que

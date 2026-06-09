@@ -3,17 +3,19 @@
 // Découplé de l'addon fcitx5 : écoute sur un socket Unix, reçoit une requête
 // JSON (préfixe en cours + contexte de mots), renvoie une liste de candidats.
 //
-// Cerveau v2 — robustesse type Gboard/SwiftKey, toujours CPU-only :
+// Cerveau v3 — modèle KNESER-NEY INTERPOLÉ précalculé (cf build_ngrams.py),
+// toujours CPU-only et en lookups O(1) :
+//   - mot-suivant et complétion scorés par P_KN(w | u,v) avec repli exact :
+//       P(w|u,v) = p3(uvw) stocké, sinon γ3(uv)·P(w|v)
+//       P(w|v)   = p2(vw) stocké,  sinon γ2(v)·P1(w)
+//       P1(w)    = mélange continuation KN + fréquence brute (couverture)
 //   - repli ACCENT-INSENSIBLE : tu tapes "francais"/"etre" → "français"/"être".
-//   - AUTOCORRECTION floue (edit-distance 1 : transposition, suppression,
-//     substitution par adjacence clavier AZERTY) quand le préfixe exact ne
-//     donne rien : "bonjuor" → "bonjour", "qaund" → "quand".
-//   - complétion RE-CLASSÉE par le contexte (P(mot|précédent) du bigramme) :
-//     "je v…" remonte "veux/vais" avant "vous/va".
-//   - MOT-SUIVANT en trigramme + stupid-backoff → bigramme → modèle de base,
-//     l'apprentissage utilisateur passant toujours devant.
-//   - signale `literalIsWord` : l'engine n'écrase un mot réellement tapé que sur
-//     sélection explicite (jamais d'autocorrection d'un mot déjà valide).
+//   - AUTOCORRECTION en NOISY-CHANNEL : P(mot|ctx)·P(faute|mot), le canal
+//     pondéré par type de faute (transposition > voisin AZERTY > lettre en
+//     trop) — plus de pénalité plate arbitraire.
+//   - apprentissage utilisateur prioritaire + persistant.
+//   - signale `literalIsWord` : l'engine n'écrase un mot réellement tapé que
+//     sur sélection explicite (jamais d'autocorrection d'un mot déjà valide).
 //
 // Protocole (une ligne JSON par message, '\n' terminé) :
 //   <- {"context":["je"],"prefix":"v"}
@@ -21,12 +23,14 @@
 //   <- {"learn":{"prev":"je","word":"code"}}    -> {"ok":true}
 //
 // Run: predictord <words.tsv> [socket]
-//   un 'bigrams.tsv' et un 'trigrams.tsv' voisins sont chargés s'ils existent.
+//   fichiers voisins chargés s'ils existent : bigrams.tsv, bigrams.bo.tsv,
+//   trigrams.tsv, trigrams.bo.tsv, pcont.tsv (format build_ngrams.py).
 #include <algorithm>
 #include <array>
 #include <csignal>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <functional>
@@ -191,20 +195,27 @@ struct Model {
   std::vector<uint32_t> byFold;   // indices triés par forme repliée
   std::unordered_set<std::string> caseWords; // mots en minuscule, accents gardés
   std::unordered_map<std::string, uint32_t> id_;
+  double freqTot_ = 1.0; // Σ freq (P1, mélange unigramme)
 
-  // mot précédent -> (idx du mot suivant, count) ; + total par contexte
-  std::unordered_map<std::string, std::vector<std::pair<uint32_t, uint32_t>>>
-      bigram;
-  std::unordered_map<std::string, uint64_t> bigramTot;
-  // "w1\x01w2" -> (idx du mot suivant, count) ; + total par contexte
-  std::unordered_map<std::string, std::vector<std::pair<uint32_t, uint32_t>>>
-      trigram;
-  std::unordered_map<std::string, uint64_t> trigramTot;
+  // Modèle KN précalculé. Identifiants 21 bits → clés compactées.
+  static constexpr int SH = 21;
+  // v -> [(w, P_KN(w|v))] ; (u<<21|v) -> [(w, P_KN(w|u,v))]
+  std::unordered_map<uint32_t, std::vector<std::pair<uint32_t, float>>> biAdj;
+  std::unordered_map<uint64_t, std::vector<std::pair<uint32_t, float>>> triAdj;
+  std::unordered_map<uint32_t, float> biBo;  // γ2(v)
+  std::unordered_map<uint64_t, float> triBo; // γ3(u,v)
+  std::vector<float> pcont;                  // P_continuation(w) (KN)
+  std::vector<uint32_t> topUni_;             // top mots par P1 (pool de repli)
 
   // pondérations
-  static constexpr double CTX_LAMBDA = 0.5;     // part du contexte dans la complétion
-  static constexpr double FUZZY_PENALTY = 0.08; // pénalité d'une correction floue
-  static constexpr double BO_BIGRAM = 0.4;      // stupid-backoff trigramme→bigramme
+  // P1(w) : mélange continuation KN / fréquence brute. La continuation est le
+  // bon prior de KN, la fréquence (OpenSubtitles, conversationnel) couvre les
+  // mots absents du corpus n-gram.
+  static constexpr double UNI_MIX = 0.7;
+  // Canal de faute (noisy channel) : P(frappe|mot) par type d'opération.
+  static constexpr double CH_TRANSPOSE = 0.12; // inversion de 2 lettres
+  static constexpr double CH_SUBST = 0.10;     // voisin AZERTY
+  static constexpr double CH_EXTRA = 0.07;     // lettre en trop
 
   uint32_t intern(const std::string &w) {
     auto it = id_.find(w);
@@ -238,42 +249,104 @@ struct Model {
             n);
   }
 
-  // Bigrammes : "mot1<TAB>mot2<TAB>count".
-  void loadBigrams(const std::string &path) {
-    std::ifstream f(path);
-    if (!f)
-      return;
+  // Bigrammes KN : "v<TAB>w<TAB>p". Backoff : "v<TAB>γ".
+  void loadBigrams(const std::string &dir) {
+    std::ifstream f(dir + "bigrams.tsv");
     std::string a, b;
-    uint64_t c;
+    double p;
     size_t n = 0;
-    while (f >> a >> b >> c) {
-      bigram[a].push_back({intern(b), uint32_t(c)});
-      bigramTot[a] += c;
+    while (f >> a >> b >> p) {
+      biAdj[intern(a)].push_back({intern(b), float(p)});
       n++;
     }
-    fprintf(stderr, "[predictord] %zu bigrammes, %zu contextes\n", n,
-            bigram.size());
+    std::ifstream g(dir + "bigrams.bo.tsv");
+    while (g >> a >> p)
+      biBo[intern(a)] = float(p);
+    if (n)
+      fprintf(stderr, "[predictord] %zu bigrammes KN, %zu contextes (γ:%zu)\n",
+              n, biAdj.size(), biBo.size());
   }
 
-  // Trigrammes : "mot1<TAB>mot2<TAB>mot3<TAB>count".
-  void loadTrigrams(const std::string &path) {
-    std::ifstream f(path);
+  // Trigrammes KN : "u<TAB>v<TAB>w<TAB>p". Backoff : "u<TAB>v<TAB>γ".
+  void loadTrigrams(const std::string &dir) {
+    std::ifstream f(dir + "trigrams.tsv");
+    std::string a, b, d;
+    double p;
+    size_t n = 0;
+    while (f >> a >> b >> d >> p) {
+      uint64_t key = (uint64_t(intern(a)) << SH) | intern(b);
+      triAdj[key].push_back({intern(d), float(p)});
+      n++;
+    }
+    std::ifstream g(dir + "trigrams.bo.tsv");
+    while (g >> a >> b >> p)
+      triBo[(uint64_t(intern(a)) << SH) | intern(b)] = float(p);
+    if (n)
+      fprintf(stderr, "[predictord] %zu trigrammes KN, %zu contextes (γ:%zu)\n",
+              n, triAdj.size(), triBo.size());
+  }
+
+  // --- Emoji (picker ':' + suggestion par mot-clé exact) ---
+  // emoji.tsv : "clé<TAB>emoji<TAB>poids", clé déjà repliée (build_emoji.py).
+  struct EmojiKey {
+    std::string key;
+    uint32_t eid;
+    float w;
+  };
+  std::vector<EmojiKey> emojiKeys_;             // trié par clé (recherche préfixe)
+  std::vector<std::string> emojis_;             // eid -> glyphe
+  std::unordered_map<std::string, uint32_t> emojiId_;
+  std::unordered_map<std::string, uint32_t> emojiExact_; // clé exacte -> meilleur eid
+
+  void loadEmoji(const std::string &dir) {
+    std::ifstream f(dir + "emoji.tsv");
     if (!f)
       return;
-    std::string a, b, d;
-    uint64_t c;
-    size_t n = 0;
-    while (f >> a >> b >> d >> c) {
-      std::string key = a + '\x01' + b;
-      trigram[key].push_back({intern(d), uint32_t(c)});
-      trigramTot[key] += c;
-      n++;
+    std::string line;
+    while (std::getline(f, line)) {
+      size_t t1 = line.find('\t');
+      size_t t2 = t1 == std::string::npos ? t1 : line.find('\t', t1 + 1);
+      if (t2 == std::string::npos)
+        continue;
+      std::string key = line.substr(0, t1);
+      std::string emo = line.substr(t1 + 1, t2 - t1 - 1);
+      float w = strtof(line.c_str() + t2 + 1, nullptr);
+      auto [it, fresh] = emojiId_.try_emplace(emo, emojis_.size());
+      if (fresh)
+        emojis_.push_back(emo);
+      emojiKeys_.push_back({std::move(key), it->second, w});
     }
-    fprintf(stderr, "[predictord] %zu trigrammes, %zu contextes\n", n,
-            trigram.size());
+    // tri (clé, poids desc) : la 1re occurrence d'une clé est la meilleure →
+    // emojiExact_ retient l'emoji canonique de chaque mot-clé.
+    std::sort(emojiKeys_.begin(), emojiKeys_.end(),
+              [](const EmojiKey &a, const EmojiKey &b) {
+                return a.key != b.key ? a.key < b.key : a.w > b.w;
+              });
+    for (const auto &ek : emojiKeys_)
+      emojiExact_.try_emplace(ek.key, ek.eid);
+    if (!emojiKeys_.empty())
+      fprintf(stderr, "[predictord] %zu clés emoji, %zu emojis\n",
+              emojiKeys_.size(), emojis_.size());
   }
 
-  // À appeler une fois tous les mots internés : calcule le repli + index trié.
+  // Continuation unigramme : "w<TAB>Pcont".
+  void loadPcont(const std::string &dir) {
+    std::ifstream f(dir + "pcont.tsv");
+    std::string a;
+    double p;
+    size_t n = 0;
+    while (f >> a >> p) {
+      uint32_t wid = intern(a);
+      if (wid >= pcont.size())
+        pcont.resize(wid + 1, 0.f);
+      pcont[wid] = float(p);
+      n++;
+    }
+    if (n)
+      fprintf(stderr, "[predictord] %zu Pcont chargés\n", n);
+  }
+
+  // À appeler une fois tous les mots internés : repli + index trié + priors.
   void finalize() {
     fold.resize(words.size());
     caseWords.reserve(words.size());
@@ -286,6 +359,19 @@ struct Model {
       byFold[i] = i;
     std::sort(byFold.begin(), byFold.end(),
               [&](uint32_t a, uint32_t b) { return fold[a] < fold[b]; });
+    pcont.resize(words.size(), 0.f);
+    freqTot_ = 1.0;
+    for (uint32_t fr : freq)
+      freqTot_ += fr;
+    // pool de repli mot-suivant : les ~64 meilleurs mots par P1 (si le contexte
+    // est inconnu du modèle, on propose au moins les mots les plus probables).
+    topUni_.resize(words.size());
+    for (uint32_t i = 0; i < words.size(); i++)
+      topUni_[i] = i;
+    size_t kk = std::min<size_t>(64, topUni_.size());
+    std::partial_sort(topUni_.begin(), topUni_.begin() + kk, topUni_.end(),
+                      [&](uint32_t a, uint32_t b) { return p1(a) > p1(b); });
+    topUni_.resize(kk);
   }
 
   // --- Apprentissage utilisateur (persistant) ---
@@ -340,6 +426,76 @@ struct Model {
     return {lo, hi};
   }
 
+  // ------------------------------------------------------------- scoring ---
+  // P1(w) : prior unigramme = mélange continuation KN + fréquence brute.
+  double p1(uint32_t w) const {
+    double pc = w < pcont.size() ? pcont[w] : 0.0;
+    double pf = (double(freq[w]) + 1.0) / freqTot_;
+    return UNI_MIX * pc + (1.0 - UNI_MIX) * pf;
+  }
+
+  // Évaluateur P_KN(w | contexte) pour UNE requête : les listes de suiveurs du
+  // contexte sont indexées une fois, puis chaque candidat coûte O(1).
+  struct CtxScorer {
+    const Model *m = nullptr;
+    std::unordered_map<uint32_t, float> bi, tri;
+    double g2 = 1.0, g3 = 1.0;
+    bool hasV = false, hasUV = false;
+
+    void init(const Model &model, const std::vector<std::string> &context) {
+      m = &model;
+      if (context.empty())
+        return;
+      auto vIt = m->id_.find(lowerKeep(context.back()));
+      if (vIt != m->id_.end()) {
+        uint32_t v = vIt->second;
+        auto a = m->biAdj.find(v);
+        if (a != m->biAdj.end()) {
+          hasV = true;
+          bi.reserve(a->second.size() * 2);
+          for (auto &pr : a->second)
+            bi[pr.first] = pr.second;
+        }
+        auto bo = m->biBo.find(v);
+        if (bo != m->biBo.end())
+          g2 = bo->second;
+        if (context.size() >= 2) {
+          auto uIt = m->id_.find(lowerKeep(context[context.size() - 2]));
+          if (uIt != m->id_.end()) {
+            uint64_t key = (uint64_t(uIt->second) << SH) | v;
+            auto t = m->triAdj.find(key);
+            if (t != m->triAdj.end()) {
+              hasUV = true;
+              tri.reserve(t->second.size() * 2);
+              for (auto &pr : t->second)
+                tri[pr.first] = pr.second;
+            }
+            auto tbo = m->triBo.find(key);
+            if (tbo != m->triBo.end())
+              g3 = tbo->second;
+          }
+        }
+      }
+    }
+
+    double pBi(uint32_t w) const {
+      if (hasV) {
+        auto it = bi.find(w);
+        if (it != bi.end())
+          return it->second;
+      }
+      return g2 * m->p1(w);
+    }
+    double operator()(uint32_t w) const {
+      if (hasUV) {
+        auto it = tri.find(w);
+        if (it != tri.end())
+          return it->second;
+      }
+      return (hasUV ? g3 : 1.0) * pBi(w);
+    }
+  };
+
   // ----------------------------------------------------------- prédiction ---
   Result predict(const std::vector<std::string> &context,
                  const std::string &prefix, int k = 6) {
@@ -350,7 +506,9 @@ struct Model {
         res.candidates.push_back(w);
     };
 
-    if (!prefix.empty())
+    if (!prefix.empty() && prefix[0] == ':')
+      emojiSearch(prefix.substr(1), k, push, res);
+    else if (!prefix.empty())
       completePrefix(context, prefix, k, push, res);
     else
       predictNext(context, k, push);
@@ -358,6 +516,55 @@ struct Model {
   }
 
 private:
+  // Picker emoji (préfixe ':') : recherche par mot-clé CLDR (FR+EN, replié).
+  // ":"     → favoris de l'utilisateur (usage appris), sinon sélection courante.
+  // ":cœur" → ❤️ … classement : poids CLDR, bonus match exact, malus clé
+  // longue, et les emojis déjà utilisés remontent fortement.
+  template <class Push>
+  void emojiSearch(const std::string &rawQuery, int k, Push &&push,
+                   Result &res) {
+    res.literalIsWord = false;
+    const std::string q = foldStr(rawQuery);
+    if (q.empty()) {
+      std::vector<std::pair<std::string, uint64_t>> fav;
+      for (auto &kv : userUni)
+        if (emojiId_.count(kv.first))
+          fav.push_back({kv.first, kv.second});
+      std::sort(fav.begin(), fav.end(),
+                [](auto &a, auto &b) { return a.second > b.second; });
+      for (auto &p : fav)
+        push(p.first);
+      static const char *defaults[] = {"😂", "❤️", "😊", "👍", "😭", "🙏"};
+      for (const char *d : defaults)
+        if (emojiId_.count(d))
+          push(d);
+      return; // pas d'autocomplete : Espace après ':' garde le littéral
+    }
+    auto lo = std::lower_bound(
+        emojiKeys_.begin(), emojiKeys_.end(), q,
+        [](const EmojiKey &a, const std::string &p) { return a.key < p; });
+    std::unordered_map<uint32_t, double> bestPer;
+    for (auto it = lo;
+         it != emojiKeys_.end() && it->key.compare(0, q.size(), q) == 0; ++it) {
+      double s = it->w + (it->key.size() == q.size() ? 2.0 : 0.0) -
+                 0.05 * double(it->key.size() - q.size());
+      auto u = userUni.find(emojis_[it->eid]);
+      if (u != userUni.end())
+        s += 10.0 + double(u->second);
+      auto [b, fresh] = bestPer.try_emplace(it->eid, s);
+      if (!fresh && s > b->second)
+        b->second = s;
+    }
+    std::vector<std::pair<uint32_t, double>> v(bestPer.begin(), bestPer.end());
+    size_t kk = std::min<size_t>(size_t(k), v.size());
+    std::partial_sort(v.begin(), v.begin() + kk, v.end(),
+                      [](auto &a, auto &b) { return a.second > b.second; });
+    for (size_t i = 0; i < kk; i++)
+      push(emojis_[v[i].first]);
+    if (!res.candidates.empty())
+      res.autocomplete = res.candidates.front(); // ":coeur"+Espace → ❤️
+  }
+
   template <class Push>
   void completePrefix(const std::vector<std::string> &context,
                       const std::string &prefix, int k, Push &&push,
@@ -370,45 +577,25 @@ private:
     //     ou auto-accentuer (ex. "etre"→être quand "etre" n'est pas au dico).
     res.literalIsWord = caseWords.count(lowerKeep(prefix)) > 0;
 
-    // contexte : comptes du bigramme P(mot | mot précédent).
-    std::unordered_map<uint32_t, uint32_t> bg;
-    double bgTot = 0;
-    if (!context.empty()) {
-      std::string prev = lowerKeep(context.back());
-      auto bi = bigram.find(prev);
-      if (bi != bigram.end()) {
-        for (auto &pr : bi->second)
-          bg[pr.first] = pr.second;
-        bgTot = double(bigramTot[prev]);
-      }
-    }
+    CtxScorer ctxScore;
+    ctxScore.init(*this, context);
+    bool hasCtx = ctxScore.hasV || ctxScore.hasUV;
 
-    // somme des fréquences des correspondances exactes → P(mot | préfixe).
-    double totFreq = 0;
-    for (auto it = lo; it != hi; ++it)
-      totFreq += double(freq[*it]) + 1.0;
-    if (totFreq <= 0)
-      totFreq = 1.0;
-
-    // Score interpolé (façon clavier) : λ·P(mot|contexte) + (1-λ)·P(mot|préfixe).
-    // Le contexte pèse autant que la fréquence brute, donc "je v…" remonte
-    // "vais/veux" même si "va/vous" sont globalement plus fréquents.
+    // Score d'un candidat : P_KN(w|ctx) si on a du contexte, sinon le prior
+    // P(w|préfixe) ∝ fréquence (en début de phrase la fréquence brute est le
+    // bon prior, la « continuation » KN n'a pas de sens sans contexte).
     auto scoreOf = [&](uint32_t wid) -> double {
-      double puni = (double(freq[wid]) + 1.0) / totFreq;
-      double pctx = 0.0;
-      if (bgTot > 0) {
-        auto c = bg.find(wid);
-        if (c != bg.end())
-          pctx = double(c->second) / bgTot;
-      }
-      return CTX_LAMBDA * pctx + (1.0 - CTX_LAMBDA) * puni;
+      return hasCtx ? ctxScore(wid) : (double(freq[wid]) + 1.0) / freqTot_;
     };
 
     std::vector<std::pair<std::string, double>> ranked;
-    std::unordered_set<std::string> have;
+    std::unordered_map<std::string, size_t> have;
     auto offer = [&](const std::string &w, double s) {
-      if (have.insert(w).second)
+      auto [it, fresh] = have.try_emplace(w, ranked.size());
+      if (fresh)
         ranked.push_back({w, s});
+      else if (s > ranked[it->second].second)
+        ranked[it->second].second = s; // même mot via 2 fautes → la + probable
     };
 
     // (1) mots APPRIS dont le repli commence par le préfixe → priorité absolue.
@@ -421,7 +608,7 @@ private:
     for (auto it = lo; it != hi; ++it, ++exact)
       offer(words[*it], scoreOf(*it));
 
-    // (3) autocorrection floue (edit-distance 1) si l'exact est maigre.
+    // (3) autocorrection noisy-channel (edit-distance 1) si l'exact est maigre.
     if (exact < size_t(k))
       fuzzyComplete(fp, scoreOf, offer);
 
@@ -443,20 +630,36 @@ private:
       if (topIsPrefix || !fpHasPunct)
         res.autocomplete = top;
     }
+
+    // Suggestion emoji : le mot tapé est exactement un mot-clé emoji
+    // ("coeur", "fire"…) → l'emoji s'ajoute en DERNIÈRE position (jamais en
+    // tête, jamais auto-appliqué — il faut le choisir explicitement).
+    if (fp.size() >= 3) {
+      auto e = emojiExact_.find(fp);
+      if (e != emojiExact_.end()) {
+        const std::string &emo = emojis_[e->second];
+        if ((int)res.candidates.size() >= k)
+          res.candidates.back() = emo;
+        else
+          res.candidates.push_back(emo);
+      }
+    }
   }
 
-  // Génère les variantes du préfixe à distance d'édition 1 (transposition,
-  // suppression, substitution clavier) et y ajoute les complétions exactes,
-  // pénalisées — pour ne sortir que faute de mieux.
+  // Canal de faute : génère les variantes du préfixe à distance d'édition 1 et
+  // garde le POIDS du type d'opération — score final = P(w|ctx)·P(frappe|w).
   template <class Score, class Offer>
   void fuzzyComplete(const std::string &fp, Score &&score, Offer &&offer) {
     size_t L = fp.size();
     if (L < 3 || L > 14)
       return;
-    std::unordered_set<std::string> variants;
-    auto addv = [&](const std::string &v) {
-      if (v.size() >= 2 && v != fp)
-        variants.insert(v);
+    std::unordered_map<std::string, double> variants; // variante -> poids canal
+    auto addv = [&](const std::string &v, double ch) {
+      if (v.size() >= 2 && v != fp) {
+        auto [it, fresh] = variants.try_emplace(v, ch);
+        if (!fresh && ch > it->second)
+          it->second = ch; // plusieurs fautes mènent ici → garde la + probable
+      }
     };
     auto punct = [](char c) { return c == '\'' || c == '-'; };
     for (size_t i = 0; i + 1 < L; i++) { // transpositions (jamais autour d'un '/-)
@@ -464,14 +667,14 @@ private:
         continue;
       std::string v = fp;
       std::swap(v[i], v[i + 1]);
-      addv(v);
+      addv(v, CH_TRANSPOSE);
     }
     for (size_t i = 0; i < L; i++) { // suppressions (lettre en trop, pas un '/-)
       if (punct(fp[i]))
         continue;
       std::string v = fp;
       v.erase(i, 1);
-      addv(v);
+      addv(v, CH_EXTRA);
     }
     const auto &adj = azerty(); // substitutions par adjacence
     for (size_t i = 0; i < L; i++) {
@@ -481,10 +684,10 @@ private:
       for (char nb : it->second) {
         std::string v = fp;
         v[i] = nb;
-        addv(v);
+        addv(v, CH_SUBST);
       }
     }
-    for (const auto &v : variants) {
+    for (const auto &[v, ch] : variants) {
       auto [lo, hi] = foldedPrefixRange(v);
       // top-3 par variante suffisent (on ne veut pas noyer les exacts)
       std::vector<std::pair<uint32_t, double>> tops;
@@ -495,12 +698,13 @@ private:
           tops.end(), [](auto &a, auto &b) { return a.second > b.second; });
       size_t kk = std::min<size_t>(3, tops.size());
       for (size_t i = 0; i < kk; i++)
-        offer(words[tops[i].first], tops[i].second * FUZZY_PENALTY);
+        offer(words[tops[i].first], tops[i].second * ch);
     }
   }
 
-  // Mot-suivant : trigramme (w1 w2) + stupid-backoff vers le bigramme (w2),
-  // l'apprentissage utilisateur étant placé devant.
+  // Mot-suivant : P_KN(w|u,v) sur l'union des suiveurs observés (trigramme +
+  // bigramme) + le pool des meilleurs P1 (contexte inconnu → mots probables).
+  // L'apprentissage utilisateur passe toujours devant.
   template <class Push>
   void predictNext(const std::vector<std::string> &context, int k,
                    Push &&push) {
@@ -519,28 +723,22 @@ private:
         push(p.first);
     }
 
-    // (2) modèle : stupid-backoff sur PROBABILITÉS (un bigramme fréquent ne doit
-    //     pas écraser un bon trigramme) — P(mot|w1 w2), repli 0.4·P(mot|w2).
-    std::unordered_map<uint32_t, double> agg;
-    if (context.size() >= 2) {
-      std::string key = lowerKeep(context[context.size() - 2]) + '\x01' + prev;
-      auto t = trigram.find(key);
-      if (t != trigram.end()) {
-        double tot = double(trigramTot[key]);
-        if (tot > 0)
-          for (auto &pr : t->second)
-            agg[pr.first] += double(pr.second) / tot;
-      }
-    }
-    auto b = bigram.find(prev);
-    if (b != bigram.end()) {
-      double tot = double(bigramTot[prev]);
-      if (tot > 0)
-        for (auto &pr : b->second)
-          agg[pr.first] += BO_BIGRAM * (double(pr.second) / tot);
-    }
+    // (2) modèle : score exact P_KN(w|ctx) sur le pool de candidats.
+    CtxScorer ctxScore;
+    ctxScore.init(*this, context);
+    std::unordered_set<uint32_t> pool;
+    for (auto &pr : ctxScore.tri)
+      pool.insert(pr.first);
+    for (auto &pr : ctxScore.bi)
+      pool.insert(pr.first);
+    if (pool.size() < size_t(k))
+      for (uint32_t w : topUni_)
+        pool.insert(w);
 
-    std::vector<std::pair<uint32_t, double>> v(agg.begin(), agg.end());
+    std::vector<std::pair<uint32_t, double>> v;
+    v.reserve(pool.size());
+    for (uint32_t w : pool)
+      v.push_back({w, ctxScore(w)});
     size_t kk = std::min<size_t>(size_t(k) * 2, v.size());
     std::partial_sort(v.begin(), v.begin() + kk, v.end(),
                       [](auto &a, auto &b) { return a.second > b.second; });
@@ -553,8 +751,9 @@ private:
 int main(int argc, char **argv) {
   if (argc < 2) {
     fprintf(stderr, "usage: %s <words.tsv> [socket-path]\n", argv[0]);
-    fprintf(stderr, "  un 'bigrams.tsv' et 'trigrams.tsv' voisins sont chargés "
-                    "s'ils existent.\n");
+    fprintf(stderr, "  fichiers voisins chargés s'ils existent : bigrams.tsv, "
+                    "bigrams.bo.tsv, trigrams.tsv, trigrams.bo.tsv, "
+                    "pcont.tsv\n");
     return 2;
   }
   // Un client (l'engine) ferme souvent la connexion sans lire la réponse —
@@ -567,8 +766,10 @@ int main(int argc, char **argv) {
   std::string wpath = argv[1];
   model.loadWords(wpath);
   std::string dir = wpath.substr(0, wpath.find_last_of('/') + 1);
-  model.loadBigrams(dir + "bigrams.tsv");
-  model.loadTrigrams(dir + "trigrams.tsv");
+  model.loadBigrams(dir);
+  model.loadTrigrams(dir);
+  model.loadPcont(dir);
+  model.loadEmoji(dir);
   model.finalize();
 
   const char *xdg = getenv("XDG_DATA_HOME");

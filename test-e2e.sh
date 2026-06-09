@@ -44,9 +44,9 @@ input type:keyboard xkb_layout fr
 exec "$WT/inner.sh"
 EOF
 
-echo "==> daemon de prédiction"
+echo "==> daemon de prédiction (XDG_DATA_HOME isolé : pas d'apprentissage réel)"
 pkill -x predictord 2>/dev/null || true
-"$DAEMON/bin/predictord" "$MODEL/words.tsv" "$SOCK" >"$WT/daemon.log" 2>&1 &
+XDG_DATA_HOME="$WT/xdg" "$DAEMON/bin/predictord" "$MODEL/words.tsv" "$SOCK" >"$WT/daemon.log" 2>&1 &
 DPID=$!
 for _ in $(seq 1 100); do [ -S "$SOCK" ] && break; sleep 0.05; done
 
@@ -81,7 +81,15 @@ expect() {  # $1=libellé  $2=chaîne tapée  $3=résultat attendu
   sleep 5
   inj() { XDG_RUNTIME_DIR="$RUN" WAYLAND_DISPLAY=wayland-1 "$WTYPE" "$@" 2>>"$WT/wtype.log"; }
   inj "q"; sleep 0.3; inj -k BackSpace; sleep 0.3   # warm-up (drop focus, bug fcitx #5815)
-  inj -d 70 -- "$keys"; sleep 0.4; inj -k Return
+  # la chaîne peut contenir <ESC> → touche Échap injectée entre les segments
+  local rest="$keys" seg
+  while [ -n "$rest" ]; do
+    seg="${rest%%<ESC>*}"
+    [ -n "$seg" ] && inj -d 70 -- "$seg"
+    if [ "$seg" = "$rest" ]; then rest=""
+    else sleep 0.3; inj -k Escape; sleep 0.3; rest="${rest#*<ESC>}"; fi
+  done
+  sleep 0.4; inj -k Return
   for t in $(seq 1 60); do [ -s "$res" ] && break; sleep 0.1; done
   sleep 0.3
   XDG_RUNTIME_DIR="$RUN" WAYLAND_DISPLAY=wayland-1 "$SWAY/bin/swaymsg" exit >/dev/null 2>&1 || true
@@ -103,6 +111,10 @@ expect "autocorrection faute simple"   "teh "                   "the "
 expect "no-clobber d'un vrai mot"      "le "                    "le "
 expect "chiffres NON avalés"           "code 3 "                "code 3 "
 expect "phrase multi-mots + accents"   "je suis allé au café "  "je suis allé au café "
+expect "emoji picker ':coeur'+espace"  ":coeur "                "❤️ "
+expect "':' nu reste littéral"         ": ok "                  ": ok "
+expect "Échap annule la suggestion"    "bonjou<ESC> ok "        "bonjou ok "
+expect "Échap ferme la barre (avalé)"  "je <ESC>vais "          "je vais "
 
 echo
 [ -d /proc/$DPID ] && echo "daemon survécu (SIGPIPE OK)" || { echo "DAEMON MORT"; FAILS=$((FAILS+1)); }

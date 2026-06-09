@@ -1,5 +1,8 @@
 #include "panelview.h"
 
+#include <algorithm>
+#include <cmath>
+
 #include <QFile>
 #include <QFileInfo>
 #include <QGuiApplication>
@@ -13,41 +16,73 @@
 #include <QQuickWindow>
 #include <QSGRendererInterface>
 
-// QML par défaut : chips horizontales (façon Gboard), pill accent sur le
-// candidat surligné. Couleurs via le context property `colors` (matugen, cf
-// qmlui.cpp). Police = Maple Mono NF (système).
+// QML : barre de chips horizontales COMPACTE (dense, façon Gboard) —
+// surface arrondie + liseré, PILL accent qui GLISSE entre les candidats
+// (hlPos flottant animé côté C++), apparition fade + slide-up (appear 0→1).
+// Les emojis (picker ':') sont détectés et rendus plus grands avec la fonte
+// couleur. Couleurs via la context property `colors` (matugen, cf qmlui.cpp).
 static const char *kPanelQml = R"QML(
 import QtQuick
 
-Rectangle {
+Item {
     id: root
-    color: colors.surface
-    radius: 16
-    implicitWidth: Math.max(row.width + 14, 40)
-    implicitHeight: 46
+    implicitWidth: bar.width + 10
+    implicitHeight: bar.height + 10
 
-    Row {
-        id: row
-        x: 7
-        spacing: 4
-        anchors.verticalCenter: parent.verticalCenter
-        Repeater {
-            model: candidates
-            delegate: Rectangle {
-                required property int index
-                required property string modelData
-                radius: 11
-                color: index === highlight ? colors.accent : "transparent"
-                implicitWidth: label.implicitWidth + 22
-                height: 34
-                anchors.verticalCenter: parent.verticalCenter
-                Text {
-                    id: label
-                    anchors.centerIn: parent
-                    text: modelData
-                    color: index === highlight ? colors.onAccent : colors.onSurface
-                    font.pixelSize: 17
-                    font.family: "Maple Mono NF"
+    Rectangle {
+        id: bar
+        x: 5
+        y: 5 + (1 - appear) * 6        // slide-up à l'apparition
+        opacity: appear
+        width: row.width + 12
+        height: 34
+        radius: 11
+        color: colors.surface
+        border.width: 1
+        border.color: colors.outline
+
+        // pill de surlignage : interpole position/largeur entre les chips
+        Rectangle {
+            id: pill
+            visible: hlPos >= 0 && rep.count > 0
+            property real p: Math.max(0, Math.min(hlPos, rep.count - 1))
+            property int i0: Math.floor(p)
+            property real f: p - i0
+            property Item a: rep.count > 0 ? rep.itemAt(i0) : null
+            property Item b: rep.count > 0
+                ? rep.itemAt(Math.min(i0 + 1, rep.count - 1)) : null
+            x: a ? row.x + a.x + (b ? (b.x - a.x) * f : 0) : 0
+            width: a ? a.width + (b ? (b.width - a.width) * f : 0) : 0
+            height: 26
+            radius: 8
+            anchors.verticalCenter: parent.verticalCenter
+            color: colors.accent
+        }
+
+        Row {
+            id: row
+            x: 6
+            spacing: 1
+            anchors.verticalCenter: parent.verticalCenter
+            Repeater {
+                id: rep
+                model: candidates
+                delegate: Item {
+                    required property int index
+                    required property string modelData
+                    readonly property bool emoji:
+                        modelData.length > 0 && modelData.codePointAt(0) > 0x2100
+                    width: label.implicitWidth + 16
+                    height: 26
+                    Text {
+                        id: label
+                        anchors.centerIn: parent
+                        text: modelData
+                        color: hlPos >= 0 && index === Math.round(hlPos)
+                               ? colors.onAccent : colors.onSurface
+                        font.pixelSize: emoji ? 17 : 14
+                        font.family: emoji ? "Noto Color Emoji" : "Maple Mono NF"
+                    }
                 }
             }
         }
@@ -99,6 +134,7 @@ QVariantMap loadColors() {
     c["onSurface"] = "#cdd6f4";
     c["accent"] = "#89b4fa";
     c["onAccent"] = "#11111b";
+    c["outline"] = "#45455a";
 
     // 1) couleurs DMS/matugen (régénérées à chaque changement de thème)
     QJsonObject d =
@@ -115,14 +151,17 @@ QVariantMap loadColors() {
         QString onSurface = pick({"on_surface"});
         QString accent = pick({"primary"});
         QString onAccent = pick({"on_primary"});
+        QString outline = pick({"outline_variant", "outline"});
         if (!surface.isEmpty()) c["surface"] = surface;
         if (!onSurface.isEmpty()) c["onSurface"] = onSurface;
         if (!accent.isEmpty()) c["accent"] = accent;
         if (!onAccent.isEmpty()) c["onAccent"] = onAccent;
+        if (!outline.isEmpty()) c["outline"] = outline;
     }
-    // 2) override explicite {surface,onSurface,accent,onAccent}
+    // 2) override explicite {surface,onSurface,accent,onAccent,outline}
     QJsonObject o = readJson(overrideColorsPath());
-    for (const QString &k : {"surface", "onSurface", "accent", "onAccent"})
+    for (const QString &k :
+         {"surface", "onSurface", "accent", "onAccent", "outline"})
         if (o.contains(k))
             c[k] = o.value(k).toString();
     return c;
@@ -148,7 +187,39 @@ void ensureApp() {
     QQuickWindow::setGraphicsApi(QSGRendererInterface::Software);
     new QGuiApplication(argc, argv);
 }
+
+// ease-out cubic : départ vif, arrivée douce — le bon feel pour une popup.
+double easeOutCubic(double t) {
+    double u = 1.0 - t;
+    return 1.0 - u * u * u;
+}
+
+// QMLPANEL_ANIM_SCALE (float, défaut 1) : étire les durées d'animation — pour
+// les capturer de façon déterministe en test headless (et déboguer le feel).
+int animMs(int ms) {
+    static const double scale = [] {
+        QByteArray v = qgetenv("QMLPANEL_ANIM_SCALE");
+        bool ok = false;
+        double s = v.toDouble(&ok);
+        return ok && s > 0 ? s : 1.0;
+    }();
+    return int(ms * scale);
+}
 } // namespace
+
+double PanelView::Anim::at(Clock::time_point now) const {
+    if (durMs <= 0)
+        return to;
+    double t = std::chrono::duration<double, std::milli>(now - start).count() /
+               double(durMs);
+    t = std::clamp(t, 0.0, 1.0);
+    return from + (to - from) * easeOutCubic(t);
+}
+
+bool PanelView::Anim::done(Clock::time_point now) const {
+    return durMs <= 0 ||
+           now - start >= std::chrono::milliseconds(durMs);
+}
 
 PanelView::PanelView() {
     ensureApp();
@@ -161,7 +232,8 @@ PanelView::PanelView() {
     colorsStamp_ = colorsStamp();
     ctx->setContextProperty("candidates", QStringList{});
     ctx->setContextProperty("highlight", -1);
-    ctx->setContextProperty("preeditText", QString());
+    ctx->setContextProperty("hlPos", -1.0);
+    ctx->setContextProperty("appear", 1.0);
 
     component_ = new QQmlComponent(view_->engine());
     component_->setData(kPanelQml, QUrl());
@@ -186,11 +258,41 @@ void PanelView::setColors(const QVariantMap &colors) {
     }
 }
 
-QImage PanelView::render(const QStringList &candidates, int highlight,
-                         const QString &preedit) {
+void PanelView::update(const QStringList &candidates, int highlight) {
+    auto now = Clock::now();
+    if (!shown_) {
+        appear_ = {0.0, 1.0, now, animMs(140)};
+        shown_ = true;
+    }
+    if (candidates != cands_ || highlight < 0 || hl_.to < 0) {
+        // nouveau contenu (frappe) ou pas de surlignage de départ : pas de
+        // morph — le pill saute (ou disparaît), seul Tab→Tab anime.
+        hl_ = {double(highlight), double(highlight), now, 0};
+    } else if (highlight != highlight_) {
+        hl_ = {hl_.at(now), double(highlight), now, animMs(110)};
+    }
+    cands_ = candidates;
+    highlight_ = highlight;
+}
+
+void PanelView::hidden() {
+    shown_ = false;
+    highlight_ = -1;
+    cands_.clear();
+    hl_ = {};
+    hl_.to = -1.0;
+}
+
+bool PanelView::animating() const {
+    auto now = Clock::now();
+    return shown_ && (!appear_.done(now) || !hl_.done(now));
+}
+
+QImage PanelView::render() {
     if (!root_) {
         return {};
     }
+    auto now = Clock::now();
     auto *ctx = view_->engine()->rootContext();
     // relit les couleurs si le thème (matugen/DMS) a changé
     qint64 s = colorsStamp();
@@ -198,9 +300,10 @@ QImage PanelView::render(const QStringList &candidates, int highlight,
         colorsStamp_ = s;
         ctx->setContextProperty("colors", loadColors());
     }
-    ctx->setContextProperty("candidates", candidates);
-    ctx->setContextProperty("highlight", highlight);
-    ctx->setContextProperty("preeditText", preedit);
+    ctx->setContextProperty("candidates", cands_);
+    ctx->setContextProperty("highlight", highlight_);
+    ctx->setContextProperty("hlPos", hl_.at(now));
+    ctx->setContextProperty("appear", appear_.at(now));
     QCoreApplication::processEvents(); // laisse bindings + resize se résoudre
     QImage img = view_->grabWindow();
     return img.convertToFormat(QImage::Format_ARGB32_Premultiplied);

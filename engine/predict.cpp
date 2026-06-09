@@ -129,12 +129,14 @@ uint32_t toUpperCp(uint32_t cp) {
 }
 
 // Caractère qui prolonge un mot : lettre toujours ; apostrophe / trait d'union /
-// chiffre seulement si le buffer est déjà entamé (mot en cours).
+// chiffre seulement si le buffer est déjà entamé (mot en cours). ':' sur buffer
+// VIDE démarre le picker emoji (":coeur" → ❤️) — jamais en milieu de mot, donc
+// "10:30" ou "voici :" tapent normalement.
 bool isWordExtender(uint32_t cp, bool bufferEmpty) {
   if (isLetterCp(cp))
     return true;
   if (bufferEmpty)
-    return false;
+    return cp == ':';
   return cp == '\'' || cp == 0x2019 || cp == '-' || (cp >= '0' && cp <= '9');
 }
 
@@ -376,8 +378,10 @@ public:
         return;
       }
       if (sym == FcitxKey_Escape) {
-        // ne perd jamais ce qui a été tapé : on committe le littéral.
-        commitWord(ic, state, state->buffer, /*space=*/false);
+        // Échap ANNULE la suggestion : ferme la barre et committe le littéral
+        // tel quel (on ne perd jamais la frappe) — SANS apprendre le fragment
+        // (annuler n'est pas valider).
+        commitWord(ic, state, state->buffer, /*space=*/false, /*learn=*/false);
         event.filterAndAccept();
         return;
       }
@@ -396,6 +400,14 @@ public:
     }
     auto list = ic->inputPanel().candidateList();
     bool hasList = list && list->size() > 0;
+    if (hasList && sym == FcitxKey_Escape) {
+      // Échap ferme la barre mot-suivant (et n'atteint PAS l'application —
+      // un 2e Échap, barre fermée, passera normalement).
+      state->navigating = false;
+      clearPanel(ic);
+      event.filterAndAccept();
+      return;
+    }
     if (state->navigating && hasList) {
       if (sym == FcitxKey_Tab) {
         navigate(ic, state, +1);
@@ -529,15 +541,27 @@ private:
     ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
   }
 
-  // Valide un mot : applique la casse du buffer, committe, apprend, met à jour
-  // le contexte, puis (si espace) propose le mot suivant.
+  // Valide un mot : applique la casse du buffer, committe, apprend (sauf
+  // annulation), met à jour le contexte, puis (si espace) propose le suivant.
   void commitWord(fcitx::InputContext *ic, PredictState *state,
-                  const std::string &raw, bool trailingSpace) {
+                  const std::string &raw, bool trailingSpace,
+                  bool learn = true) {
+    bool emojiMode = !state->buffer.empty() && state->buffer[0] == ':';
     std::string word = applyCase(raw, state->buffer);
     ic->commitString(trailingSpace ? word + " " : word);
-    std::string prev = state->ctx.empty() ? std::string{} : state->ctx.back();
-    learnDaemon(prev, word);
-    pushCtx(state, word);
+    if (emojiMode) {
+      // un emoji choisi compte comme « favori » (le daemon le remontera) ; le
+      // contexte de mots reste inchangé — un emoji ne porte pas de syntaxe.
+      if (learn && word != state->buffer)
+        learnDaemon(std::string{}, word);
+    } else {
+      if (learn) {
+        std::string prev =
+            state->ctx.empty() ? std::string{} : state->ctx.back();
+        learnDaemon(prev, word);
+      }
+      pushCtx(state, word);
+    }
     state->buffer.clear();
     state->cands.clear();
     state->navigating = false;

@@ -141,6 +141,12 @@ private:
             QP_DEBUG() << "PanelView not ok (QML/Qt error)";
             return;
         }
+        if (!surface_ || ic != currentIc_) {
+            hidePanel(); // remet aussi l'anim d'apparition à zéro
+            surface_ = wl_compositor_create_surface(compositor_);
+            popup_ = zwp_input_method_v2_get_input_popup_surface(im, surface_);
+            currentIc_ = ic;
+        }
         // candidats + index surligné depuis l'input panel de fcitx
         auto list = ic->inputPanel().candidateList();
         QStringList cands;
@@ -152,29 +158,53 @@ private:
                     list->candidate(i).text().toString());
             }
         }
-        QImage img = view_->render(cands, highlight, QString());
+        view_->update(cands, highlight);
+        if (!renderFrame())
+            return;
+        QP_DEBUG() << "panel shown, " << cands.size() << " cands";
+    }
+
+    // Rend l'état courant et l'affiche ; si une animation est en cours,
+    // demande une frame au compositeur pour continuer (boucle onFrame).
+    bool renderFrame() {
+        QImage img = view_->render();
         if (img.isNull()) {
             QP_DEBUG() << "render returned null image";
-            return;
-        }
-        if (!surface_ || ic != currentIc_) {
-            hidePanel();
-            surface_ = wl_compositor_create_surface(compositor_);
-            popup_ = zwp_input_method_v2_get_input_popup_surface(im, surface_);
-            currentIc_ = ic;
+            return false;
         }
         wl_buffer *buf = makeImageBuffer(shm_, img);
         if (!buf)
-            return;
+            return false;
         wl_surface_attach(surface_, buf, 0, 0);
         wl_surface_damage(surface_, 0, 0, img.width(), img.height());
+        if (view_->animating())
+            scheduleFrame(); // la requête doit précéder le commit
         wl_surface_commit(surface_);
         wl_display_flush(display_);
-        QP_DEBUG() << "panel shown " << img.width() << "x" << img.height() << " "
-                   << cands.size() << " cands";
+        return true;
+    }
+
+    void scheduleFrame() {
+        if (frameCb_ || !surface_)
+            return;
+        frameCb_ = wl_surface_frame(surface_);
+        wl_callback_add_listener(frameCb_, &frameListener_, this);
+    }
+
+    static void frameDone(void *data, wl_callback *cb, uint32_t) {
+        auto *self = static_cast<QmlPanel *>(data);
+        if (self->frameCb_ == cb)
+            self->frameCb_ = nullptr;
+        wl_callback_destroy(cb);
+        if (self->surface_ && self->view_ && self->view_->ok())
+            self->renderFrame();
     }
 
     void hidePanel() {
+        if (frameCb_) {
+            wl_callback_destroy(frameCb_);
+            frameCb_ = nullptr;
+        }
         if (popup_) {
             zwp_input_popup_surface_v2_destroy(popup_);
             popup_ = nullptr;
@@ -184,6 +214,8 @@ private:
             surface_ = nullptr;
         }
         currentIc_ = nullptr;
+        if (view_)
+            view_->hidden();
         if (display_)
             wl_display_flush(display_);
     }
@@ -196,11 +228,14 @@ private:
     wl_shm *shm_ = nullptr;
     wl_surface *surface_ = nullptr;
     zwp_input_popup_surface_v2 *popup_ = nullptr;
+    wl_callback *frameCb_ = nullptr;
     InputContext *currentIc_ = nullptr;
     std::unique_ptr<PanelView> view_;
 
     static constexpr wl_registry_listener registryListener_ = {
         &QmlPanel::registryGlobal, &QmlPanel::registryRemove};
+    static constexpr wl_callback_listener frameListener_ = {
+        &QmlPanel::frameDone};
 };
 
 // Hors-ligne : les loaders de dépendance (auto) sont alors entièrement déclarés.

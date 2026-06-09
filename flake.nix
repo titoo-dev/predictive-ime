@@ -20,15 +20,43 @@
         hash = "sha256-U1H/QFsRJu9VV5HdTZeYpI4+mlAan8SBqdqVd1LPtFg=";
       };
 
-      # Corpus de phrases (Leipzig Corpora, news 2024, 100k phrases/langue) pour
-      # construire les bigrammes (mot-suivant). Archives stables → hashables.
+      # Corpus de phrases pour les n-grammes (mot-suivant + complétion) :
+      #  - Leipzig news 2024, 300k phrases/langue (registre écrit, CC BY) ;
+      #  - Tatoeba via OPUS (release DATÉE v2023-04-12 → immuable, contrairement
+      #    aux exports hebdomadaires de tatoeba.org ; CC BY 2.0 FR) — registre
+      #    CONVERSATIONNEL, bien plus proche de la frappe quotidienne que la
+      #    presse. Archives stables → hashables.
       fraNews = pkgs.fetchurl {
-        url = "https://downloads.wortschatz-leipzig.de/corpora/fra_news_2024_100K.tar.gz";
-        hash = "sha256-M5VV0uolu1XbL7XbAOjk/AnrDL9uQgnl6OEfPMOhu5c=";
+        url = "https://downloads.wortschatz-leipzig.de/corpora/fra_news_2024_300K.tar.gz";
+        hash = "sha256-ZumUYu++H+txwCOet5X8QF3iIM3vF0lx2HEEdw9sQQM=";
       };
       engNews = pkgs.fetchurl {
-        url = "https://downloads.wortschatz-leipzig.de/corpora/eng_news_2024_100K.tar.gz";
-        hash = "sha256-4aauY9p+h+rogAcL+8RUJz36zoIkOPj76gdhN/MdzyE=";
+        url = "https://downloads.wortschatz-leipzig.de/corpora/eng_news_2024_300K.tar.gz";
+        hash = "sha256-NVsRu08GnxeQBElZOM45uhZF6xuG4sPSf/5OA6AR4VQ=";
+      };
+      tatoebaFr = pkgs.fetchurl {
+        url = "https://object.pouta.csc.fi/OPUS-Tatoeba/v2023-04-12/mono/fr.txt.gz";
+        hash = "sha256-eaRS30u3OCaYItrYR+pdtEuOtdNi2Nnve2YwXzgJi10=";
+      };
+      tatoebaEn = pkgs.fetchurl {
+        url = "https://object.pouta.csc.fi/OPUS-Tatoeba/v2023-04-12/mono/en.txt.gz";
+        hash = "sha256-oyxVAM12uUeYWXZPt4U3pLm1P6uPo73A/ATdcPKL8ps=";
+      };
+
+      # Annotations emoji CLDR (mots-clés officiels Unicode), FR + EN, épinglées
+      # au tag immuable 48.2.0 — pour l'emoji picker (préfixe ':').
+      cldrEmojiFr = pkgs.fetchurl {
+        url = "https://raw.githubusercontent.com/unicode-org/cldr-json/48.2.0/cldr-json/cldr-annotations-full/annotations/fr/annotations.json";
+        hash = "sha256-M9oFL3R4J5GYnmIm1ghxyEZ5ngd6Wn+06H7Pp8o4VzM=";
+      };
+      cldrEmojiEn = pkgs.fetchurl {
+        url = "https://raw.githubusercontent.com/unicode-org/cldr-json/48.2.0/cldr-json/cldr-annotations-full/annotations/en/annotations.json";
+        hash = "sha256-8iCDy4bf+2OmQ9W6y12YmfgtL6XTiK1POu1yGErO9QU=";
+      };
+      # Liste autoritaire des emoji + formes fully-qualified (rendu couleur).
+      emojiTest = pkgs.fetchurl {
+        url = "https://unicode.org/Public/emoji/16.0/emoji-test.txt";
+        hash = "sha256-JPDFNOhs8ULiSWlT6PDkaj5wI5KRHt3NKcbM7YUTlpc=";
       };
 
       # Modèle FR+EN: fusionne les deux listes (fréquences cumulées pour les
@@ -44,14 +72,21 @@
           | sort -k2,2nr > $out/words.tsv
         echo "words.tsv: $(wc -l < $out/words.tsv) mots" >&2
 
-        # 2) bigrams.tsv + trigrams.tsv — mot-suivant depuis les corpus FR+EN
+        # 2) n-grammes Kneser-Ney — news (300K/langue) + Tatoeba conversationnel
+        #    (l'EN Tatoeba est plafonné pour rester équilibré avec le FR).
         mkdir corpus
         tar xzf ${fraNews} -C corpus
         tar xzf ${engNews} -C corpus
+        zcat ${tatoebaFr} | head -n 600000 > corpus/tatoeba-fr.txt || true
+        zcat ${tatoebaEn} | head -n 600000 > corpus/tatoeba-en.txt || true
         python3 ${./daemon/build_ngrams.py} $out/words.tsv $out \
-          corpus/*/*-sentences.txt
+          corpus/*/*-sentences.txt corpus/tatoeba-fr.txt corpus/tatoeba-en.txt
         echo "bigrams.tsv:  $(wc -l < $out/bigrams.tsv) bigrammes"  >&2
         echo "trigrams.tsv: $(wc -l < $out/trigrams.tsv) trigrammes" >&2
+
+        # 3) emoji.tsv — index mots-clés → emoji (CLDR fr+en) pour le picker ':'
+        python3 ${./daemon/build_emoji.py} ${emojiTest} $out/emoji.tsv \
+          ${cldrEmojiFr} ${cldrEmojiEn}
       '';
       # fcitx5 patché : expose l'accès brut à zwp_input_method_v2 aux addons UI
       # externes (installe waylandim_public.h + le module cmake WaylandIM), pour
