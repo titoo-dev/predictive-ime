@@ -34,12 +34,23 @@ Item {
         x: 5
         y: 5 + (1 - appear) * 6        // slide-up à l'apparition
         opacity: appear
-        width: row.width + 12
+        width: row.width + 18
         height: 34
         radius: 11
         color: colors.surface
         border.width: 1
         border.color: colors.outline
+
+        // indicateur de mode : accent = mot en cours (composition),
+        // discret = barre passive (mot-suivant / amorce)
+        Rectangle {
+            x: 5
+            width: 3
+            height: 12
+            radius: 1.5
+            anchors.verticalCenter: parent.verticalCenter
+            color: composing ? colors.accent : colors.outline
+        }
 
         // pill de surlignage : interpole position/largeur entre les chips
         Rectangle {
@@ -61,7 +72,7 @@ Item {
 
         Row {
             id: row
-            x: 6
+            x: 12
             spacing: 1
             anchors.verticalCenter: parent.verticalCenter
             Repeater {
@@ -270,6 +281,7 @@ PanelView::PanelView() {
     ctx->setContextProperty("hlPos", -1.0);
     ctx->setContextProperty("appear", 1.0);
     ctx->setContextProperty("autoMark", QVariantList{});
+    ctx->setContextProperty("composing", false);
 
     component_ = new QQmlComponent(view_->engine());
     component_->setData(kPanelQml, QUrl());
@@ -295,12 +307,14 @@ void PanelView::setColors(const QVariantMap &colors) {
 }
 
 void PanelView::update(const QStringList &candidates, int highlight,
-                       const QVariantList &autoMark) {
+                       const QVariantList &autoMark, bool composing) {
     auto now = Clock::now();
+    hiding_ = false; // un nouveau contenu annule un fondu de fermeture en cours
     if (!shown_) {
         appear_ = {0.0, 1.0, now, animMs(140)};
         shown_ = true;
     }
+    composing_ = composing;
     if (candidates != cands_ || highlight < 0 || hl_.to < 0) {
         // nouveau contenu (frappe) ou pas de surlignage de départ : pas de
         // morph — le pill saute (ou disparaît), seul Tab→Tab anime.
@@ -313,8 +327,23 @@ void PanelView::update(const QStringList &candidates, int highlight,
     autoMark_ = autoMark;
 }
 
+bool PanelView::startHide() {
+    if (!shown_ || hiding_)
+        return hiding_;
+    auto now = Clock::now();
+    hide_ = {appear_.at(now), 0.0, now, animMs(90)};
+    shown_ = false;
+    hiding_ = true;
+    return true;
+}
+
+bool PanelView::hideDone() const {
+    return hiding_ && hide_.done(Clock::now());
+}
+
 void PanelView::hidden() {
     shown_ = false;
+    hiding_ = false;
     highlight_ = -1;
     cands_.clear();
     hl_ = {};
@@ -323,6 +352,8 @@ void PanelView::hidden() {
 
 bool PanelView::animating() const {
     auto now = Clock::now();
+    if (hiding_)
+        return !hide_.done(now);
     return shown_ && (!appear_.done(now) || !hl_.done(now));
 }
 
@@ -341,8 +372,10 @@ QImage PanelView::render() {
     ctx->setContextProperty("candidates", cands_);
     ctx->setContextProperty("highlight", highlight_);
     ctx->setContextProperty("hlPos", hl_.at(now));
-    ctx->setContextProperty("appear", appear_.at(now));
+    ctx->setContextProperty("appear",
+                            hiding_ ? hide_.at(now) : appear_.at(now));
     ctx->setContextProperty("autoMark", autoMark_);
+    ctx->setContextProperty("composing", composing_);
     QCoreApplication::processEvents(); // laisse bindings + resize se résoudre
     QImage img = view_->grabWindow();
     return img.convertToFormat(QImage::Format_ARGB32_Premultiplied);

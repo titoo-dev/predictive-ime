@@ -18,8 +18,10 @@ WORDS = {
     "le": 99000, "les": 80000, "the": 100000, "quand": 15000,
     "interesting": 2000, "internet": 2500, "développement": 1500,
     "travail": 6000, "travailler": 4000, "aujourd'hui": 7000,
-    "pc": 3000,
+    "pc": 3000, "soleil": 3000, "solar": 3500,
 }
+# 3e colonne de words.tsv : langue (boost selon la langue du contexte)
+LANGS = {"bonjour": "fr", "soleil": "fr", "solar": "en", "the": "en"}
 # Format modèle KN précalculé (cf build_ngrams.py) : probabilités interpolées
 # + poids de backoff γ par contexte + continuation unigramme.
 BIGRAMS = [("je", "veux", 0.30), ("je", "vais", 0.35), ("je", "vous", 0.12),
@@ -32,7 +34,8 @@ TRIGRAMS_BO = [("je", "ne", 0.3), ("ne", "sais", 0.2)]
 
 with open(f"{tmp}/words.tsv", "w", encoding="utf-8") as f:
     for w, c in WORDS.items():
-        f.write(f"{w} {c}\n")
+        lang = f" {LANGS[w]}" if w in LANGS else ""
+        f.write(f"{w} {c}{lang}\n")
 with open(f"{tmp}/bigrams.tsv", "w", encoding="utf-8") as f:
     for a, b, p in BIGRAMS:
         f.write(f"{a}\t{b}\t{p}\n")
@@ -58,7 +61,16 @@ with open(f"{tmp}/emoji.tsv", "w", encoding="utf-8") as f:
     for k, e, w in EMOJI:
         f.write(f"{k}\t{e}\t{w}\n")
 
-env = dict(os.environ, XDG_DATA_HOME=f"{tmp}/xdg")
+# config/dict/snippets perso ($XDG_CONFIG_HOME/ime-predictord, rechargé à chaud)
+cfgdir = f"{tmp}/cfg/ime-predictord"
+os.makedirs(cfgdir)
+with open(f"{cfgdir}/snippets.tsv", "w", encoding="utf-8") as f:
+    f.write("# commentaire\n;mail\tdev@example.test\n;shrug\t¯\\_(ツ)_/¯\n")
+with open(f"{cfgdir}/dict.txt", "w", encoding="utf-8") as f:
+    f.write("# dico perso\nzzcustom 7000\n")
+
+env = dict(os.environ, XDG_DATA_HOME=f"{tmp}/xdg",
+           XDG_CONFIG_HOME=f"{tmp}/cfg")
 proc = subprocess.Popen([BIN, f"{tmp}/words.tsv", sock], env=env)
 for _ in range(100):
     if os.path.exists(sock):
@@ -194,6 +206,51 @@ try:
     c = cands("", [])
     check("amorce <s>: contexte vide → 'the' en tête", c and c[0] == "the",
           str(c))
+
+    # 7sexies) SNIPPETS (préfixe ';') — déclencheur exact auto-appliqué.
+    c = cands(";mail")
+    check("snippet: ';mail' → expansion en tête", c and c[0] == "dev@example.test",
+          str(c))
+    check("snippet: autocomplete ';mail' (Espace applique)",
+          auto(";mail") == "dev@example.test", repr(auto(";mail")))
+    c = cands(";ma")
+    check("snippet: préfixe ';ma' → expansion AFFICHÉE, pas auto",
+          "dev@example.test" in c and auto(";ma") == "", str(c))
+
+    # 7septies) DICTIONNAIRE PERSO : vocabulaire déclaratif, jamais corrigé.
+    r = req({"prefix": "zzcustom", "context": []})
+    check("dict perso: 'zzcustom' est un mot (literalIsWord)",
+          r["literalIsWord"] is True, str(r))
+    c = cands("zzcus")
+    check("dict perso: complétable", "zzcustom" in c, str(c))
+
+    # 7octies) VETO persistant : un revert interdit la paire pour toujours.
+    check("veto: avant — 'vias' s'auto-corrige en 'vais'",
+          auto("vias") == "vais", repr(auto("vias")))
+    req({"veto": {"typed": "vias", "applied": "vais"}})
+    c = cands("vias")
+    check("veto: après — plus d'auto, mais 'vais' reste candidat",
+          auto("vias") == "" and "vais" in c, f"auto={auto('vias')!r} c={c}")
+
+    # 7nonies) LANGUE : le contexte vote, les mots de sa langue remontent.
+    c = cands("sol")
+    check("langue: sans contexte → 'solar' (plus fréquent) devant",
+          c and c[0] == "solar", str(c))
+    c = cands("sol", ["bonjour"])
+    check("langue: contexte FR → 'soleil' devant", c and c[0] == "soleil",
+          str(c))
+
+    # 7decies) MULTI-MOTS : continuation très sûre → expression en FIN de
+    #          barre (sans déplacer le top des mots simples).
+    c = cands("", ["je", "ne"])
+    check("multi-mots: 'je ne' → 'sais pas' proposé (fin de barre)",
+          "sais pas" in c and c[0] == "sais", str(c))
+
+    # 7undecies) STATS : la boîte noire est inspectable.
+    r = req({"stats": True})
+    check("stats: vocab/userWords/snippets exposés",
+          r.get("ok") and r.get("vocab", 0) > 20 and r.get("snippets") == 2,
+          str({k: r.get(k) for k in ("ok", "vocab", "snippets")}))
 
     # 8) EMOJI PICKER (préfixe ':') — mots-clés CLDR repliés, favoris appris.
     c = cands(":coeur")

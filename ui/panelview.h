@@ -37,9 +37,15 @@ public:
     // Nouvel état de la barre (à chaque update fcitx). Déclenche les
     // animations : apparition si la barre était cachée, morph du pill si seul
     // le surlignage a bougé (mêmes candidats). `autoMark[i]` dit si le
-    // candidat i sera appliqué par l'Espace (liseré accent).
+    // candidat i sera appliqué par l'Espace (liseré accent) ; `composing` :
+    // un mot est en cours (indicateur de mode).
     void update(const QStringList &candidates, int highlight,
-                const QVariantList &autoMark = {});
+                const QVariantList &autoMark = {}, bool composing = false);
+    // Démarre le FONDU de fermeture ; false si la barre n'était pas visible.
+    // Pendant le fondu, animating() reste vrai ; à la fin hideDone() == true
+    // et l'appelant démappe la surface.
+    bool startHide();
+    bool hideDone() const;
     // La barre vient d'être cachée (preedit vide / focus perdu).
     void hidden();
     // Une animation est-elle en cours ? (→ re-rendre à la prochaine frame)
@@ -63,9 +69,12 @@ private:
     qint64 colorsStamp_ = -1; // mtime combiné des fichiers de couleurs (live-reload)
 
     Anim appear_;             // 0→1 à l'apparition de la barre
+    Anim hide_;               // →0 au fondu de fermeture
     Anim hl_;                 // position (flottante) du pill de surlignage
     bool shown_ = false;
+    bool hiding_ = false;
     int highlight_ = -1;
     QStringList cands_;
     QVariantList autoMark_;   // candidat appliqué par l'Espace (par index)
+    bool composing_ = false;  // mot en cours (indicateur de mode)
 };

@@ -77,9 +77,32 @@ P1(w)    = 0.7·Pcont(w) + 0.3·Pfreq(w)
 - **Apprentissage utilisateur** persistant
   (`$XDG_DATA_HOME/ime-predictord/user.log`, rejoué au démarrage). Un mot
   hors-vocabulaire doit être committé **≥ 2 fois** avant de passer devant le
-  modèle (un fragment isolé ne pollue plus). Hygiène :
-  `echo '{"forget":{"word":"x"}}' | nc -U /tmp/ime-predictord.sock`.
+  modèle (un fragment isolé ne pollue plus), et les compteurs **vieillissent**
+  (×¾ tous les 512 commits, journal compacté) — cache-LM : le récent pèse
+  plus, l'ancien s'estompe. Hygiène :
+  `echo '{"forget":{"word":"x"}}' | nc -U /tmp/ime-predictord.sock` ;
+  introspection : `echo '{"stats":true}' | nc -U …`.
+- **Veto persistant** : chaque revert (Backspace) journalise la paire
+  tapé→appliqué — elle ne sera plus jamais auto-appliquée (`veto.log`).
+- **Détection de langue** : le contexte (4 mots) vote FR/EN (3ᵉ colonne de
+  words.tsv) et les candidats de la langue active remontent (`langBoost`) —
+  fini « the » en pleine phrase française.
+- **Multi-mots** : si la continuation du meilleur candidat est très sûre
+  (P ≥ 0,35), l'expression entière est proposée (« sais pas »).
 - **Apostrophe typographique** `’` normalisée en `'` partout (repli + n-grammes).
+
+## Personnalisation (`~/.config/ime-predictord/`, rechargé à chaud)
+
+- **`config.json`** — daemon : `autoApply`, `autoDom`, `autoMinLen`,
+  `langBoost`, `multiWord` ; engine : `ghostText`, `frenchSpacing` (espace
+  fine insécable U+202F avant `; : ! ?`), `autoCapitalize` (majuscule en
+  début de phrase). Tout changement est pris en compte sans redémarrage.
+- **`snippets.tsv`** — `déclencheur<TAB>expansion` : `;mail ` → ton adresse,
+  `;shrug ` → ¯\\_(ツ)_/¯. Le déclencheur exact s'auto-applique sur Espace,
+  un préfixe l'affiche dans la barre.
+- **`dict.txt`** — dictionnaire personnel déclaratif (un mot par ligne,
+  fréquence optionnelle) : prénoms, jargon — complétables, jamais corrigés.
+  Les trois fichiers sont stow-ables (`dotfiles/ime-predictord/`).
 
 ### Datasets (épinglés par hash → build pur)
 
@@ -109,6 +132,9 @@ P1(w)    = 0.7·Pcont(w) + 0.3·Pfreq(w)
 - **Navigation** : Tab / ↓ entrent dans la barre par la **gauche**, ⇧Tab / ↑
   par la **droite** ; en navigation, ←/→ se déplacent aussi et **1-6**
   sélectionnent directement. Espace/Entrée valident le surligné.
+- **Ghost text** : quand l'Espace va compléter, le reste du mot s'affiche déjà
+  dans le préedit, curseur entre le tapé et le fantôme (`bonjou‸r`) — jamais
+  pour une correction floue (la barre + liseré s'en chargent).
 - **Espace** : complète/corrige (garde-fous ci-dessus) — le candidat qui sera
   appliqué porte un **liseré accent** dans la barre ; sans marquage, Espace
   garde le littéral. La **ponctuation** (`. , ; : ! ?`) corrige aussi
@@ -126,20 +152,23 @@ P1(w)    = 0.7·Pcont(w) + 0.3·Pfreq(w)
 Harness `eval_model.py`, held-out **Leipzig news 2023** (année ≠ training,
 400 phrases/langue, via le vrai protocole socket) :
 
-| métrique (TOTAL fr+en)        | base (backoff, 100K) | KN (100K) | **KN + corpus riches** |
-|-------------------------------|----------------------|-----------|------------------------|
-| mot-suivant hit@1             | 13,8 %               | 14,3 %    | **15,1 %**             |
-| mot-suivant hit@3             | 21,5 %               | 22,8 %    | **24,1 %**             |
-| mot-suivant hit@6             | 26,2 %               | 28,6 %    | **30,4 %**             |
-| complétion auto-KSR (Espace)  | 17,2 %               | 31,7 %    | **21,8 %** ¹           |
-| complétion top3@2             | 18,3 %               | 29,1 %    | **50,1 %**             |
-| autocorrection top-1          | 83,5 %               | 89,5 %    | **91,7 %**             |
-| latence socket p50            | 80 µs                | 90 µs     | ~190 µs                |
+| métrique (TOTAL fr+en)        | base (backoff, 100K) | KN (100K) | **v5 (KN+corpus+langue)** |
+|-------------------------------|----------------------|-----------|---------------------------|
+| mot-suivant hit@1             | 13,8 %               | 14,3 %    | **15,1 %**                |
+| mot-suivant hit@3             | 21,5 %               | 22,8 %    | **24,0 %**                |
+| mot-suivant hit@6             | 26,2 %               | 28,6 %    | **30,1 %** ²              |
+| complétion auto-KSR (Espace)  | 17,2 %               | 31,7 %    | **21,9 %** ¹              |
+| complétion top3@2             | 18,3 %               | 29,1 %    | **50,3 %**                |
+| autocorrection top-1          | 83,5 %               | 89,5 %    | **91,4 %**                |
+| latence socket p50            | 80 µs                | 90 µs     | ~210 µs                   |
 
-¹ l'auto-KSR descend de 34,7 % (sans garde-fous) à 21,8 % : choix assumé —
+¹ l'auto-KSR descend de 34,7 % (sans garde-fous) à ~22 % : choix assumé —
 l'Espace ne remplace que quand le top domine ×2 (zéro « az »→aziz, « pcq »→pc),
 le reste se prend au Tab (un mot sur deux est dans le top-3 dès 2 lettres) et
 le revert Backspace couvre les erreurs résiduelles. Précision > agressivité.
+² le slot de rang 6 est parfois occupé par l'expression multi-mots (« sais
+pas ») — en rang 2 elle coûtait 0,7 pt de hit@3, en fin de barre ~0,1 pt de
+hit@6 ; toute insertion déplace le top-k mesuré.
 
 Repères production (litt.) : le 5-gram FST historique de Gboard mesurait
 13,0/22,1 % (hit@1/3), son remplaçant neural CIFG-LSTM 16,4/27,0 %. En
@@ -215,10 +244,14 @@ cf `ui/waylandim-public.patch`). Rendu **software** offscreen
 (`QQuickView::grabWindow` → `QImage` → buffer `wl_shm`), sans event-loop Qt
 (monothread, comme le module wayland).
 
-**Animations** : l'état (apparition, position du pill) est avancé côté C++
-(steady_clock + ease-out cubic), exposé au QML en context properties ; tant
-qu'une animation court, `qmlui.cpp` redemande une frame au compositeur
-(`wl_surface_frame`) et re-rend — le contrat Wayland exact, zéro timer.
+**Animations** : l'état (apparition, position du pill, fondu de fermeture)
+est avancé côté C++ (steady_clock + ease-out cubic), exposé au QML en context
+properties ; tant qu'une animation court, `qmlui.cpp` redemande une frame au
+compositeur (`wl_surface_frame`) et re-rend — le contrat Wayland exact, zéro
+timer. Apparition 140 ms, pill 110 ms, **fade-out 90 ms** avant le démappage.
+La surface/popup **persistent** entre les mots (unmap par buffer NULL) — zéro
+churn pendant la frappe. Un **indicateur de mode** discret (barrette accent =
+composition, neutre = suggestion passive) ouvre la barre à gauche.
 `QMLPANEL_ANIM_SCALE` étire les durées (debug/captures déterministes).
 
 Design **compact** (barre 34 px, chips 26 px, police 14 px) : chips

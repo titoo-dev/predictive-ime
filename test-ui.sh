@@ -113,6 +113,12 @@ inj -d 60 -- "je "; sleep 3.5; shot 4-nextword.png
 inj -d 60 -- ":coeur"; sleep 3.5; shot 5-emoji.png
 inj -k Escape; sleep 0.3
 
+# 7) FONDU de fermeture : Échap → barre en cours de fondu (anim ×20 = 1.8s)
+inj -d 60 -- "bonjou"; sleep 3.5
+inj -k Escape; sleep 0.7; shot 7-fadeout-mid.png
+sleep 2.5; shot 7b-fadeout-end.png
+differ 7-fadeout-mid.png 7b-fadeout-end.png
+
 XDG_RUNTIME_DIR="$RUN" WAYLAND_DISPLAY=wayland-1 "$SWAY/bin/swaymsg" exit >/dev/null 2>&1 || true
 kill $SWAYPID $DPID 2>/dev/null; wait $SWAYPID 2>/dev/null
 pkill -x zenity 2>/dev/null

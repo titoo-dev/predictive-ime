@@ -44,9 +44,12 @@ input type:keyboard xkb_layout fr
 exec "$WT/inner.sh"
 EOF
 
-echo "==> daemon de prédiction (XDG_DATA_HOME isolé : pas d'apprentissage réel)"
+echo "==> daemon de prédiction (XDG_DATA_HOME/XDG_CONFIG_HOME isolés)"
+mkdir -p "$WT/config/ime-predictord"
+printf ';mail\tdev@e2e.test\n' > "$WT/config/ime-predictord/snippets.tsv"
 pkill -x predictord 2>/dev/null || true
-XDG_DATA_HOME="$WT/xdg" "$DAEMON/bin/predictord" "$MODEL/words.tsv" "$SOCK" >"$WT/daemon.log" 2>&1 &
+XDG_DATA_HOME="$WT/xdg" XDG_CONFIG_HOME="$WT/config" \
+  "$DAEMON/bin/predictord" "$MODEL/words.tsv" "$SOCK" >"$WT/daemon.log" 2>&1 &
 DPID=$!
 for _ in $(seq 1 100); do [ -S "$SOCK" ] && break; sleep 0.05; done
 
@@ -121,6 +124,7 @@ expect "Échap ferme la barre (avalé)"  "je <ESC>vais "          "je vais "
 expect "ponctuation corrige aussi"     "teh. ok "               "the. ok "
 expect "abréviation protégée (pcq)"    "pcq "                   "pcq "
 expect "revert: Backspace défait l'auto" "vias <BS>"            "vias"
+expect "snippet ';mail'+espace"        ";mail ok "              "dev@e2e.test ok "
 
 echo
 [ -d /proc/$DPID ] && echo "daemon survécu (SIGPIPE OK)" || { echo "DAEMON MORT"; FAILS=$((FAILS+1)); }

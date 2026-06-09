@@ -152,7 +152,8 @@ private:
             currentIm_ = im;
         }
         // candidats + surlignage + marquage « auto-appliqué » (flag Bold posé
-        // par l'engine sur le candidat que l'Espace va appliquer)
+        // par l'engine sur le candidat que l'Espace va appliquer) + mode
+        // (composition si un préedit client est actif)
         auto list = ic->inputPanel().candidateList();
         QStringList cands;
         QVariantList autoMark;
@@ -172,7 +173,8 @@ private:
                 autoMark << bold;
             }
         }
-        view_->update(cands, highlight, autoMark);
+        bool composing = !ic->inputPanel().clientPreedit().toString().empty();
+        view_->update(cands, highlight, autoMark, composing);
         if (!renderFrame())
             return;
         mapped_ = true;
@@ -181,7 +183,12 @@ private:
 
     // Rend l'état courant et l'affiche ; si une animation est en cours,
     // demande une frame au compositeur pour continuer (boucle onFrame).
+    // Quand un fondu de fermeture se termine, démappe réellement.
     bool renderFrame() {
+        if (view_->hideDone()) {
+            finishUnmap();
+            return true;
+        }
         QImage img = view_->render();
         if (img.isNull()) {
             QP_DEBUG() << "render returned null image";
@@ -215,9 +222,19 @@ private:
             self->renderFrame();
     }
 
-    // Masque SANS détruire : buffer NULL → le compositeur démappe la popup,
-    // mais surface/popup/rôle restent prêts pour le mot suivant.
+    // Masque la barre : d'abord un FONDU (90 ms, boucle de frames), puis le
+    // vrai démappage (buffer NULL — la surface/popup restent prêtes pour le
+    // mot suivant).
     void unmapPanel() {
+        if (surface_ && mapped_ && view_ && view_->ok() &&
+            view_->startHide()) {
+            renderFrame(); // démarre/poursuit la boucle de fondu
+            return;
+        }
+        finishUnmap();
+    }
+
+    void finishUnmap() {
         if (frameCb_) {
             wl_callback_destroy(frameCb_);
             frameCb_ = nullptr;
@@ -233,9 +250,10 @@ private:
             view_->hidden();
     }
 
-    // Destruction réelle (changement de contexte d'entrée, suspend).
+    // Destruction réelle (changement de contexte d'entrée, suspend) —
+    // immédiate, sans fondu.
     void destroyPanel() {
-        unmapPanel();
+        finishUnmap();
         if (popup_) {
             zwp_input_popup_surface_v2_destroy(popup_);
             popup_ = nullptr;

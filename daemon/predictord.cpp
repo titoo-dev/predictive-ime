@@ -35,6 +35,7 @@
 #include <fstream>
 #include <functional>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -192,14 +193,26 @@ struct Result {
   std::string autocomplete;
 };
 
+// Réglages utilisateur — $XDG_CONFIG_HOME/ime-predictord/config.json,
+// rechargé À CHAUD quand le fichier change (pas de redémarrage).
+struct Config {
+  bool autoApply = true;    // l'Espace peut-il remplacer ?
+  double autoDom = 2.0;     // dominance top/2e exigée pour auto-appliquer
+  int autoMinLen = 3;       // longueur mini du préfixe pour auto-appliquer
+  double langBoost = 1.6;   // boost des mots de la langue du contexte
+  bool multiWord = true;    // suggestion multi-mots dans le mot-suivant
+};
+
 struct Model {
   std::vector<std::string> words; // tous les mots (forme d'affichage)
   std::vector<uint32_t> freq;     // fréquence par mot
+  std::vector<uint8_t> lang;      // 0 = neutre/inconnu, 1 = fr, 2 = en
   std::vector<std::string> fold;  // forme repliée (minuscule sans accent)
   std::vector<uint32_t> byFold;   // indices triés par forme repliée
   std::unordered_set<std::string> caseWords; // mots en minuscule, accents gardés
   std::unordered_map<std::string, uint32_t> id_;
   double freqTot_ = 1.0; // Σ freq (P1, mélange unigramme)
+  Config cfg;
 
   // Modèle KN précalculé. Identifiants 21 bits → clés compactées.
   static constexpr int SH = 21;
@@ -220,13 +233,13 @@ struct Model {
   static constexpr double CH_TRANSPOSE = 0.12; // inversion de 2 lettres
   static constexpr double CH_SUBST = 0.10;     // voisin AZERTY
   static constexpr double CH_EXTRA = 0.07;     // lettre en trop
-  // Garde-fous d'AUTO-application sur Espace (les candidats restent affichés,
-  // seul le remplacement automatique est bridé) :
-  static constexpr size_t AUTO_MIN_LEN = 3; // préfixe trop court → littéral
-  static constexpr double AUTO_DOM = 2.0;   // le top doit dominer le 2e ×2
+  // (Les garde-fous d'auto-application — longueur mini, dominance — sont dans
+  // Config : réglables à chaud via config.json.)
   // Un mot APPRIS hors vocabulaire doit avoir été vu >= 2 fois avant de passer
   // devant le modèle (sinon un seul commit d'un fragment pollue à vie).
   static constexpr uint64_t USER_MIN = 2;
+  // Continuation mini pour suggérer une expression multi-mots (« sais pas »).
+  static constexpr double MULTI_MIN = 0.35;
 
   uint32_t intern(const std::string &w) {
     auto it = id_.find(w);
@@ -236,10 +249,11 @@ struct Model {
     id_[w] = wid;
     words.push_back(w);
     freq.push_back(0);
+    lang.push_back(0);
     return wid;
   }
 
-  // Unigramme : "mot<sp|tab>fréquence" (OpenSubtitles fr_50k/en_50k fusionnés).
+  // Unigramme : "mot<sp>fréquence[<sp>langue]" — langue ∈ {fr,en,both}.
   void loadWords(const std::string &path) {
     std::ifstream f(path);
     std::string line;
@@ -249,11 +263,18 @@ struct Model {
       if (sp == std::string::npos)
         continue;
       std::string w = line.substr(0, sp);
-      uint64_t fr = std::strtoull(line.c_str() + sp + 1, nullptr, 10);
+      char *end = nullptr;
+      uint64_t fr = std::strtoull(line.c_str() + sp + 1, &end, 10);
       if (w.empty() || fr == 0)
         continue;
       uint32_t wid = intern(w);
       freq[wid] = uint32_t(std::min<uint64_t>(freq[wid] + fr, 0xFFFFFFFFu));
+      while (end && (*end == ' ' || *end == '\t'))
+        end++;
+      if (end && *end == 'f') // "fr"
+        lang[wid] = 1;
+      else if (end && *end == 'e') // "en"
+        lang[wid] = 2;
       n++;
     }
     fprintf(stderr, "[predictord] %zu mots chargés (%zu lignes)\n", words.size(),
@@ -358,8 +379,10 @@ struct Model {
   }
 
   // À appeler une fois tous les mots internés : repli + index trié + priors.
+  // RE-APPELABLE (le dictionnaire perso se recharge à chaud) : reconstruit.
   void finalize() {
-    fold.resize(words.size());
+    fold.assign(words.size(), {});
+    caseWords.clear();
     caseWords.reserve(words.size());
     for (size_t i = 0; i < words.size(); i++) {
       fold[i] = foldStr(words[i]);
@@ -412,6 +435,8 @@ struct Model {
       fprintf(stderr, "[predictord] %zu événements utilisateur rejoués\n", n);
   }
 
+  size_t learnEvents_ = 0;
+
   void learn(const std::string &prev, const std::string &word) {
     if (word.empty())
       return;
@@ -422,6 +447,39 @@ struct Model {
       std::ofstream f(userLog, std::ios::app);
       f << prev << '\t' << word << '\n';
     }
+    if (++learnEvents_ % 512 == 0)
+      ageUser();
+  }
+
+  // Vieillissement (cache-LM) : tous les 512 commits, les compteurs appris
+  // décroissent (×3/4) — les habitudes récentes pèsent plus, les vieilles
+  // s'estompent et finissent oubliées. Le journal est COMPACTÉ au même moment
+  // (sinon le replay du démarrage annulerait le déclin).
+  void ageUser() {
+    for (auto it = userUni.begin(); it != userUni.end();)
+      if ((it->second = it->second * 3 / 4) == 0)
+        it = userUni.erase(it);
+      else
+        ++it;
+    for (auto &kv : userBi)
+      for (auto it = kv.second.begin(); it != kv.second.end();)
+        if ((it->second = it->second * 3 / 4) == 0)
+          it = kv.second.erase(it);
+        else
+          ++it;
+    if (userLog.empty())
+      return;
+    std::ofstream f(userLog, std::ios::trunc);
+    std::unordered_map<std::string, uint64_t> covered;
+    for (auto &kv : userBi)
+      for (auto &p : kv.second) {
+        for (uint64_t i = 0; i < p.second; i++)
+          f << kv.first << '\t' << p.first << '\n';
+        covered[p.first] += p.second;
+      }
+    for (auto &kv : userUni)
+      for (uint64_t i = covered[kv.first]; i < kv.second; i++)
+        f << '\t' << kv.first << '\n';
   }
 
   // Un mot appris est « de confiance » s'il est un vrai mot du vocabulaire ou
@@ -429,6 +487,113 @@ struct Model {
   // seule fois (Entrée en plein mot, par ex.) ne pollue pas les suggestions.
   bool userTrusted(const std::string &word, uint64_t count) const {
     return count >= USER_MIN || caseWords.count(lowerKeep(word)) > 0;
+  }
+
+  // ------------- Config / dictionnaire perso / snippets / veto (à chaud) ----
+  // $XDG_CONFIG_HOME/ime-predictord/{config.json,dict.txt,snippets.tsv} —
+  // rechargés quand leur mtime change (stow-ables dans les dotfiles).
+  std::string cfgDir_;
+  time_t cfgStamp_ = -1, dictStamp_ = -1, snipStamp_ = -1;
+  std::vector<std::pair<std::string, std::string>> snips_; // fold(trig) → texte
+  std::unordered_map<std::string, std::unordered_set<std::string>>
+      veto_; // fold(tapé) -> remplacements refusés (revert utilisateur)
+  std::string vetoLog;
+
+  static time_t mtimeOf(const std::string &p) {
+    struct stat st {};
+    return ::stat(p.c_str(), &st) == 0 ? st.st_mtime : 0;
+  }
+
+  void maybeReload() {
+    if (cfgDir_.empty())
+      return;
+    time_t t = mtimeOf(cfgDir_ + "/config.json");
+    if (t != cfgStamp_) {
+      cfgStamp_ = t;
+      Config fresh;
+      std::ifstream f(cfgDir_ + "/config.json");
+      if (f) {
+        try {
+          json j = json::parse(f, nullptr, true, /*ignore_comments=*/true);
+          fresh.autoApply = j.value("autoApply", fresh.autoApply);
+          fresh.autoDom = j.value("autoDom", fresh.autoDom);
+          fresh.autoMinLen = j.value("autoMinLen", fresh.autoMinLen);
+          fresh.langBoost = j.value("langBoost", fresh.langBoost);
+          fresh.multiWord = j.value("multiWord", fresh.multiWord);
+        } catch (const std::exception &e) {
+          fprintf(stderr, "[predictord] config.json invalide: %s\n", e.what());
+        }
+      }
+      cfg = fresh;
+    }
+    t = mtimeOf(cfgDir_ + "/dict.txt");
+    if (t != dictStamp_) {
+      dictStamp_ = t;
+      // dictionnaire PERSO : "mot [fréquence]" — vocabulaire déclaratif
+      // (prénoms, jargon) : jamais autocorrigé (literalIsWord), complétable.
+      std::ifstream f(cfgDir_ + "/dict.txt");
+      std::string line;
+      size_t n = 0;
+      while (std::getline(f, line)) {
+        size_t h = line.find('#');
+        if (h != std::string::npos)
+          line.erase(h);
+        std::istringstream is(line);
+        std::string w;
+        uint64_t fr = 5000;
+        if (!(is >> w))
+          continue;
+        is >> fr;
+        uint32_t wid = intern(w);
+        freq[wid] = uint32_t(std::max<uint64_t>(freq[wid], fr));
+        n++;
+      }
+      finalize(); // nouveaux mots → repli/index/priors reconstruits
+      if (n)
+        fprintf(stderr, "[predictord] dict perso : %zu mots\n", n);
+    }
+    t = mtimeOf(cfgDir_ + "/snippets.tsv");
+    if (t != snipStamp_) {
+      snipStamp_ = t;
+      // snippets : "déclencheur<TAB>expansion" (";mail" → adresse…). Le
+      // déclencheur exact s'auto-applique sur Espace, un préfixe l'affiche.
+      snips_.clear();
+      std::ifstream f(cfgDir_ + "/snippets.tsv");
+      std::string line;
+      while (std::getline(f, line)) {
+        if (line.empty() || line[0] == '#')
+          continue;
+        size_t tab = line.find('\t');
+        if (tab == std::string::npos || tab == 0)
+          continue;
+        snips_.push_back(
+            {foldStr(line.substr(0, tab)), line.substr(tab + 1)});
+      }
+      std::sort(snips_.begin(), snips_.end());
+      if (!snips_.empty())
+        fprintf(stderr, "[predictord] %zu snippets\n", snips_.size());
+    }
+  }
+
+  void loadVeto(const std::string &path) {
+    vetoLog = path;
+    std::ifstream f(path);
+    std::string line;
+    while (std::getline(f, line)) {
+      size_t tab = line.find('\t');
+      if (tab != std::string::npos)
+        veto_[line.substr(0, tab)].insert(line.substr(tab + 1));
+    }
+  }
+
+  // L'utilisateur a REVERTÉ tapé→appliqué : ne plus jamais l'auto-appliquer.
+  void addVeto(const std::string &typed, const std::string &applied) {
+    if (typed.empty() || applied.empty())
+      return;
+    if (veto_[foldStr(typed)].insert(applied).second && !vetoLog.empty()) {
+      std::ofstream f(vetoLog, std::ios::app);
+      f << foldStr(typed) << '\t' << applied << '\n';
+    }
   }
 
   // Oublie un mot appris (userUni + tous ses bigrammes) et réécrit le journal.
@@ -465,6 +630,29 @@ struct Model {
   }
 
   // ------------------------------------------------------------- scoring ---
+  // Langue dominante du contexte (vote des mots) : 0 neutre, 1 fr, 2 en.
+  uint8_t ctxLang(const std::vector<std::string> &context) const {
+    int fr = 0, en = 0;
+    for (const auto &w : context) {
+      auto it = id_.find(lowerKeep(w));
+      if (it == id_.end())
+        continue;
+      if (lang[it->second] == 1)
+        fr++;
+      else if (lang[it->second] == 2)
+        en++;
+    }
+    return fr > en ? 1 : en > fr ? 2 : 0;
+  }
+
+  // Facteur de boost : un contexte français remonte les mots français (et
+  // réciproquement) — les mots neutres/inconnus ne bougent pas.
+  double langFactor(uint8_t ctxL, uint32_t wid) const {
+    if (!ctxL || wid >= lang.size() || !lang[wid])
+      return 1.0;
+    return lang[wid] == ctxL ? cfg.langBoost : 1.0 / cfg.langBoost;
+  }
+
   // P1(w) : prior unigramme = mélange continuation KN + fréquence brute.
   double p1(uint32_t w) const {
     double pc = w < pcont.size() ? pcont[w] : 0.0;
@@ -534,6 +722,39 @@ struct Model {
     }
   };
 
+  // ------------------------------------------------------------- stats -----
+  // Fenêtre sur la boîte noire : ce que le modèle sait, ce qu'il a appris.
+  json stats() const {
+    json j;
+    j["ok"] = true;
+    j["vocab"] = words.size();
+    j["bigramContexts"] = biAdj.size();
+    j["trigramContexts"] = triAdj.size();
+    j["emojis"] = emojis_.size();
+    j["snippets"] = snips_.size();
+    j["userWords"] = userUni.size();
+    size_t nv = 0;
+    for (auto &kv : veto_)
+      nv += kv.second.size();
+    j["vetoPairs"] = nv;
+    std::vector<std::pair<std::string, uint64_t>> top(userUni.begin(),
+                                                      userUni.end());
+    std::sort(top.begin(), top.end(),
+              [](auto &a, auto &b) { return a.second > b.second; });
+    json tu = json::array(), te = json::array();
+    for (auto &p : top) {
+      if (emojiId_.count(p.first)) {
+        if (te.size() < 8)
+          te.push_back({{"emoji", p.first}, {"count", p.second}});
+      } else if (tu.size() < 10) {
+        tu.push_back({{"word", p.first}, {"count", p.second}});
+      }
+    }
+    j["topUser"] = tu;
+    j["topEmoji"] = te;
+    return j;
+  }
+
   // ----------------------------------------------------------- prédiction ---
   Result predict(const std::vector<std::string> &context,
                  const std::string &prefix, int k = 6) {
@@ -549,7 +770,7 @@ struct Model {
     else if (!prefix.empty())
       completePrefix(context, prefix, k, push, res);
     else
-      predictNext(context, k, push);
+      predictNext(context, k, push, res);
     return res;
   }
 
@@ -618,12 +839,15 @@ private:
     CtxScorer ctxScore;
     ctxScore.init(*this, context);
     bool hasCtx = ctxScore.hasV || ctxScore.hasUV;
+    uint8_t ctxL = ctxLang(context);
 
     // Score d'un candidat : P_KN(w|ctx) si on a du contexte, sinon le prior
     // P(w|préfixe) ∝ fréquence (en début de phrase la fréquence brute est le
-    // bon prior, la « continuation » KN n'a pas de sens sans contexte).
+    // bon prior, la « continuation » KN n'a pas de sens sans contexte) — le
+    // tout × le boost de langue (contexte fr → mots fr devant, et vice-versa).
     auto scoreOf = [&](uint32_t wid) -> double {
-      return hasCtx ? ctxScore(wid) : (double(freq[wid]) + 1.0) / freqTot_;
+      double s = hasCtx ? ctxScore(wid) : (double(freq[wid]) + 1.0) / freqTot_;
+      return s * langFactor(ctxL, wid);
     };
 
     std::vector<std::pair<std::string, double>> ranked;
@@ -635,6 +859,20 @@ private:
       else if (s > ranked[it->second].second)
         ranked[it->second].second = s; // même mot via 2 fautes → la + probable
     };
+
+    // (0bis) SNIPPETS : déclencheur exact → expansion auto-appliquée ;
+    //        préfixe d'un déclencheur → expansion affichée (on voit venir).
+    std::string snippetExact;
+    auto sl = std::lower_bound(
+        snips_.begin(), snips_.end(), fp,
+        [](const auto &a, const std::string &p) { return a.first < p; });
+    for (auto it = sl;
+         it != snips_.end() && it->first.compare(0, fp.size(), fp) == 0;
+         ++it) {
+      if (it->first == fp)
+        snippetExact = it->second;
+      offer(it->second, 3e18);
+    }
 
     // (1) mots APPRIS (de confiance) dont le repli commence par le préfixe →
     //     priorité absolue.
@@ -668,19 +906,27 @@ private:
     //  - une correction FLOUE ne raccourcit jamais la frappe (« pcq » ne
     //    devient pas « pc ») et jamais à travers une apostrophe/trait d'union
     //    (on ne mutile pas une contraction, « j'ai » ≠ jail).
-    if (!res.candidates.empty() && fp.size() >= AUTO_MIN_LEN) {
+    if (!snippetExact.empty()) {
+      res.autocomplete = snippetExact; // déclencheur explicite → toujours
+    } else if (cfg.autoApply && !res.candidates.empty() &&
+               fp.size() >= size_t(cfg.autoMinLen)) {
       const std::string &top = res.candidates.front();
       const std::string ftop = foldStr(top);
       bool topIsPrefix = ftop.compare(0, fp.size(), fp) == 0;
-      bool fpHasPunct =
-          fp.find('\'') != std::string::npos || fp.find('-') != std::string::npos;
+      bool fpHasPunct = fp.find_first_of("'-;") != std::string::npos;
       bool isUser = ranked.size() >= 1 && ranked[0].second >= 1e18;
       bool dominant =
           isUser || ranked.size() < 2 ||
-          ranked[0].second >= AUTO_DOM * std::max(ranked[1].second, 1e-300);
+          ranked[0].second >= cfg.autoDom * std::max(ranked[1].second, 1e-300);
       bool fuzzyOk = ftop.size() >= fp.size() && !fpHasPunct;
       if (dominant && (topIsPrefix || fuzzyOk))
         res.autocomplete = top;
+    }
+    // VETO : remplacement déjà refusé par un revert → plus jamais auto.
+    if (!res.autocomplete.empty()) {
+      auto vIt = veto_.find(fp);
+      if (vIt != veto_.end() && vIt->second.count(res.autocomplete))
+        res.autocomplete.clear();
     }
 
     // Suggestion emoji : le mot tapé est exactement un mot-clé emoji
@@ -760,7 +1006,7 @@ private:
   // compte les bigrammes d'amorce). L'apprentissage utilisateur passe devant.
   template <class Push>
   void predictNext(const std::vector<std::string> &context, int k,
-                   Push &&push) {
+                   Push &&push, Result &res) {
     std::vector<std::string> ctx = context;
     if (ctx.empty())
       ctx.push_back("<s>");
@@ -779,9 +1025,10 @@ private:
         push(p.first);
     }
 
-    // (2) modèle : score exact P_KN(w|ctx) sur le pool de candidats.
+    // (2) modèle : score exact P_KN(w|ctx) × boost de langue sur le pool.
     CtxScorer ctxScore;
     ctxScore.init(*this, ctx);
+    uint8_t ctxL = ctxLang(ctx);
     std::unordered_set<uint32_t> pool;
     for (auto &pr : ctxScore.tri)
       pool.insert(pr.first);
@@ -794,12 +1041,45 @@ private:
     std::vector<std::pair<uint32_t, double>> v;
     v.reserve(pool.size());
     for (uint32_t w : pool)
-      v.push_back({w, ctxScore(w)});
+      v.push_back({w, ctxScore(w) * langFactor(ctxL, w)});
     size_t kk = std::min<size_t>(size_t(k) * 2, v.size());
     std::partial_sort(v.begin(), v.begin() + kk, v.end(),
                       [](auto &a, auto &b) { return a.second > b.second; });
+
+    // (3) MULTI-MOTS : si le meilleur candidat a une continuation très sûre
+    //     (P >= MULTI_MIN), proposer l'expression entière en FIN de barre
+    //     (« sais pas ») — visible sans déplacer le top des mots simples.
+    std::string phrase;
+    if (cfg.multiWord && kk > 0) {
+      std::vector<std::string> c2(ctx);
+      c2.push_back(words[v[0].first]);
+      if (c2.size() > 2)
+        c2.erase(c2.begin(), c2.end() - 2);
+      CtxScorer s2;
+      s2.init(*this, c2);
+      uint32_t best = 0;
+      double bp = 0;
+      for (auto &pr : s2.tri)
+        if (pr.second > bp) {
+          bp = pr.second;
+          best = pr.first;
+        }
+      for (auto &pr : s2.bi)
+        if (pr.second > bp) {
+          bp = pr.second;
+          best = pr.first;
+        }
+      if (bp >= MULTI_MIN)
+        phrase = words[v[0].first] + ' ' + words[best];
+    }
     for (size_t i = 0; i < kk; i++)
       push(words[v[i].first]);
+    if (!phrase.empty()) {
+      if ((int)res.candidates.size() >= k)
+        res.candidates.back() = phrase;
+      else
+        push(phrase);
+    }
   }
 };
 
@@ -837,6 +1117,15 @@ int main(int argc, char **argv) {
   mkdir(userBase.c_str(), 0755);
   mkdir(userDir.c_str(), 0755);
   model.loadUser(userDir + "/user.log");
+  model.loadVeto(userDir + "/veto.log");
+
+  // config/dictionnaire perso/snippets ($XDG_CONFIG_HOME/ime-predictord),
+  // rechargés à chaud sur mtime à chaque requête.
+  const char *xdgc = getenv("XDG_CONFIG_HOME");
+  model.cfgDir_ = (xdgc ? std::string(xdgc)
+                        : std::string(home ? home : "/tmp") + "/.config") +
+                  "/ime-predictord";
+  model.maybeReload();
 
   std::string sockpath = argc > 2 ? argv[2] : "/tmp/ime-predictord.sock";
   unlink(sockpath.c_str());
@@ -878,10 +1167,19 @@ int main(int argc, char **argv) {
             resp["removed"] =
                 model.forget(req["forget"].value("word", std::string{}));
             resp["ok"] = true;
+          } else if (req.contains("veto")) {
+            // l'utilisateur a reverté tapé→appliqué : ne plus auto-appliquer
+            auto v = req["veto"];
+            model.addVeto(v.value("typed", std::string{}),
+                          v.value("applied", std::string{}));
+            resp["ok"] = true;
+          } else if (req.contains("stats")) {
+            resp = model.stats();
           } else {
             std::vector<std::string> ctx =
                 req.value("context", std::vector<std::string>{});
             std::string prefix = req.value("prefix", std::string{});
+            model.maybeReload(); // config/dict/snippets à chaud (mtime)
             Result r = model.predict(ctx, prefix);
             resp["candidates"] = r.candidates;
             resp["literalIsWord"] = r.literalIsWord;

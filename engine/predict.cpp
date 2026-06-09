@@ -34,11 +34,13 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <functional>
 #include <string>
 #include <vector>
 
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
 
@@ -46,6 +48,48 @@
 using json = nlohmann::json;
 
 namespace {
+
+// ------------------------------------------------------ config utilisateur --
+// $XDG_CONFIG_HOME/ime-predictord/config.json (partagé avec le daemon),
+// rechargé à chaud sur mtime. Côté engine :
+//   ghostText      — le reste du mot auto-appliqué s'affiche dans le préedit
+//   frenchSpacing  — espace fine insécable (U+202F) avant ; : ! ?
+//   autoCapitalize — majuscule automatique en début de phrase
+struct EngineCfg {
+  bool ghostText = true;
+  bool frenchSpacing = false;
+  bool autoCapitalize = false;
+};
+
+const EngineCfg &engineCfg() {
+  static EngineCfg cfg;
+  static time_t stamp = -1;
+  static const std::string path = [] {
+    const char *x = ::getenv("XDG_CONFIG_HOME");
+    const char *h = ::getenv("HOME");
+    return (x ? std::string(x)
+              : std::string(h ? h : "/tmp") + "/.config") +
+           "/ime-predictord/config.json";
+  }();
+  struct stat st {};
+  time_t t = ::stat(path.c_str(), &st) == 0 ? st.st_mtime : 0;
+  if (t != stamp) {
+    stamp = t;
+    EngineCfg fresh;
+    std::ifstream f(path);
+    if (f) {
+      try {
+        json j = json::parse(f, nullptr, true, /*ignore_comments=*/true);
+        fresh.ghostText = j.value("ghostText", fresh.ghostText);
+        fresh.frenchSpacing = j.value("frenchSpacing", fresh.frenchSpacing);
+        fresh.autoCapitalize = j.value("autoCapitalize", fresh.autoCapitalize);
+      } catch (...) {
+      }
+    }
+    cfg = fresh;
+  }
+  return cfg;
+}
 
 // ----------------------------------------------------------------- UTF-8 ----
 void appendCp(std::string &s, uint32_t cp) {
@@ -130,14 +174,39 @@ uint32_t toUpperCp(uint32_t cp) {
 
 // Caractère qui prolonge un mot : lettre toujours ; apostrophe / trait d'union /
 // chiffre seulement si le buffer est déjà entamé (mot en cours). ':' sur buffer
-// VIDE démarre le picker emoji (":coeur" → ❤️) — jamais en milieu de mot, donc
-// "10:30" ou "voici :" tapent normalement.
+// VIDE démarre le picker emoji (":coeur" → ❤️), ';' un SNIPPET (";mail" →
+// expansion) — jamais en milieu de mot, donc "10:30" ou "voici :" tapent
+// normalement.
 bool isWordExtender(uint32_t cp, bool bufferEmpty) {
   if (isLetterCp(cp))
     return true;
   if (bufferEmpty)
-    return cp == ':';
+    return cp == ':' || cp == ';';
   return cp == '\'' || cp == 0x2019 || cp == '-' || (cp >= '0' && cp <= '9');
+}
+
+// Buffer « déclencheur » (emoji ':' ou snippet ';') : pas d'apprentissage de
+// bigramme ni de contexte — ce n'est pas de la prose.
+bool isTriggerBuffer(const std::string &buffer) {
+  return !buffer.empty() && (buffer[0] == ':' || buffer[0] == ';');
+}
+
+// Majuscule sur la première lettre (auto-capitalisation en début de phrase).
+std::string capFirst(const std::string &w);
+
+std::string capFirst(const std::string &w) {
+  auto cps = decodeUtf8(w);
+  std::string out;
+  bool done = false;
+  for (uint32_t cp : cps) {
+    if (!done && isLetterCp(cp)) {
+      appendCp(out, toUpperCp(cp));
+      done = true;
+    } else {
+      appendCp(out, cp);
+    }
+  }
+  return out;
 }
 
 // Reporte la casse du `buffer` tapé sur un candidat (minuscule du modèle).
@@ -276,6 +345,21 @@ void learnDaemon(const std::string &prev, const std::string &word) {
   ::close(fd);
 }
 
+// L'utilisateur a reverté un remplacement (Backspace) : le daemon ne doit plus
+// jamais auto-appliquer cette paire (persisté côté daemon).
+void vetoDaemon(const std::string &typed, const std::string &applied) {
+  int fd = connectDaemon();
+  if (fd < 0)
+    return;
+  json req;
+  req["veto"]["typed"] = typed;
+  req["veto"]["applied"] = applied;
+  std::string line = req.dump() + "\n";
+  ssize_t w = ::send(fd, line.data(), line.size(), MSG_NOSIGNAL);
+  (void)w;
+  ::close(fd);
+}
+
 // État par contexte d'entrée.
 struct PredictState : public fcitx::InputContextProperty {
   std::string buffer;                // mot en cours (préfixe, UTF-8)
@@ -287,6 +371,7 @@ struct PredictState : public fcitx::InputContextProperty {
   std::string autocomplete;          // mot appliqué sur Espace (haute confiance)
   // Fenêtre de REVERT d'une auto-application (Backspace juste après) :
   std::string lastAutoLit;           // le littéral qui a été remplacé
+  std::string lastAutoWord;          // le mot qui avait été appliqué
   uint32_t lastAutoCps = 0;          // points de code committés à effacer
   bool vetoAuto = false;             // l'utilisateur a refusé : Espace garde le littéral
 };
@@ -357,6 +442,9 @@ public:
       ic->deleteSurroundingText(-int(autoCps), autoCps);
       state->buffer = state->lastAutoLit;
       state->vetoAuto = true;
+      // veto PERSISTANT : cette paire tapé→appliqué ne sera plus jamais
+      // auto-appliquée (le daemon la journalise).
+      vetoDaemon(state->lastAutoLit, state->lastAutoWord);
       if (!state->ctx.empty())
         state->ctx.pop_back(); // le mot remplacé n'est plus dans le texte
       state->navigating = false;
@@ -421,6 +509,7 @@ public:
         commitWord(ic, state, chosen, /*trailingSpace=*/true);
         if (autoApplied) { // arme la fenêtre de revert (cf (0))
           state->lastAutoLit = lit;
+          state->lastAutoWord = committed;
           state->lastAutoCps = uint32_t(decodeUtf8(committed).size()) + 1;
         }
         event.filterAndAccept();
@@ -447,12 +536,16 @@ public:
       // toute autre touche (ponctuation, flèches, Home/End…) : termine le mot
       // SANS espace puis laisse la touche filer vers l'application. La
       // PONCTUATION applique la même correction que l'Espace (« teh. » →
-      // « the. ») — sauf en mode emoji (« :xyz, » reste littéral).
+      // « the. ») — sauf après un déclencheur (':xyz' / ';xyz' littéraux).
       bool punctFix = (cp == '.' || cp == ',' || cp == ';' || cp == ':' ||
                        cp == '!' || cp == '?') &&
-                      state->buffer[0] != ':';
+                      !isTriggerBuffer(state->buffer);
       commitWord(ic, state, punctFix ? chooseOnSpace(state) : state->buffer,
                  /*space=*/false);
+      // typographie française (opt-in) : espace fine insécable avant ; : ! ?
+      if (engineCfg().frenchSpacing && punctFix &&
+          (cp == ';' || cp == ':' || cp == '!' || cp == '?'))
+        ic->commitString("\xE2\x80\xAF"); // U+202F
       if (cp == '.' || cp == '!' || cp == '?')
         state->ctx.clear(); // fin de phrase → on repart à neuf
       return;
@@ -562,14 +655,16 @@ private:
       unsigned int cur = ic->surroundingText().cursor();
       if (cur < cps.size())
         cps.resize(cur);
-      return lastWords(cps, 2);
+      return lastWords(cps, 4);
     }
     return {};
   }
 
+  // 4 mots de contexte : le daemon n'utilise que les 2 derniers pour les
+  // n-grammes, mais tout le contexte vote pour la DÉTECTION DE LANGUE.
   void pushCtx(PredictState *state, const std::string &word) {
     state->ctx.push_back(word);
-    if (state->ctx.size() > 2)
+    if (state->ctx.size() > 4)
       state->ctx.erase(state->ctx.begin());
   }
 
@@ -631,24 +726,41 @@ private:
 
   // Valide un mot : applique la casse du buffer, committe, apprend (sauf
   // annulation), met à jour le contexte, puis (si espace) propose le suivant.
+  // Gère aussi les candidats MULTI-MOTS (« sais pas » : apprentissage et
+  // contexte mot à mot) et l'auto-majuscule de début de phrase (opt-in).
   void commitWord(fcitx::InputContext *ic, PredictState *state,
                   const std::string &raw, bool trailingSpace,
                   bool learn = true) {
-    bool emojiMode = !state->buffer.empty() && state->buffer[0] == ':';
+    bool trigger = isTriggerBuffer(state->buffer); // emoji ':' / snippet ';'
     std::string word = applyCase(raw, state->buffer);
+    if (engineCfg().autoCapitalize && !trigger && state->ctx.empty())
+      word = capFirst(word); // début de phrase
     ic->commitString(trailingSpace ? word + " " : word);
-    if (emojiMode) {
-      // un emoji choisi compte comme « favori » (le daemon le remontera) ; le
-      // contexte de mots reste inchangé — un emoji ne porte pas de syntaxe.
+    if (trigger) {
+      // un emoji/snippet choisi compte comme « favori » (le daemon le
+      // remontera) ; le contexte de mots reste inchangé.
       if (learn && word != state->buffer)
         learnDaemon(std::string{}, word);
     } else {
-      if (learn) {
-        std::string prev =
-            state->ctx.empty() ? std::string{} : state->ctx.back();
-        learnDaemon(prev, word);
+      // multi-mots : chaque mot nourrit l'apprentissage et le contexte.
+      size_t from = 0;
+      while (from <= word.size()) {
+        size_t sp = word.find(' ', from);
+        std::string w = word.substr(from, sp == std::string::npos
+                                               ? std::string::npos
+                                               : sp - from);
+        if (!w.empty()) {
+          if (learn) {
+            std::string prev =
+                state->ctx.empty() ? std::string{} : state->ctx.back();
+            learnDaemon(prev, w);
+          }
+          pushCtx(state, w);
+        }
+        if (sp == std::string::npos)
+          break;
+        from = sp + 1;
       }
-      pushCtx(state, word);
     }
     state->buffer.clear();
     state->cands.clear();
@@ -674,7 +786,24 @@ private:
     if (state->cands.empty())
       state->cands.push_back(state->buffer); // repli : le brut
 
-    fcitx::Text preedit(state->buffer, fcitx::TextFormatFlag::Underline);
+    // GHOST TEXT : si l'Espace va compléter le mot, le reste s'affiche déjà
+    // dans le préedit, curseur entre le tapé et le fantôme ("bonjou‸r") —
+    // uniquement quand l'auto-complétion PROLONGE octet-à-octet la frappe
+    // (jamais pour une correction floue : la barre + liseré s'en chargent).
+    std::string ghost;
+    if (engineCfg().ghostText && !state->literalIsWord && !state->vetoAuto &&
+        state->autocomplete.size() > state->buffer.size() &&
+        state->autocomplete.compare(0, state->buffer.size(), state->buffer) ==
+            0)
+      ghost = state->autocomplete.substr(state->buffer.size());
+
+    fcitx::Text preedit;
+    preedit.append(state->buffer,
+                   fcitx::TextFormatFlags{fcitx::TextFormatFlag::Underline});
+    if (!ghost.empty())
+      preedit.append(ghost,
+                     fcitx::TextFormatFlags{fcitx::TextFormatFlag::Underline} |
+                         fcitx::TextFormatFlag::Italic);
     preedit.setCursor(state->buffer.size());
     ic->inputPanel().setClientPreedit(preedit);
     setCandidates(ic, state);

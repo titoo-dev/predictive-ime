@@ -64,7 +64,10 @@ class Daemon:
     def __init__(self, binpath, words):
         self.tmp = tempfile.mkdtemp(prefix="ime-eval-")
         self.sock_path = os.path.join(self.tmp, "sock")
-        env = dict(os.environ, XDG_DATA_HOME=f"{self.tmp}/xdg")
+        # ISOLATION complète : ni l'apprentissage réel ni la config perso de
+        # la machine ne doivent fausser la mesure.
+        env = dict(os.environ, XDG_DATA_HOME=f"{self.tmp}/xdg",
+                   XDG_CONFIG_HOME=f"{self.tmp}/cfg")
         self.proc = subprocess.Popen([binpath, words, self.sock_path], env=env,
                                      stderr=subprocess.DEVNULL)
         for _ in range(600):
