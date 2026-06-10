@@ -84,19 +84,34 @@ P1(w)    = 0.7·Pcont(w) + 0.3·Pfreq(w)
   introspection : `echo '{"stats":true}' | nc -U …`.
 - **Veto persistant** : chaque revert (Backspace) journalise la paire
   tapé→appliqué — elle ne sera plus jamais auto-appliquée (`veto.log`).
-- **Détection de langue** : le contexte (4 mots) vote FR/EN (3ᵉ colonne de
-  words.tsv) et les candidats de la langue active remontent (`langBoost`) —
-  fini « the » en pleine phrase française.
+- **Langue des suggestions** : choisie par l'utilisateur (`lang` : `fr` /
+  `en` — déterministe, `off` — aucun boost) via les préférences ; en mode
+  `auto` seulement, le contexte (4 mots) vote FR/EN (3ᵉ colonne de
+  words.tsv). Les candidats de la langue active remontent (`langBoost`).
+  Mesuré (cf benchmark) : choisir sa langue ne coûte rien en qualité, même à
+  contre-emploi — c'est de la prévisibilité gratuite.
 - **Multi-mots** : si la continuation du meilleur candidat est très sûre
   (P ≥ 0,35), l'expression entière est proposée (« sais pas »).
 - **Apostrophe typographique** `’` normalisée en `'` partout (repli + n-grammes).
 
 ## Personnalisation (`~/.config/ime-predictord/`, rechargé à chaud)
 
-- **`config.json`** — daemon : `autoApply`, `autoDom`, `autoMinLen`,
+- **`ime-preferences`** — popover de réglages (paquet du flake, dans
+  `environment.systemPackages` via le module ; **SUPER+ALT+I** sous
+  Hyprland, règle float dédiée). Édite `config.json` à travers le lien
+  stow (le fichier des dotfiles est mis à jour), chaque bascule est
+  appliquée à la volée. Section « Langue des suggestions » : Français /
+  English / Auto / Aucune. CLI scriptable :
+  `ime-preferences --set lang=fr --set ghostText=false`.
+- **`config.json`** — daemon : `lang` (`fr`/`en`/`auto`/`off`), `autoApply`,
+  `autoDom`, `autoMinLen`,
   `langBoost`, `multiWord` ; engine : `ghostText`, `frenchSpacing` (espace
   fine insécable U+202F avant `; : ! ?`), `autoCapitalize` (majuscule en
-  début de phrase). Tout changement est pris en compte sans redémarrage.
+  début de phrase), `nextWordBar` (false = pas de barre spéculative après
+  Espace — mode calme), `autoApplyNeedsRevert` (défaut true : l'Espace ne
+  remplace que si l'app permet le revert Backspace), `escapeForward` (défaut
+  true : Échap atteint l'application après avoir fermé la barre). Tout
+  changement est pris en compte sans redémarrage.
 - **`snippets.tsv`** — `déclencheur<TAB>expansion` : `;mail ` → ton adresse,
   `;shrug ` → ¯\\_(ツ)_/¯. Le déclencheur exact s'auto-applique sur Espace,
   un préfixe l'affiche dans la barre.
@@ -135,23 +150,32 @@ P1(w)    = 0.7·Pcont(w) + 0.3·Pfreq(w)
 
 ## Interactions
 
-- **Navigation** : Tab / ↓ entrent dans la barre par la **gauche**, ⇧Tab / ↑
-  par la **droite** ; en navigation, ←/→ se déplacent aussi et **1-6**
-  sélectionnent directement. Espace/Entrée valident le surligné.
+- **Navigation** : Tab entre dans la barre par la **gauche**, ⇧Tab par la
+  **droite** ; en navigation, ←/→ se déplacent et **1-6** sélectionnent
+  directement. Espace/Entrée valident le surligné. ↑/↓ ne sont **pas**
+  capturés (ils déplacent le curseur dans un éditeur multi-lignes) — sauf en
+  **grille emoji** (`:`), où ils sautent d'une ligne (±8, wrap) — et les
+  raccourcis à modificateur (Ctrl+Tab, Ctrl+Entrée…) committent le littéral
+  puis **passent** à l'application. Un appui de modificateur seul (Shift…)
+  ne touche à rien — ni au mot en cours, ni à la barre, ni au revert.
 - **Ghost text** : quand l'Espace va compléter, le reste du mot s'affiche déjà
   dans le préedit, curseur entre le tapé et le fantôme (`bonjou‸r`) — jamais
   pour une correction floue (la barre + liseré s'en chargent).
 - **Espace** : complète/corrige (garde-fous ci-dessus) — le candidat qui sera
   appliqué porte un **liseré accent** dans la barre ; sans marquage, Espace
   garde le littéral. La **ponctuation** (`. , ; : ! ?`) corrige aussi
-  (« teh. » → « the. »).
+  (« teh. » → « the. »). L'auto-application exige que l'app expose le
+  *surrounding text* (sinon le revert Backspace serait impossible — les
+  candidats restent, Tab choisit) ; opt-out : `autoApplyNeedsRevert: false`.
 - **Backspace juste après une auto-application** : REVERT — le mot remplacé
   est effacé, le littéral tapé revient en composition, et l'Espace suivant le
-  respecte (pas de re-correction).
-- **Échap en composition** : ferme la barre et ANNULE la suggestion — le
-  littéral est committé tel quel, rien n'est appris (annuler ≠ valider).
-- **Échap sur la barre mot-suivant** : la ferme, touche avalée (un 2ᵉ Échap,
-  barre fermée, passe normalement à l'application).
+  respecte (pas de re-correction). La fenêtre survit aux modificateurs.
+- **Ctrl+Backspace en composition** : ABANDONNE le mot en cours — rien n'est
+  committé, rien n'est appris.
+- **Échap** : ANNULE la suggestion (en composition le littéral est committé
+  tel quel, rien n'est appris — annuler ≠ valider) ou ferme la barre
+  mot-suivant, puis la touche **file à l'application** (vim sort du mode
+  insertion au premier Échap). `escapeForward: false` pour l'avaler.
 
 ## Résultats mesurés (i5-1335U, CPU-only)
 
@@ -176,10 +200,57 @@ le revert Backspace couvre les erreurs résiduelles. Précision > agressivité.
 pas ») — en rang 2 elle coûtait 0,7 pt de hit@3, en fin de barre ~0,1 pt de
 hit@6 ; toute insertion déplace le top-k mesuré.
 
-Repères production (litt.) : le 5-gram FST historique de Gboard mesurait
-13,0/22,1 % (hit@1/3), son remplaçant neural CIFG-LSTM 16,4/27,0 %. En
-in-vocab nous sommes à **16,9/27,0 %** — niveau neural, en lookups µs.
+### Benchmark vs Gboard (2026-06-10, v6)
+
+Mot-suivant, held-out Leipzig **news 2023** (année ≠ training, 400
+phrases/langue, vrai protocole socket). Référence Gboard : les chiffres
+**publiés par Google** (Hard et al. 2018, arXiv 1811.03604 — production
+Gboard EN, vocab 10k) :
+
+| modèle                              | hit@1      | hit@3      |
+|-------------------------------------|------------|------------|
+| Gboard 5-gram FST (historique)      | 13,0 %     | 22,1 %     |
+| Gboard CIFG-LSTM (déployé, fédéré)  | 16,4 %     | 27,0 %     |
+| **nous — TOTAL fr+en**              | **15,1 %** | **24,0 %** |
+| **nous — in-vocab seulement**       | **16,9 %** | **27,0 %** |
+| nous — FR seul                      | 13,7 %     | 23,4 %     |
+| nous — EN seul                      | 16,3 %     | 24,7 %     |
+
+En in-vocab (la comparaison la plus proche : Gboard mesure sur son vocab
+10k, nous sur 84k) on est **au niveau du CIFG-LSTM déployé**, en lookups
+n-gram CPU. Lecture honnête des limites : Gboard mesure sur ses **logs de
+frappe mobile EN** (registre chat), nous sur de la **presse** — c'est
+indicatif, pas du strict apples-to-apples ; notre hit@1 TOTAL (15,1 %) reste
+sous leur CIFG (16,4 %) car ~11 % des tokens held-out sont hors-vocab ;
+l'autocorrection (91,4 % top-1) et l'auto-KSR (21,9 %) n'ont pas
+d'équivalent publié comparable côté Gboard. Latence par requête : p50
+**40-67 µs**, p99 1,5-2,5 ms (socket compris) — l'inférence CIFG on-device
+de Gboard est de l'ordre de la dizaine de ms.
+
+**Langue choisie vs auto-détection** (la détection est désactivable —
+préférences) : forcer la langue ne coûte **rien** sur sa propre langue
+(FR forcé sur corpus FR : identique à l'auto à ±0,1 pt) et presque rien à
+contre-emploi (FR forcé sur corpus EN : hit@3 −0,3 pt, auto-KSR −0,5 pt,
+top3@2 −0,7 pt) — les n-grammes du contexte dominent largement le boost
+×1,6. Choisir sa langue est donc un choix de **prévisibilité**, pas un
+sacrifice de qualité.
+
+```sh
+# reproduire (--config injecte le réglage dans le daemon isolé) :
+python3 ime/daemon/eval_model.py <predictord> <words.tsv> \
+  fra-sentences.txt eng-sentences.txt --config '{"lang":"fr"}'
+```
+
 Bench brut n-gram : p99 **0,86 µs** ; round-trip socket réel ~24 µs.
+
+**v6 (latence du chemin chaud)** : le mot-suivant recopiait les listes de
+suiveurs en hash map à chaque requête — 1,3-4 ms round-trip mesurés sur les
+contextes fréquents (« de », début de phrase), payés en synchrone par
+l'engine à chaque frappe. Le `CtxScorer` pointe maintenant les listes triées
+(dichotomie, zéro copie) : round-trip mesuré p50 **0,05-0,4 ms** sur les
+mêmes cas (×25-40). Le daemon sert plusieurs clients en `poll()` (un client
+resté ouvert — `nc -U` interactif — ne bloque plus personne) et l'engine
+borne toutes ses E/S socket à 150 ms : le clavier ne peut plus geler.
 
 ```sh
 # re-mesurer :
@@ -230,9 +301,33 @@ python3 ime/daemon/test_predict.py "$(nix build ./ime#predictord --no-link --pri
       boucle de frames pilotée par `wl_callback` (frame callbacks Wayland),
       liseré outline, rendu emoji couleur. Validé headless (captures +
       assertions de frames intermédiaires, `./test-ui.sh`).
+- [x] **v6 — fluidité & robustesse** (audit 2026-06-10) : garde `isModifier`
+      (un Shift seul ne committe plus le mot en plein milieu, ne fait plus
+      clignoter la barre à chaque majuscule et ne désarme plus le revert),
+      timeouts socket engine (150 ms — le clavier ne gèle jamais derrière le
+      daemon), serveur `poll()` multi-clients, mot-suivant sans copie
+      (×25-40 en latence), fondu de fermeture borné (perte de focus = unmap
+      immédiat, garde-fou minuté contre les fondus orphelins → plus de barre
+      fantôme au refocus), ré-apparition sans blink (reprise à l'opacité
+      courante), emojis keycap/©️/‼️ rendus en fonte couleur (détection par
+      contenu, plus par 1ᵉʳ point de code), Ctrl+Backspace abandonne le mot,
+      Échap traverse vers l'app (`escapeForward`), ↑/↓ et raccourcis à
+      modificateur libérés, auto-application seulement si le revert est
+      possible (`autoApplyNeedsRevert`), barre mot-suivant désactivable
+      (`nextWordBar`). e2e : +3 cas (Shift en plein mot, revert après Shift,
+      Échap traversant).
+- [x] **Langue choisie + préférences + benchmark** (2026-06-10) :
+      l'auto-détection de langue est désactivée au profit d'une langue
+      CHOISIE (`lang: "fr"` dans les dotfiles ; `auto` reste disponible),
+      popover `ime-preferences` (Qt Quick, couleurs DMS, SUPER+ALT+I,
+      écrit la config à chaud, CLI `--set`), benchmark held-out 2023 vs
+      chiffres publiés Gboard (cf section) : in-vocab **16,9/27,0 %** =
+      niveau CIFG-LSTM déployé ; forcer la langue ≈ gratuit (−0,3 pt hit@3
+      au pire, à contre-emploi).
 - [ ] Rerank neuronal async optionnel (GRU/GPT-2-mini int8 via ONNX, patron
       SwiftKey 2025 : reranke les candidats n-gram, ~+3-5 pts hit@3), non
-      bloquant.
+      bloquant. (Toujours pas prioritaire : à reconsidérer seulement si le
+      ressenti de frappe est bon et que la qualité des candidats plafonne.)
 - [ ] (Polish) auto-accent quand la forme sans accent est au dico (ex. `garcon`
       reste `garcon` car présent dans le corpus) — limite de qualité du corpus.
 
@@ -276,3 +371,11 @@ l'UI). Test visuel headless : `./test-ui.sh` (PNG dans `/tmp/ime-ui/`).
 Dans la config système : importer `nixosModules.default` du flake + s'assurer
 de `i18n.inputMethod.type = "fcitx5"`. Le module ajoute l'addon à
 `i18n.inputMethod.fcitx5.addons` et lance `predictord` en service utilisateur.
+
+**Une seule source de lancement de fcitx5.** Le paquet fcitx5 installe un
+autostart XDG (`/etc/xdg/autostart/org.fcitx.Fcitx5.desktop`, sans
+`--ui qmlpanel`) qui court contre le `fcitx5 -d --ui qmlpanel` de
+`hyprland.lua` — le perdant de la course dbus variait par session (sessions
+sur classicui au lieu de la barre QML). L'entrée utilisateur
+`dotfiles/autostart/org.fcitx.Fcitx5.desktop` (`Hidden=true`, stowée) masque
+l'autostart système : seul le lancement Hyprland reste.

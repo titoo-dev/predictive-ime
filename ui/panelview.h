@@ -47,6 +47,10 @@ public:
     // et l'appelant démappe la surface.
     bool startHide();
     bool hideDone() const;
+    bool hiding() const { return hiding_; }
+    // Budget max du fondu (durée + marge) : passé ce délai sans frame callback
+    // du compositeur, l'appelant doit démapper de force (fondu orphelin).
+    int hideGraceMs() const;
     // La barre vient d'être cachée (preedit vide / focus perdu).
     void hidden();
     // Une animation est-elle en cours ? (→ re-rendre à la prochaine frame)
@@ -77,6 +81,7 @@ private:
     int highlight_ = -1;
     QStringList cands_;
     QVariantList autoMark_;   // candidat appliqué par l'Espace (par index)
+    QVariantList emojiMark_;  // candidat emoji (fonte couleur), par index
     bool composing_ = false;  // mot en cours (indicateur de mode)
     bool grid_ = false;       // mode emoji : grille 8 colonnes
 };

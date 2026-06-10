@@ -45,6 +45,11 @@ input type:keyboard xkb_layout fr
 exec "$WT/inner.sh"
 EOF
 
+# Échap AVALÉ ici (escapeForward=false) : le scénario l'utilise pour fermer la
+# barre sans fermer zenity (par défaut la touche traverse vers l'application).
+mkdir -p "$WT/config/ime-predictord"
+printf '{"escapeForward": false}\n' > "$WT/config/ime-predictord/config.json"
+
 echo "==> daemon de prédiction (XDG_DATA_HOME isolé : pas d'apprentissage réel)"
 XDG_DATA_HOME="$WT/xdg" "$DAEMON/bin/predictord" "$MODEL/words.tsv" "$SOCK" >"$WT/daemon.log" 2>&1 &
 DPID=$!

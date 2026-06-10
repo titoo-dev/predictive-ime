@@ -145,6 +145,25 @@
           ];
         };
 
+        # Popover de préférences (langue des suggestions + interrupteurs) :
+        # petite appli Qt Quick qui édite ~/.config/ime-predictord/config.json
+        # — rechargé à chaud par le daemon et l'engine, effet immédiat.
+        ime-preferences = pkgs.stdenv.mkDerivation {
+          pname = "ime-preferences";
+          version = "0.1";
+          src = ./ui/preferences;
+          nativeBuildInputs = [
+            pkgs.cmake
+            pkgs.pkg-config
+            pkgs.qt6.wrapQtAppsHook
+          ];
+          buildInputs = [
+            pkgs.qt6.qtbase
+            pkgs.qt6.qtdeclarative
+            pkgs.qt6.qtwayland
+          ];
+        };
+
         # Track B + câblage : le daemon de prédiction (socket Unix + JSON).
         predictord = pkgs.stdenv.mkDerivation {
           pname = "ime-predictord";
@@ -229,6 +248,11 @@
               };
             };
           };
+
+          # Popover de réglages (`ime-preferences`, bindable dans Hyprland).
+          environment.systemPackages = [
+            self.packages.${system}.ime-preferences
+          ];
 
           # Daemon de prédiction (n-gram), service utilisateur.
           systemd.user.services.ime-predictord = {

@@ -47,7 +47,14 @@ EOF
 echo "==> daemon de prédiction (XDG_DATA_HOME/XDG_CONFIG_HOME isolés)"
 mkdir -p "$WT/config/ime-predictord"
 printf ';mail\tdev@e2e.test\n' > "$WT/config/ime-predictord/snippets.tsv"
-pkill -x predictord 2>/dev/null || true
+# Échap AVALÉ pour la première salve de cas (comportement historique testable
+# dans zenity — par défaut escapeForward laisse passer la touche et FERMERAIT
+# le dialogue) ; un cas dédié rebascule sur true à la fin.
+printf '{"escapeForward": false}\n' > "$WT/config/ime-predictord/config.json"
+# Ne tuer QUE les daemons de test orphelins (commande contenant NOTRE chemin
+# de socket) — `pkill -x predictord` fauchait le daemon DE SESSION de la
+# machine (service systemd, non relancé sur SIGTERM) : barre morte après e2e.
+pkill -f "$WT/pred.sock" 2>/dev/null || true
 XDG_DATA_HOME="$WT/xdg" XDG_CONFIG_HOME="$WT/config" \
   "$DAEMON/bin/predictord" "$MODEL/words.tsv" "$SOCK" >"$WT/daemon.log" 2>&1 &
 DPID=$!
@@ -84,12 +91,15 @@ expect() {  # $1=libellé  $2=chaîne tapée  $3=résultat attendu
   sleep 5
   inj() { XDG_RUNTIME_DIR="$RUN" WAYLAND_DISPLAY=wayland-1 "$WTYPE" "$@" 2>>"$WT/wtype.log"; }
   inj "q"; sleep 0.3; inj -k BackSpace; sleep 0.3   # warm-up (drop focus, bug fcitx #5815)
-  # la chaîne peut contenir <ESC> / <BS> → touches spéciales entre les segments
+  # la chaîne peut contenir <ESC> / <BS> / <SHIFT> → touches spéciales entre
+  # les segments (<SHIFT> = appui+relâche de Shift SEUL : wtype n'utilise pas
+  # de modificateurs pour le texte, il faut l'injecter explicitement)
   local rest="$keys" seg
   while [ -n "$rest" ]; do
     case "$rest" in
-      "<ESC>"*) sleep 0.3; inj -k Escape;    sleep 0.3; rest="${rest#<ESC>}" ;;
-      "<BS>"*)  sleep 0.3; inj -k BackSpace; sleep 0.3; rest="${rest#<BS>}" ;;
+      "<ESC>"*)   sleep 0.3; inj -k Escape;        sleep 0.3; rest="${rest#<ESC>}" ;;
+      "<BS>"*)    sleep 0.3; inj -k BackSpace;     sleep 0.3; rest="${rest#<BS>}" ;;
+      "<SHIFT>"*) sleep 0.3; inj -M shift -m shift; sleep 0.3; rest="${rest#<SHIFT>}" ;;
       *) seg="${rest%%<*}"
          if [ "$seg" = "$rest" ]; then inj -d 70 -- "$rest"; rest=""
          else [ -n "$seg" ] && inj -d 70 -- "$seg"; rest="${rest#"$seg"}"; fi ;;
@@ -125,6 +135,14 @@ expect "ponctuation corrige aussi"     "teh. ok "               "the. ok "
 expect "abréviation protégée (pcq)"    "pcq "                   "pcq "
 expect "revert: Backspace défait l'auto" "vias <BS>"            "vias"
 expect "snippet ';mail'+espace"        ";mail ok "              "dev@e2e.test ok "
+# régressions de la garde isModifier : un appui Shift SEUL ne committe pas le
+# mot en cours, et ne consomme pas la fenêtre de revert.
+expect "Shift seul ne casse pas le mot" "bonju<SHIFT>or "       "bonjour "
+expect "revert survit à un Shift"      "vias <SHIFT><BS>"       "vias"
+# escapeForward (défaut) : Échap committe le littéral PUIS atteint l'app —
+# zenity (cancel) se ferme sans rien imprimer → résultat vide attendu.
+printf '{"escapeForward": true}\n' > "$WT/config/ime-predictord/config.json"
+expect "Échap traverse vers l'app"     "bonjou<ESC>"            ""
 
 echo
 [ -d /proc/$DPID ] && echo "daemon survécu (SIGPIPE OK)" || { echo "DAEMON MORT"; FAILS=$((FAILS+1)); }

@@ -240,6 +240,43 @@ try:
     check("langue: contexte FR → 'soleil' devant", c and c[0] == "soleil",
           str(c))
 
+    # 7nonies-bis) LANGUE CHOISIE (préférences) : cfg "lang" court-circuite la
+    #              détection — déterministe quel que soit le contexte.
+    _bump = [0]
+
+    def set_config(obj):
+        # le rechargement à chaud compare des mtimes en SECONDES : on force un
+        # pas distinct à chaque écriture (sinon 2 écritures < 1 s se ratent).
+        _bump[0] += 2
+        p = f"{cfgdir}/config.json"
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump(obj, f)
+        t = time.time() + _bump[0]
+        os.utime(p, (t, t))
+
+    set_config({"lang": "fr"})
+    c = cands("sol")
+    check("langue choisie fr: 'soleil' devant même sans contexte",
+          c and c[0] == "soleil", str(c))
+    c = cands("sol", ["the"])
+    check("langue choisie fr: un contexte EN ne change rien",
+          c and c[0] == "soleil", str(c))
+    set_config({"lang": "en"})
+    c = cands("sol", ["bonjour"])
+    check("langue choisie en: 'solar' devant malgré contexte FR",
+          c and c[0] == "solar", str(c))
+    set_config({"lang": "off"})
+    c = cands("sol", ["bonjour"])
+    check("langue off: fréquence brute, 'solar' devant",
+          c and c[0] == "solar", str(c))
+    set_config({})
+    c = cands("sol", ["bonjour"])
+    check("langue auto (défaut): le contexte FR revote 'soleil'",
+          c and c[0] == "soleil", str(c))
+    r = req({"stats": True})
+    check("stats: langue active exposée", r.get("lang") == "auto",
+          str(r.get("lang")))
+
     # 7decies) MULTI-MOTS : continuation très sûre → expression en FIN de
     #          barre (sans déplacer le top des mots simples).
     c = cands("", ["je", "ne"])

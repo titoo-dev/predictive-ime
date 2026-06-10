@@ -26,6 +26,7 @@
 #include <QStringList>
 #include <QVariantMap>
 
+#include <fcitx-utils/event.h>
 #include <fcitx-utils/log.h>
 #include <fcitx/addonfactory.h>
 #include <fcitx/addoninstance.h>
@@ -100,8 +101,13 @@ public:
         }
         if (show)
             showPanel(ic);
+        else if (ic && ic->hasFocus())
+            unmapPanel(); // surface visible → le fondu sera cadencé
         else
-            unmapPanel();
+            finishUnmap(); // focus PERDU : le compositeur cache le popup et
+                           // ne cadence plus la surface — un fondu resterait
+                           // bloqué et son buffer périmé réapparaîtrait au
+                           // refocus. Démappage immédiat, sans fondu.
     }
     bool available() override { return true; }
     void suspend() override { destroyPanel(); }
@@ -231,12 +237,25 @@ private:
         if (surface_ && mapped_ && view_ && view_->ok() &&
             view_->startHide()) {
             renderFrame(); // démarre/poursuit la boucle de fondu
+            // garde-fou : si le compositeur ne cadence plus la surface
+            // (occlusion, désactivation…), la boucle de frames s'arrête et le
+            // fondu ne finirait JAMAIS — démappage forcé à l'échéance.
+            hideGuard_ = instance_->eventLoop().addTimeEvent(
+                CLOCK_MONOTONIC,
+                fcitx::now(CLOCK_MONOTONIC) +
+                    uint64_t(view_->hideGraceMs()) * 1000,
+                0, [this](fcitx::EventSourceTime *, uint64_t) {
+                    if (view_ && view_->hiding())
+                        finishUnmap();
+                    return true;
+                });
             return;
         }
         finishUnmap();
     }
 
     void finishUnmap() {
+        hideGuard_.reset();
         if (frameCb_) {
             wl_callback_destroy(frameCb_);
             frameCb_ = nullptr;
@@ -283,6 +302,7 @@ private:
     InputContext *currentIc_ = nullptr;
     zwp_input_method_v2 *currentIm_ = nullptr;
     std::unique_ptr<PanelView> view_;
+    std::unique_ptr<EventSourceTime> hideGuard_; // échéance du fondu orphelin
 
     static constexpr wl_registry_listener registryListener_ = {
         &QmlPanel::registryGlobal, &QmlPanel::registryRemove};

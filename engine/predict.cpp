@@ -39,8 +39,10 @@
 #include <string>
 #include <vector>
 
+#include <fcntl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/un.h>
 #include <unistd.h>
 
@@ -52,13 +54,21 @@ namespace {
 // ------------------------------------------------------ config utilisateur --
 // $XDG_CONFIG_HOME/ime-predictord/config.json (partagé avec le daemon),
 // rechargé à chaud sur mtime. Côté engine :
-//   ghostText      — le reste du mot auto-appliqué s'affiche dans le préedit
-//   frenchSpacing  — espace fine insécable (U+202F) avant ; : ! ?
-//   autoCapitalize — majuscule automatique en début de phrase
+//   ghostText            — le reste du mot auto-appliqué s'affiche dans le préedit
+//   frenchSpacing        — espace fine insécable (U+202F) avant ; : ! ?
+//   autoCapitalize       — majuscule automatique en début de phrase
+//   nextWordBar          — barre mot-suivant après Espace/commit (false = calme)
+//   autoApplyNeedsRevert — n'auto-applique que si l'app permet le revert
+//                          Backspace (SurroundingText) ; sinon Tab choisit
+//   escapeForward        — Échap ferme la barre PUIS atteint l'application
+//                          (vim sort du mode insertion) ; false = avalé
 struct EngineCfg {
   bool ghostText = true;
   bool frenchSpacing = false;
   bool autoCapitalize = false;
+  bool nextWordBar = true;
+  bool autoApplyNeedsRevert = true;
+  bool escapeForward = true;
 };
 
 const EngineCfg &engineCfg() {
@@ -83,6 +93,10 @@ const EngineCfg &engineCfg() {
         fresh.ghostText = j.value("ghostText", fresh.ghostText);
         fresh.frenchSpacing = j.value("frenchSpacing", fresh.frenchSpacing);
         fresh.autoCapitalize = j.value("autoCapitalize", fresh.autoCapitalize);
+        fresh.nextWordBar = j.value("nextWordBar", fresh.nextWordBar);
+        fresh.autoApplyNeedsRevert =
+            j.value("autoApplyNeedsRevert", fresh.autoApplyNeedsRevert);
+        fresh.escapeForward = j.value("escapeForward", fresh.escapeForward);
       } catch (...) {
       }
     }
@@ -282,19 +296,32 @@ struct DaemonReply {
   std::string autocomplete; // mot à appliquer sur Espace (haute confiance), ou ""
 };
 
+// Connexion au daemon BORNÉE dans le temps : on tourne sur le thread principal
+// de fcitx, qui tient tout le clavier de la session — un daemon coincé ne doit
+// JAMAIS geler la frappe. connect() non-bloquant (un backlog plein = daemon
+// suspendu → échec immédiat, pas d'attente), puis timeouts d'E/S : au pire la
+// frappe continue sans candidats.
+constexpr int kDaemonTimeoutMs = 150;
+
 int connectDaemon() {
   const char *envSock = ::getenv("IME_PREDICTORD_SOCK");
   std::string path = envSock ? envSock : "/tmp/ime-predictord.sock";
-  int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+  int fd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0);
   if (fd < 0)
     return -1;
   sockaddr_un addr{};
   addr.sun_family = AF_UNIX;
   std::strncpy(addr.sun_path, path.c_str(), sizeof(addr.sun_path) - 1);
   if (::connect(fd, (sockaddr *)&addr, sizeof(addr)) < 0) {
-    ::close(fd);
+    ::close(fd); // EAGAIN (backlog plein) compris : dégradation gracieuse
     return -1;
   }
+  int fl = ::fcntl(fd, F_GETFL);
+  if (fl >= 0)
+    ::fcntl(fd, F_SETFL, fl & ~O_NONBLOCK);
+  timeval tv{0, kDaemonTimeoutMs * 1000};
+  ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+  ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
   return fd;
 }
 
@@ -438,6 +465,13 @@ public:
                 fcitx::KeyEvent &event) override {
     if (event.isRelease())
       return;
+    // Touche modificatrice SEULE (Shift, Ctrl, Alt…) : on ne touche à RIEN.
+    // Sans cette garde, l'appui Shift en plein mot committait le buffer
+    // (« jean-P » → « jean- » committé), faisait clignoter la barre à chaque
+    // majuscule (clearPanel puis ré-apparition), et désarmait la fenêtre de
+    // revert Backspace (consommée plus bas par n'importe quelle touche).
+    if (event.key().isModifier())
+      return;
     auto *ic = event.inputContext();
     // Champs mot de passe / sensibles : aucune prédiction, aucune préédition —
     // on laisse tout passer (vie privée + comportement attendu d'un clavier).
@@ -498,6 +532,19 @@ public:
       return;
     }
 
+    // (1bis) Ctrl+Backspace pendant la composition : ABANDONNE le mot en cours
+    //        (rien n'est committé ni appris). Avant, le mot était committé puis
+    //        l'app effaçait « le mot précédent » — c'est-à-dire celui qu'on
+    //        venait de committer : flash visuel + apprentissage pollué.
+    if (sym == FcitxKey_BackSpace &&
+        states.test(fcitx::KeyState::Ctrl) && !state->buffer.empty()) {
+      state->buffer.clear();
+      state->navigating = false;
+      clearPanel(ic);
+      event.filterAndAccept();
+      return;
+    }
+
     // (2) Backspace pendant la composition → édite le buffer.
     if (sym == FcitxKey_BackSpace && !mod && !state->buffer.empty()) {
       popLastCp(state->buffer);
@@ -510,39 +557,45 @@ public:
       return;
     }
 
-    // (3) Composition active (buffer non vide).
+    // (3) Composition active (buffer non vide). Les branches dédiées exigent
+    //     « sans modificateur » : Ctrl+Tab (onglet suivant), Ctrl+Entrée
+    //     (envoi)… committent le littéral et FILENT à l'application (la
+    //     branche « toute autre touche » en bas) au lieu d'être détournés.
+    //     ↑/↓ ne sont PLUS capturés : dans un éditeur multi-lignes ils
+    //     committent et déplacent le curseur — seul Tab/⇧Tab entre dans la
+    //     barre (horizontale : ←/→ s'y déplacent une fois entré).
     if (!state->buffer.empty()) {
-      // mode emoji : la barre est une GRILLE de 8 colonnes (cf panelview) →
-      // ↑/↓ sautent d'une LIGNE (±8, wrap), ←/→/Tab restent ±1.
-      int rowJump = state->buffer[0] == ':' ? 8 : 1;
-      if (sym == FcitxKey_Tab) {
+      // mode emoji (':') : la barre est une GRILLE de 8 colonnes (cf
+      // panelview) → ↑/↓ y sautent d'une LIGNE (±8, wrap). HORS grille,
+      // ↑/↓ ne sont pas capturés (ils déplacent le curseur — politique v6).
+      bool emojiGrid = state->buffer[0] == ':';
+      if (!mod && sym == FcitxKey_Tab) {
         navigate(ic, state, +1);
         event.filterAndAccept();
         return;
       }
-      if (sym == FcitxKey_ISO_Left_Tab) {
+      if (!mod && sym == FcitxKey_ISO_Left_Tab) {
         navigate(ic, state, -1); // ⇧Tab : entre par la DROITE de la barre
         event.filterAndAccept();
         return;
       }
-      if (sym == FcitxKey_Down) {
-        navigate(ic, state, +rowJump);
+      if (!mod && emojiGrid && sym == FcitxKey_Down) {
+        navigate(ic, state, +8);
         event.filterAndAccept();
         return;
       }
-      if (sym == FcitxKey_Up) {
-        navigate(ic, state, -rowJump);
+      if (!mod && emojiGrid && sym == FcitxKey_Up) {
+        navigate(ic, state, -8);
         event.filterAndAccept();
         return;
       }
-      // en navigation, la barre étant horizontale, ←/→ s'y déplacent aussi
-      if (state->navigating &&
+      if (!mod && state->navigating &&
           (sym == FcitxKey_Left || sym == FcitxKey_Right)) {
         navigate(ic, state, sym == FcitxKey_Right ? +1 : -1);
         event.filterAndAccept();
         return;
       }
-      if (sym == FcitxKey_space) {
+      if (!mod && sym == FcitxKey_space) {
         std::string lit = state->buffer;
         std::string chosen = chooseOnSpace(state);
         bool autoApplied = !state->navigating && chosen != lit;
@@ -556,7 +609,7 @@ public:
         event.filterAndAccept();
         return;
       }
-      if (sym == FcitxKey_Return || sym == FcitxKey_KP_Enter) {
+      if (!mod && (sym == FcitxKey_Return || sym == FcitxKey_KP_Enter)) {
         if (state->navigating) {
           commitWord(ic, state, highlighted(state), /*space=*/false);
           event.filterAndAccept(); // suggestion prise → on avale Entrée
@@ -566,19 +619,23 @@ public:
         }
         return;
       }
-      if (sym == FcitxKey_Escape) {
-        // Échap ANNULE la suggestion : ferme la barre et committe le littéral
-        // tel quel (on ne perd jamais la frappe) — SANS apprendre le fragment
-        // (annuler n'est pas valider).
+      if (!mod && sym == FcitxKey_Escape) {
+        // Échap ANNULE la suggestion : committe le littéral tel quel (on ne
+        // perd jamais la frappe) — SANS apprendre le fragment (annuler n'est
+        // pas valider). Par défaut la touche FILE ensuite à l'application
+        // (vim sort du mode insertion au premier Échap) ; escapeForward=false
+        // pour l'avaler (un dialogue ne se ferme alors pas par surprise).
         commitWord(ic, state, state->buffer, /*space=*/false, /*learn=*/false);
-        event.filterAndAccept();
+        if (!engineCfg().escapeForward)
+          event.filterAndAccept();
         return;
       }
-      // toute autre touche (ponctuation, flèches, Home/End…) : termine le mot
-      // SANS espace puis laisse la touche filer vers l'application. La
-      // PONCTUATION applique la même correction que l'Espace (« teh. » →
-      // « the. ») — sauf après un déclencheur (':xyz' / ';xyz' littéraux).
-      bool punctFix = (cp == '.' || cp == ',' || cp == ';' || cp == ':' ||
+      // toute autre touche (ponctuation, flèches ↑/↓, Home/End, raccourcis…) :
+      // termine le mot SANS espace puis laisse la touche filer vers
+      // l'application. La PONCTUATION applique la même correction que l'Espace
+      // (« teh. » → « the. ») — sauf après un déclencheur (':xyz' / ';xyz').
+      bool punctFix = !mod &&
+                      (cp == '.' || cp == ',' || cp == ';' || cp == ':' ||
                        cp == '!' || cp == '?') &&
                       !isTriggerBuffer(state->buffer);
       commitWord(ic, state, punctFix ? chooseOnSpace(state) : state->buffer,
@@ -600,22 +657,23 @@ public:
     auto list = ic->inputPanel().candidateList();
     bool hasList = list && list->size() > 0;
     if (hasList && sym == FcitxKey_Escape) {
-      // Échap ferme la barre mot-suivant (et n'atteint PAS l'application —
-      // un 2e Échap, barre fermée, passera normalement).
+      // Échap ferme la barre mot-suivant ; par défaut (escapeForward) la
+      // touche file AUSSI à l'application — cohérent avec la composition.
       state->navigating = false;
       clearPanel(ic);
-      event.filterAndAccept();
+      if (!engineCfg().escapeForward)
+        event.filterAndAccept();
       return;
     }
     if (state->navigating && hasList) {
-      if (sym == FcitxKey_Tab || sym == FcitxKey_Down ||
-          sym == FcitxKey_Right) {
+      // barre horizontale : Tab/→ et ⇧Tab/← naviguent ; ↑/↓ sortent de la
+      // navigation et filent à l'application (branche « toute autre touche »).
+      if (sym == FcitxKey_Tab || sym == FcitxKey_Right) {
         navigate(ic, state, +1);
         event.filterAndAccept();
         return;
       }
-      if (sym == FcitxKey_ISO_Left_Tab || sym == FcitxKey_Up ||
-          sym == FcitxKey_Left) {
+      if (sym == FcitxKey_ISO_Left_Tab || sym == FcitxKey_Left) {
         navigate(ic, state, -1);
         event.filterAndAccept();
         return;
@@ -828,6 +886,16 @@ private:
     if (state->cands.empty())
       state->cands.push_back(state->buffer); // repli : le brut
 
+    // Pas de filet, pas de remplacement : si l'app n'expose pas le
+    // SurroundingText, le revert Backspace d'une auto-application est
+    // IMPOSSIBLE — l'Espace garde alors le littéral (les candidats restent,
+    // Tab choisit). Les déclencheurs ':'/';' restent explicites.
+    // Opt-out : autoApplyNeedsRevert=false.
+    if (engineCfg().autoApplyNeedsRevert && !isTriggerBuffer(state->buffer) &&
+        !(ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText) &&
+          ic->surroundingText().isValid()))
+      state->autocomplete.clear();
+
     // GHOST TEXT : si l'Espace va compléter le mot, le reste s'affiche déjà
     // dans le préedit, curseur entre le tapé et le fantôme ("bonjou‸r") —
     // uniquement quand l'auto-complétion PROLONGE octet-à-octet la frappe
@@ -860,6 +928,11 @@ private:
     ic->inputPanel().reset();
     state->autocomplete.clear(); // pas de marquage « auto » en mot-suivant
     state->literalIsWord = false;
+    if (!engineCfg().nextWordBar) { // mode calme : pas de barre spéculative
+      state->cands.clear();
+      clearPanel(ic);
+      return;
+    }
     auto ctx = contextFor(ic, state);
     auto reply = queryDaemon(ctx, "");
     state->cands = reply.candidates;

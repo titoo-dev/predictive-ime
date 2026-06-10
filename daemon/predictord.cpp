@@ -41,6 +41,9 @@
 #include <unordered_set>
 #include <vector>
 
+#include <cerrno>
+#include <fcntl.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -199,8 +202,11 @@ struct Config {
   bool autoApply = true;    // l'Espace peut-il remplacer ?
   double autoDom = 2.0;     // dominance top/2e exigée pour auto-appliquer
   int autoMinLen = 3;       // longueur mini du préfixe pour auto-appliquer
-  double langBoost = 1.6;   // boost des mots de la langue du contexte
+  double langBoost = 1.6;   // boost des mots de la langue active
   bool multiWord = true;    // suggestion multi-mots dans le mot-suivant
+  // Langue active : "auto" = détection par vote du contexte, "fr"/"en" =
+  // langue CHOISIE (déterministe, aucune détection), "off" = aucun boost.
+  std::string lang = "auto";
 };
 
 struct Model {
@@ -393,6 +399,21 @@ struct Model {
       fprintf(stderr, "[predictord] %zu Pcont chargés\n", n);
   }
 
+  // Trie chaque liste de suiveurs par id de mot → le CtxScorer fait ses
+  // lookups par DICHOTOMIE directement dans la liste, sans la recopier.
+  // À appeler une fois après le chargement des n-grammes (les rechargements à
+  // chaud — dict/config/snippets — ne touchent pas biAdj/triAdj).
+  void indexNgrams() {
+    auto byId = [](const std::pair<uint32_t, float> &a,
+                   const std::pair<uint32_t, float> &b) {
+      return a.first < b.first;
+    };
+    for (auto &kv : biAdj)
+      std::sort(kv.second.begin(), kv.second.end(), byId);
+    for (auto &kv : triAdj)
+      std::sort(kv.second.begin(), kv.second.end(), byId);
+  }
+
   // À appeler une fois tous les mots internés : repli + index trié + priors.
   // RE-APPELABLE (le dictionnaire perso se recharge à chaud) : reconstruit.
   void finalize() {
@@ -535,6 +556,13 @@ struct Model {
           fresh.autoMinLen = j.value("autoMinLen", fresh.autoMinLen);
           fresh.langBoost = j.value("langBoost", fresh.langBoost);
           fresh.multiWord = j.value("multiWord", fresh.multiWord);
+          fresh.lang = j.value("lang", fresh.lang);
+          if (fresh.lang != "auto" && fresh.lang != "fr" &&
+              fresh.lang != "en" && fresh.lang != "off") {
+            fprintf(stderr, "[predictord] lang inconnue '%s' → auto\n",
+                    fresh.lang.c_str());
+            fresh.lang = "auto";
+          }
         } catch (const std::exception &e) {
           fprintf(stderr, "[predictord] config.json invalide: %s\n", e.what());
         }
@@ -645,8 +673,16 @@ struct Model {
   }
 
   // ------------------------------------------------------------- scoring ---
-  // Langue dominante du contexte (vote des mots) : 0 neutre, 1 fr, 2 en.
+  // Langue active : choisie par l'utilisateur (cfg.lang, cf preferences) ou,
+  // en mode "auto" seulement, détectée par vote des mots du contexte.
+  // 0 = neutre/aucun boost, 1 = fr, 2 = en.
   uint8_t ctxLang(const std::vector<std::string> &context) const {
+    if (cfg.lang == "fr")
+      return 1;
+    if (cfg.lang == "en")
+      return 2;
+    if (cfg.lang == "off")
+      return 0;
     int fr = 0, en = 0;
     for (const auto &w : context) {
       auto it = id_.find(lowerKeep(w));
@@ -675,13 +711,27 @@ struct Model {
     return UNI_MIX * pc + (1.0 - UNI_MIX) * pf;
   }
 
-  // Évaluateur P_KN(w | contexte) pour UNE requête : les listes de suiveurs du
-  // contexte sont indexées une fois, puis chaque candidat coûte O(1).
+  // Évaluateur P_KN(w | contexte) pour UNE requête : pointe DIRECTEMENT sur
+  // les listes de suiveurs (triées par id de mot, cf indexNgrams), lookup par
+  // dichotomie. L'ancienne version recopiait chaque liste en hash map à
+  // chaque requête — pour un contexte fréquent (« de », « <s> »...) c'était
+  // des dizaines de milliers d'insertions par frappe : 1,3-4 ms mesurées sur
+  // le chemin mot-suivant, payées de façon synchrone par l'engine.
   struct CtxScorer {
+    using Adj = std::vector<std::pair<uint32_t, float>>;
     const Model *m = nullptr;
-    std::unordered_map<uint32_t, float> bi, tri;
+    const Adj *bi = nullptr, *tri = nullptr; // suiveurs observés (ou nullptr)
     double g2 = 1.0, g3 = 1.0;
     bool hasV = false, hasUV = false;
+
+    static const float *find(const Adj *a, uint32_t w) {
+      if (!a)
+        return nullptr;
+      auto it = std::lower_bound(a->begin(), a->end(), w,
+                                 [](const std::pair<uint32_t, float> &p,
+                                    uint32_t x) { return p.first < x; });
+      return it != a->end() && it->first == w ? &it->second : nullptr;
+    }
 
     void init(const Model &model, const std::vector<std::string> &context) {
       m = &model;
@@ -693,9 +743,7 @@ struct Model {
         auto a = m->biAdj.find(v);
         if (a != m->biAdj.end()) {
           hasV = true;
-          bi.reserve(a->second.size() * 2);
-          for (auto &pr : a->second)
-            bi[pr.first] = pr.second;
+          bi = &a->second;
         }
         auto bo = m->biBo.find(v);
         if (bo != m->biBo.end())
@@ -707,9 +755,7 @@ struct Model {
             auto t = m->triAdj.find(key);
             if (t != m->triAdj.end()) {
               hasUV = true;
-              tri.reserve(t->second.size() * 2);
-              for (auto &pr : t->second)
-                tri[pr.first] = pr.second;
+              tri = &t->second;
             }
             auto tbo = m->triBo.find(key);
             if (tbo != m->triBo.end())
@@ -720,19 +766,13 @@ struct Model {
     }
 
     double pBi(uint32_t w) const {
-      if (hasV) {
-        auto it = bi.find(w);
-        if (it != bi.end())
-          return it->second;
-      }
+      if (const float *p = find(bi, w))
+        return *p;
       return g2 * m->p1(w);
     }
     double operator()(uint32_t w) const {
-      if (hasUV) {
-        auto it = tri.find(w);
-        if (it != tri.end())
-          return it->second;
-      }
+      if (const float *p = find(tri, w))
+        return *p;
       return (hasUV ? g3 : 1.0) * pBi(w);
     }
   };
@@ -742,6 +782,7 @@ struct Model {
   json stats() const {
     json j;
     j["ok"] = true;
+    j["lang"] = cfg.lang; // langue active (préférences)
     j["vocab"] = words.size();
     j["bigramContexts"] = biAdj.size();
     j["trigramContexts"] = triAdj.size();
@@ -1041,23 +1082,28 @@ private:
         push(p.first);
     }
 
-    // (2) modèle : score exact P_KN(w|ctx) × boost de langue sur le pool.
+    // (2) modèle : score exact P_KN(w|ctx) × boost de langue sur les suiveurs
+    //     OBSERVÉS (tri ∪ bi), itérés SUR PLACE — les p stockés sont déjà les
+    //     probabilités finales, pas besoin de repasser par operator().
     CtxScorer ctxScore;
     ctxScore.init(*this, ctx);
     uint8_t ctxL = ctxLang(ctx);
-    std::unordered_set<uint32_t> pool;
-    for (auto &pr : ctxScore.tri)
-      pool.insert(pr.first);
-    for (auto &pr : ctxScore.bi)
-      pool.insert(pr.first);
-    if (pool.size() < size_t(k))
-      for (uint32_t w : topUni_)
-        pool.insert(w);
-
     std::vector<std::pair<uint32_t, double>> v;
-    v.reserve(pool.size());
-    for (uint32_t w : pool)
-      v.push_back({w, ctxScore(w) * langFactor(ctxL, w)});
+    v.reserve((ctxScore.tri ? ctxScore.tri->size() : 0) +
+              (ctxScore.bi ? ctxScore.bi->size() : 0) + topUni_.size());
+    if (ctxScore.tri)
+      for (auto &pr : *ctxScore.tri)
+        v.push_back({pr.first, pr.second * langFactor(ctxL, pr.first)});
+    if (ctxScore.bi)
+      for (auto &pr : *ctxScore.bi)
+        if (!CtxScorer::find(ctxScore.tri, pr.first)) // déjà via trigramme
+          v.push_back({pr.first, (ctxScore.hasUV ? ctxScore.g3 : 1.0) *
+                                     pr.second * langFactor(ctxL, pr.first)});
+    if (v.size() < size_t(k)) // contexte inconnu → pool des meilleurs P1
+      for (uint32_t w : topUni_)
+        if (!CtxScorer::find(ctxScore.tri, w) &&
+            !CtxScorer::find(ctxScore.bi, w))
+          v.push_back({w, ctxScore(w) * langFactor(ctxL, w)});
     size_t kk = std::min<size_t>(size_t(k) * 2, v.size());
     std::partial_sort(v.begin(), v.begin() + kk, v.end(),
                       [](auto &a, auto &b) { return a.second > b.second; });
@@ -1075,16 +1121,18 @@ private:
       s2.init(*this, c2);
       uint32_t best = 0;
       double bp = 0;
-      for (auto &pr : s2.tri)
-        if (pr.second > bp) {
-          bp = pr.second;
-          best = pr.first;
-        }
-      for (auto &pr : s2.bi)
-        if (pr.second > bp) {
-          bp = pr.second;
-          best = pr.first;
-        }
+      if (s2.tri)
+        for (auto &pr : *s2.tri)
+          if (pr.second > bp) {
+            bp = pr.second;
+            best = pr.first;
+          }
+      if (s2.bi)
+        for (auto &pr : *s2.bi)
+          if (pr.second > bp) {
+            bp = pr.second;
+            best = pr.first;
+          }
       if (bp >= MULTI_MIN)
         phrase = words[v[0].first] + ' ' + words[best];
     }
@@ -1122,6 +1170,7 @@ int main(int argc, char **argv) {
   model.loadTrigrams(dir);
   model.loadPcont(dir);
   model.loadEmoji(dir);
+  model.indexNgrams();
   model.finalize();
 
   const char *xdg = getenv("XDG_DATA_HOME");
@@ -1145,7 +1194,7 @@ int main(int argc, char **argv) {
 
   std::string sockpath = argc > 2 ? argv[2] : "/tmp/ime-predictord.sock";
   unlink(sockpath.c_str());
-  int srv = socket(AF_UNIX, SOCK_STREAM, 0);
+  int srv = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0);
   sockaddr_un addr{};
   addr.sun_family = AF_UNIX;
   strncpy(addr.sun_path, sockpath.c_str(), sizeof(addr.sun_path) - 1);
@@ -1153,63 +1202,130 @@ int main(int argc, char **argv) {
     perror("bind");
     return 1;
   }
-  listen(srv, 8);
+  listen(srv, 16);
   fprintf(stderr, "[predictord] écoute sur %s\n", sockpath.c_str());
 
+  // Traite UNE ligne de protocole, renvoie la réponse ('\n' terminée).
+  auto handleLine = [&model](const std::string &line) -> std::string {
+    json resp;
+    try {
+      json req = json::parse(line);
+      if (req.contains("learn")) {
+        auto l = req["learn"];
+        model.learn(l.value("prev", std::string{}),
+                    l.value("word", std::string{}));
+        resp["ok"] = true;
+      } else if (req.contains("forget")) {
+        // outil d'hygiène : oublier un mot appris (et réécrire le journal)
+        //   echo '{"forget":{"word":"bonjo"}}' | nc -U $SOCK
+        resp["removed"] =
+            model.forget(req["forget"].value("word", std::string{}));
+        resp["ok"] = true;
+      } else if (req.contains("veto")) {
+        // l'utilisateur a reverté tapé→appliqué : ne plus auto-appliquer
+        auto v = req["veto"];
+        model.addVeto(v.value("typed", std::string{}),
+                      v.value("applied", std::string{}));
+        resp["ok"] = true;
+      } else if (req.contains("stats")) {
+        resp = model.stats();
+      } else {
+        std::vector<std::string> ctx =
+            req.value("context", std::vector<std::string>{});
+        std::string prefix = req.value("prefix", std::string{});
+        model.maybeReload(); // config/dict/snippets à chaud (mtime)
+        Result r = model.predict(ctx, prefix);
+        resp["candidates"] = r.candidates;
+        resp["literalIsWord"] = r.literalIsWord;
+        resp["autocomplete"] = r.autocomplete;
+      }
+    } catch (const std::exception &e) {
+      resp["candidates"] = json::array();
+      resp["error"] = e.what();
+    }
+    return resp.dump() + "\n";
+  };
+
+  // Boucle poll() mono-thread MULTI-CLIENTS : un client lent ou resté ouvert
+  // (un `nc -U` interactif, un process suspendu) ne bloque plus les autres.
+  // L'ancienne boucle accept→read servait UNE connexion jusqu'à sa fermeture :
+  // l'engine — synchrone sur le thread clavier de fcitx — attendait derrière.
+  struct Client {
+    int fd;
+    std::string in, out;
+  };
+  std::vector<Client> clients;
+  std::vector<pollfd> pfds;
   for (;;) {
-    int c = accept(srv, nullptr, nullptr);
-    if (c < 0)
+    pfds.clear();
+    pfds.push_back({srv, POLLIN, 0});
+    for (auto &cl : clients)
+      pfds.push_back(
+          {cl.fd, short(POLLIN | (cl.out.empty() ? 0 : POLLOUT)), 0});
+    if (poll(pfds.data(), nfds_t(pfds.size()), -1) < 0)
       continue;
-    std::string buf;
-    char tmp[4096];
-    ssize_t n;
-    while ((n = read(c, tmp, sizeof(tmp))) > 0) {
-      buf.append(tmp, n);
-      size_t nl;
-      while ((nl = buf.find('\n')) != std::string::npos) {
-        std::string line = buf.substr(0, nl);
-        buf.erase(0, nl + 1);
-        json resp;
-        try {
-          json req = json::parse(line);
-          if (req.contains("learn")) {
-            auto l = req["learn"];
-            model.learn(l.value("prev", std::string{}),
-                        l.value("word", std::string{}));
-            resp["ok"] = true;
-          } else if (req.contains("forget")) {
-            // outil d'hygiène : oublier un mot appris (et réécrire le journal)
-            //   echo '{"forget":{"word":"bonjo"}}' | nc -U $SOCK
-            resp["removed"] =
-                model.forget(req["forget"].value("word", std::string{}));
-            resp["ok"] = true;
-          } else if (req.contains("veto")) {
-            // l'utilisateur a reverté tapé→appliqué : ne plus auto-appliquer
-            auto v = req["veto"];
-            model.addVeto(v.value("typed", std::string{}),
-                          v.value("applied", std::string{}));
-            resp["ok"] = true;
-          } else if (req.contains("stats")) {
-            resp = model.stats();
-          } else {
-            std::vector<std::string> ctx =
-                req.value("context", std::vector<std::string>{});
-            std::string prefix = req.value("prefix", std::string{});
-            model.maybeReload(); // config/dict/snippets à chaud (mtime)
-            Result r = model.predict(ctx, prefix);
-            resp["candidates"] = r.candidates;
-            resp["literalIsWord"] = r.literalIsWord;
-            resp["autocomplete"] = r.autocomplete;
+    size_t nOld = clients.size();
+    if (pfds[0].revents & POLLIN)
+      for (;;) {
+        int c = accept(srv, nullptr, nullptr);
+        if (c < 0)
+          break; // EAGAIN : plus personne en attente
+        fcntl(c, F_SETFL, fcntl(c, F_GETFL) | O_NONBLOCK);
+        clients.push_back({c, {}, {}}); // servi au prochain tour de poll
+      }
+    for (size_t i = 0; i < nOld; i++) {
+      Client &cl = clients[i];
+      short ev = pfds[i + 1].revents;
+      if (!ev)
+        continue;
+      bool eof = false, drop = false;
+      if (ev & (POLLIN | POLLHUP | POLLERR)) {
+        char tmp[4096];
+        for (;;) {
+          ssize_t n = read(cl.fd, tmp, sizeof(tmp));
+          if (n > 0) {
+            cl.in.append(tmp, n);
+            if (cl.in.size() > (64u << 10)) { // ligne sans fin : abus
+              drop = true;
+              break;
+            }
+            continue;
           }
-        } catch (const std::exception &e) {
-          resp["candidates"] = json::array();
-          resp["error"] = e.what();
-        }
-        std::string out = resp.dump() + "\n";
-        if (write(c, out.data(), out.size()) < 0)
+          if (n == 0)
+            eof = true;
+          else if (errno != EAGAIN && errno != EWOULDBLOCK)
+            drop = true;
           break;
+        }
+      }
+      size_t nl;
+      while (!drop && (nl = cl.in.find('\n')) != std::string::npos) {
+        std::string line = cl.in.substr(0, nl);
+        cl.in.erase(0, nl + 1);
+        cl.out += handleLine(line);
+      }
+      // flush non bloquant ; le reste partira sur POLLOUT. EPIPE = client
+      // parti sans lire (learn fire-and-forget de l'engine) : on jette.
+      while (!drop && !cl.out.empty()) {
+        ssize_t n = send(cl.fd, cl.out.data(), cl.out.size(), MSG_NOSIGNAL);
+        if (n > 0) {
+          cl.out.erase(0, size_t(n));
+          continue;
+        }
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+          break;
+        drop = true;
+        break;
+      }
+      if (cl.out.size() > (1u << 20))
+        drop = true; // lecteur trop lent : on ne tamponne pas à l'infini
+      if (drop || (eof && cl.out.empty())) {
+        close(cl.fd);
+        cl.fd = -1;
       }
     }
-    close(c);
+    clients.erase(std::remove_if(clients.begin(), clients.end(),
+                                 [](const Client &c) { return c.fd < 0; }),
+                  clients.end());
   }
 }

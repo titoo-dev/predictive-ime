@@ -84,8 +84,10 @@ Item {
                 delegate: Item {
                     required property int index
                     required property string modelData
+                    // décision C++ (cf looksEmoji) : l'heuristique « 1er point
+                    // de code > 0x2100 » ratait les keycaps (1️⃣), ©️, ‼️…
                     readonly property bool emoji:
-                        modelData.length > 0 && modelData.codePointAt(0) > 0x2100
+                        index < emojiMark.length && emojiMark[index] === true
                     readonly property bool isAuto:
                         index < autoMark.length && autoMark[index] === true
                     width: gridMode ? 30 : label.width + 16
@@ -237,6 +239,20 @@ void ensureApp() {
     new QGuiApplication(argc, argv);
 }
 
+// Un candidat est-il un emoji (fonte couleur, corps plus grand) ? Détection
+// par CONTENU, pas par premier point de code : les keycaps (« 1️⃣ » commence
+// par '1'), ©️/®️ (préfixe latin-1) et ‼️/⁉️ n'étaient pas reconnus et se
+// rendaient en tofu Maple Mono. VS16 (FE0F), ZWJ (200D) et keycap (20E3)
+// n'apparaissent jamais dans un mot ordinaire.
+bool looksEmoji(const QString &s) {
+    for (char32_t cp : s.toUcs4()) {
+        if (cp >= 0x1F000 || cp == 0x200D || cp == 0xFE0F || cp == 0x20E3 ||
+            (cp >= 0x2190 && cp <= 0x2BFF))
+            return true;
+    }
+    return false;
+}
+
 // ease-out cubic : départ vif, arrivée douce — le bon feel pour une popup.
 double easeOutCubic(double t) {
     double u = 1.0 - t;
@@ -284,6 +300,7 @@ PanelView::PanelView() {
     ctx->setContextProperty("hlPos", -1.0);
     ctx->setContextProperty("appear", 1.0);
     ctx->setContextProperty("autoMark", QVariantList{});
+    ctx->setContextProperty("emojiMark", QVariantList{});
     ctx->setContextProperty("composing", false);
     ctx->setContextProperty("gridMode", false);
 
@@ -314,11 +331,16 @@ void PanelView::update(const QStringList &candidates, int highlight,
                        const QVariantList &autoMark, bool composing,
                        bool grid) {
     auto now = Clock::now();
-    hiding_ = false; // un nouveau contenu annule un fondu de fermeture en cours
     if (!shown_) {
-        appear_ = {0.0, 1.0, now, animMs(140)};
+        // si un fondu de fermeture court encore, on repart de l'opacité
+        // COURANTE (durée au prorata du chemin restant) — sinon la barre
+        // CLIGNOTAIT : retombée à 0 puis remontée, visible dès qu'un mot
+        // suit une ponctuation en moins de 90 ms.
+        double from = hiding_ ? hide_.at(now) : 0.0;
+        appear_ = {from, 1.0, now, int(animMs(140) * (1.0 - from))};
         shown_ = true;
     }
+    hiding_ = false; // un nouveau contenu annule un fondu de fermeture en cours
     composing_ = composing;
     if (candidates != cands_ || highlight < 0 || hl_.to < 0) {
         // nouveau contenu (frappe) ou pas de surlignage de départ : pas de
@@ -327,11 +349,18 @@ void PanelView::update(const QStringList &candidates, int highlight,
     } else if (highlight != highlight_) {
         hl_ = {hl_.at(now), double(highlight), now, animMs(110)};
     }
+    if (candidates != cands_) {
+        emojiMark_.clear();
+        for (const QString &c : candidates)
+            emojiMark_ << looksEmoji(c);
+    }
     cands_ = candidates;
     highlight_ = highlight;
     autoMark_ = autoMark;
     grid_ = grid;
 }
+
+int PanelView::hideGraceMs() const { return animMs(90) + 80; }
 
 bool PanelView::startHide() {
     if (!shown_ || hiding_)
@@ -352,6 +381,7 @@ void PanelView::hidden() {
     hiding_ = false;
     highlight_ = -1;
     cands_.clear();
+    emojiMark_.clear();
     hl_ = {};
     hl_.to = -1.0;
 }
@@ -381,6 +411,7 @@ QImage PanelView::render() {
     ctx->setContextProperty("appear",
                             hiding_ ? hide_.at(now) : appear_.at(now));
     ctx->setContextProperty("autoMark", autoMark_);
+    ctx->setContextProperty("emojiMark", emojiMark_);
     ctx->setContextProperty("composing", composing_);
     ctx->setContextProperty("gridMode", grid_);
     QCoreApplication::processEvents(); // laisse bindings + resize se résoudre

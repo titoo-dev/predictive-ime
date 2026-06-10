@@ -61,11 +61,18 @@ def synth_typo(w, salt):
 
 
 class Daemon:
-    def __init__(self, binpath, words):
+    def __init__(self, binpath, words, config=None):
         self.tmp = tempfile.mkdtemp(prefix="ime-eval-")
         self.sock_path = os.path.join(self.tmp, "sock")
         # ISOLATION complète : ni l'apprentissage réel ni la config perso de
-        # la machine ne doivent fausser la mesure.
+        # la machine ne doivent fausser la mesure. `config` (dict) est écrit
+        # dans la config isolée — pour mesurer un réglage précis (ex. la
+        # langue choisie : {"lang": "fr"}).
+        if config:
+            cfgdir = f"{self.tmp}/cfg/ime-predictord"
+            os.makedirs(cfgdir, exist_ok=True)
+            with open(f"{cfgdir}/config.json", "w", encoding="utf-8") as f:
+                json.dump(config, f)
         env = dict(os.environ, XDG_DATA_HOME=f"{self.tmp}/xdg",
                    XDG_CONFIG_HOME=f"{self.tmp}/cfg")
         self.proc = subprocess.Popen([binpath, words, self.sock_path], env=env,
@@ -177,6 +184,9 @@ def main():
     ap.add_argument("words")
     ap.add_argument("sentences", nargs="+")
     ap.add_argument("--max-sentences", type=int, default=400)
+    ap.add_argument("--config", default=None,
+                    help="JSON écrit dans la config isolée du daemon, "
+                         "ex. '{\"lang\": \"fr\"}'")
     args = ap.parse_args()
 
     vocab = set()
@@ -186,7 +196,8 @@ def main():
             if p:
                 vocab.add(p[0])
 
-    daemon = Daemon(args.predictord, args.words)
+    daemon = Daemon(args.predictord, args.words,
+                    json.loads(args.config) if args.config else None)
     try:
         tot = None
         for path in args.sentences:

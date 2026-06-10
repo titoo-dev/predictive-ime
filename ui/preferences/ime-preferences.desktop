@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=IME — Préférences
+Comment=Réglages de l'IME prédictif (langue, complétion, barre)
+Exec=ime-preferences
+Categories=Settings;
+StartupWMClass=ime-preferences
