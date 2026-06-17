@@ -48,8 +48,10 @@ if(INSTALL_SYSTEMD_USER_UNIT AND BUILD_DAEMON)
   set(MODEL_DIR      "${CMAKE_INSTALL_FULL_DATADIR}/ime-predictord")
   configure_file(packaging/ime-predictord.service.in
                  "${CMAKE_CURRENT_BINARY_DIR}/ime-predictord.service" @ONLY)
+  # systemd user units always live in <prefix>/lib/systemd/user — NOT in the
+  # arch libdir (lib64): systemd's search path never includes lib64.
   install(FILES "${CMAKE_CURRENT_BINARY_DIR}/ime-predictord.service"
-          DESTINATION "${CMAKE_INSTALL_LIBDIR}/systemd/user")
+          DESTINATION "lib/systemd/user")
 endif()
 
 message(STATUS "predictive-ime: engine=${BUILD_ENGINE} daemon=${BUILD_DAEMON} "
