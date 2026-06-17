@@ -54,6 +54,7 @@ jobs:
         run: |
           DESTDIR="$PWD/stage" cmake --install build
           echo "== installed =="; find stage -type f | sort
-          test -f stage/usr/lib*/fcitx5/libpredict.so
+          # libdir varies (lib / lib64 / multiarch lib/<triplet>) — locate by name.
+          test -n "$(find stage -name libpredict.so -print -quit)"
           test -f stage/usr/bin/predictord
           test -f stage/usr/lib/systemd/user/ime-predictord.service
