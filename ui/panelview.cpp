@@ -111,7 +111,10 @@ Item {
                         color: hlPos >= 0 && index === Math.round(hlPos)
                                ? colors.onAccent : colors.onSurface
                         font.pixelSize: emoji ? 17 : 14
-                        font.family: emoji ? "Noto Color Emoji" : "Maple Mono NF"
+                        // Fallback chain (Qt 6 font.families): degrade gracefully
+                        // off systems without Maple Mono NF / Noto Color Emoji.
+                        font.families: emoji ? ["Noto Color Emoji", "emoji", "sans-serif"]
+                                             : ["Maple Mono NF", "monospace"]
                     }
                 }
             }
