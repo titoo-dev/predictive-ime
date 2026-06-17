@@ -1,0 +1,19 @@
+[Unit]
+Description=Predictive IME prediction daemon (n-gram)
+Documentation=https://github.com/titoo-dev/predictive-ime
+# Tied to the graphical session: started with it, stopped with it. On a session
+# managed by UWSM/systemd, WAYLAND_DISPLAY etc. are imported automatically.
+PartOf=graphical-session.target
+
+[Service]
+# @PREDICTORD_BIN@ and @MODEL_DIR@ are substituted by CMake at configure time.
+# The daemon takes the path to words.tsv and finds the sibling model files
+# (bigrams.tsv, trigrams.tsv, emoji.tsv) next to it. Install the model into
+# @MODEL_DIR@ (from a release artifact, or via build-model.sh), or override
+# this unit to point at a per-user model in $XDG_DATA_HOME/ime-predictord/.
+ExecStart=@PREDICTORD_BIN@ @MODEL_DIR@/words.tsv
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target
