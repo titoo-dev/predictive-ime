@@ -1,0 +1,41 @@
+name: model
+
+# Builds the prediction model deterministically from the pinned corpora
+# (build-model.sh verifies every input by SHA-256) and publishes it as a
+# versioned, checksummed release artifact. This is the authoritative model
+# distribution: packages/users fetch the tarball instead of re-downloading
+# corpora at install time (see NOTICE-DATASETS.md for the CC BY-SA license).
+on:
+  workflow_dispatch:
+  push:
+    tags: ["model-v*", "v*"]
+
+permissions:
+  contents: write   # needed to attach assets to the release on tags
+
+jobs:
+  build-model:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tools
+        run: sudo apt-get update && sudo apt-get install -y python3 zstd curl tar gzip
+      - name: Build model
+        run: ./build-model.sh "$PWD/model-out"
+      - name: Package + checksum
+        run: |
+          ver="${GITHUB_REF_NAME:-dev}"
+          tar -C model-out --zstd -cf "ime-model-${ver}.tar.zst" .
+          sha256sum "ime-model-${ver}.tar.zst" | tee "ime-model-${ver}.tar.zst.sha256"
+          ls -lh ime-model-*.tar.zst*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ime-model
+          path: ime-model-*.tar.zst*
+      - name: Attach to release (tags only)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ime-model-*.tar.zst
+            ime-model-*.tar.zst.sha256
