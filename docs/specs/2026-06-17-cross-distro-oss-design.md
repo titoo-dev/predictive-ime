@@ -91,6 +91,15 @@ loudly on stock); `-DBUILD_UI=OFF` gives the universal core.
   systemd unit lands in `lib/systemd/user`. Encoded as the CI `core` matrix.
 - Found & fixed by verification: systemd user unit was installed under the arch
   libdir (`lib64`) where systemd never looks → pinned to `lib/systemd/user`.
+- **qmlpanel** builds against a **patched fcitx5 5.1.13** (Fedora): the patch
+  applies cleanly, installs `waylandim_public.h` + the `Fcitx5ModuleWaylandIM`
+  CMake module, and `libqmlpanel.so` links — validating `docs/patched-fcitx5.md`.
+- **build-model.sh** reproduces the 66 MB model (84404 words, 968690 bigrams,
+  1223507 trigrams) on a clean Ubuntu container, all 9 corpora checksum-verified.
+- **Live (GitHub Actions):** the `build` matrix is **green** on Arch/Fedora/
+  Ubuntu/openSUSE; the `model` workflow built and published the
+  `model-v1` release (`ime-model-*.tar.zst` + `.sha256`). Found & fixed: an
+  over-specific `lib*` glob in the CI assertion missed Ubuntu's multiarch libdir.
 
 ## Model distribution
 

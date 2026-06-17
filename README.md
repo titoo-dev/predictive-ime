@@ -53,10 +53,11 @@ The model is distributed as a versioned release artifact (recommended), or you
 can rebuild it from the pinned corpora:
 
 ```sh
-# Option A — download the prebuilt model (replace vN with the latest release):
-#   https://github.com/titoo-dev/predictive-ime/releases
+# Option A — prebuilt model from Releases (recommended).
+# Latest: https://github.com/titoo-dev/predictive-ime/releases
 sudo mkdir -p /usr/share/ime-predictord
-curl -fsSL .../ime-model-vN.tar.zst | sudo tar -C /usr/share/ime-predictord --zstd -xf -
+curl -fsSL https://github.com/titoo-dev/predictive-ime/releases/download/model-v1/ime-model-model-v1.tar.zst \
+  | zstd -d | sudo tar -C /usr/share/ime-predictord -xf -
 
 # Option B — rebuild it yourself (downloads the open corpora, ~minutes):
 sudo ./build-model.sh /usr/share/ime-predictord
