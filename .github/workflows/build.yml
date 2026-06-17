@@ -1,0 +1,59 @@
+name: build
+
+on:
+  push:
+    branches: [main, "feat/**"]
+  pull_request:
+
+# Proves the PORTABLE CORE (engine + daemon + preferences) builds and installs
+# against the STOCK fcitx5 of every major distro family. Package sets here were
+# each verified in a clean container on 2026-06-17 (see the spec's verification
+# log). qmlpanel (BUILD_UI=ON) is excluded: it needs a patched/upstream fcitx5
+# and gets its own job once that path lands (P0).
+jobs:
+  core:
+    name: core (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: arch
+            image: archlinux:latest
+            deps: >-
+              pacman -Sy --noconfirm --needed base-devel cmake extra-cmake-modules
+              git fcitx5 nlohmann-json qt6-base qt6-declarative
+          - name: fedora
+            image: fedora:41
+            deps: >-
+              dnf -y install gcc-c++ cmake extra-cmake-modules pkgconf-pkg-config
+              git fcitx5-devel nlohmann-json-devel qt6-qtbase-devel qt6-qtdeclarative-devel
+          - name: ubuntu
+            image: ubuntu:24.04
+            deps: >-
+              apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y
+              build-essential cmake extra-cmake-modules pkg-config git
+              nlohmann-json3-dev qt6-base-dev qt6-declarative-dev
+              libfcitx5core-dev libfcitx5utils-dev libfcitx5config-dev
+          - name: opensuse
+            image: opensuse/tumbleweed:latest
+            deps: >-
+              zypper -n install -y gcc-c++ cmake extra-cmake-modules pkg-config
+              git fcitx5-devel nlohmann_json-devel qt6-base-devel qt6-declarative-devel
+    steps:
+      - name: Install build dependencies
+        run: ${{ matrix.deps }}
+      - uses: actions/checkout@v4
+      - name: Configure (core, BUILD_UI=OFF)
+        run: cmake -S . -B build -DBUILD_UI=OFF -DCMAKE_INSTALL_PREFIX=/usr
+      - name: Build
+        run: cmake --build build -j"$(nproc)"
+      - name: Install (staged) and list artifacts
+        run: |
+          DESTDIR="$PWD/stage" cmake --install build
+          echo "== installed =="; find stage -type f | sort
+          test -f stage/usr/lib*/fcitx5/libpredict.so
+          test -f stage/usr/bin/predictord
+          test -f stage/usr/lib/systemd/user/ime-predictord.service

@@ -18,17 +18,15 @@ option(BUILD_UI          "Build the Qt Quick candidate panel (qmlpanel)"    ON)
 option(BUILD_PREFERENCES "Build the Qt preferences app (ime-preferences)"   ON)
 option(INSTALL_SYSTEMD_USER_UNIT "Install a systemd user service for the daemon" ON)
 
-# qmlpanel and the caret-positioned candidate bar.
-#   ON  : build against a fcitx5 patched with getInputMethodV2Raw
-#         (see ui/waylandim-public.patch; this is what the Nix flake uses).
-#   OFF : (target, after P0 spike) build against STOCK distro fcitx5 via a
-#         vendored waylandim_public.h + getInputMethodV2 + rawPointer.
-# Default is ON until the stock-fcitx5 path is implemented & CI-verified, at
-# which point this flips to OFF so `cmake` works out-of-the-box everywhere.
-# The portable CORE (engine+daemon+preferences) needs neither: set BUILD_UI=OFF
-# to build it against stock fcitx5 today.
-option(QMLPANEL_REQUIRE_PATCHED_FCITX5
-       "qmlpanel uses the patched getInputMethodV2Raw API (else stock-compatible path)" ON)
+# NOTE on qmlpanel (BUILD_UI): the caret-positioned candidate bar needs the raw
+# zwp_input_method_v2 object, which a STOCK fcitx5 does NOT expose to external
+# addons. Verified by probing fcitx5-devel on 5.1.7/5.1.13/5.1.17/5.1.19: they
+# ship neither the waylandim public header, the ZwpInputMethodV2 wrapper, nor
+# rawPointer. So qmlpanel REQUIRES a fcitx5 carrying the waylandim public API —
+# patched (ui/waylandim-public.patch, as the flake does) or, once merged,
+# upstream. The portable CORE (engine + daemon + preferences) needs none of this
+# and builds against any stock fcitx5: pass -DBUILD_UI=OFF.
+# See docs/specs/2026-06-17-cross-distro-oss-design.md.
 
 if(BUILD_ENGINE)
   add_subdirectory(engine)
@@ -56,4 +54,4 @@ endif()
 
 message(STATUS "predictive-ime: engine=${BUILD_ENGINE} daemon=${BUILD_DAEMON} "
                "ui=${BUILD_UI} preferences=${BUILD_PREFERENCES} "
-               "patched-fcitx5=${QMLPANEL_REQUIRE_PATCHED_FCITX5}")
+               "(ui requires a patched/upstream fcitx5 — see comment above)")

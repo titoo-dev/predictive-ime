@@ -21,7 +21,7 @@ prioritizing distribution flexibility. Reuse the existing GitHub repo.
 
 | # | Failure mode | Preventive decision |
 |---|---|---|
-| F1 | **Patched-fcitx5 wall.** The QML bar requires patching fcitx5; nobody on Arch/Fedora/Debian recompiles their fcitx5 → either everyone gets classicui or adoption dies. | The patch's runtime addition (`getInputMethodV2Raw`) is a **1-line shim** over the already-published `getInputMethodV2`. Spike running qmlpanel on **stock fcitx5** by vendoring `waylandim_public.h` + deriving the raw pointer. Upstream the patch in parallel. Runtime fallback to classicui if the API is absent. → fork stops being a hard requirement. |
+| F1 | **Patched-fcitx5 wall.** The QML bar requires patching fcitx5; nobody on Arch/Fedora/Debian recompiles their fcitx5 → either everyone gets classicui or adoption dies. | Spike (below) **confirmed** stock fcitx5 can't expose the raw input-method object to external addons — F1 is real. Mitigation: **upstream the patch** (sustainable unlock) + **provide a patched-fcitx5 build** for early adopters + **classicui fallback** so the core works everywhere regardless. See "qmlpanel / patched-fcitx5 plan". |
 | F2 | **Model isn't shippable.** 66 MB built from hundreds of MB of network corpora; distro build sandboxes forbid network; URLs rot. | Build the model **once in CI** (`build-model.sh`, pinned SHA-256) → versioned tarball in **GitHub Releases**. Packages bundle/fetch the artifact, never re-download corpora at build time. |
 | F3 | **Data licensing → distro rejection.** Model derives from CC BY / Unicode data; no clear license = not redistributable. | `LICENSE` (MIT, code) + `NOTICE-DATASETS.md` (per-corpus attribution; generated model = **CC BY-SA 4.0**). NOTICE travels inside the model artifact. |
 | F4 | **Nix-shaped assumptions everywhere.** All wiring in `flake.nix`; baked Qt paths. | Standalone top-level **CMake superbuild** + `cmake --install`; auto-detect Qt paths (baked flags optional); ship systemd unit + `.desktop`. Flake becomes a thin wrapper. |
@@ -57,22 +57,40 @@ published-function API).
 
 ## The qmlpanel / patched-fcitx5 plan (central)
 
-`ui/qmlui.cpp` calls `call<IWaylandIMModule::getInputMethodV2Raw>(ic)`.
-`getInputMethodV2Raw(ic)` is literally `wayland::rawPointer(getInputMethodV2(ic))`;
-`getInputMethodV2` is published by **stock** waylandim. The stock blockers are
-only that fcitx5 doesn't *install* `waylandim_public.h` / the `WaylandIM` CMake
-module.
+**Spike result (2026-06-17, refuted the optimistic path).** The hope was that
+qmlpanel could run on stock fcitx5 by vendoring `waylandim_public.h` and calling
+the already-published `getInputMethodV2` + `rawPointer`. Probing stock
+`fcitx5-devel` on **5.1.7 / 5.1.13 / 5.1.17 / 5.1.19** shows this is **not
+possible**: stock ships neither the `waylandim` public header, the
+`fcitx::wayland::ZwpInputMethodV2` wrapper, nor `rawPointer`. The raw
+`zwp_input_method_v2` object is, by design, unreachable from an external addon
+on a stock fcitx5 — exactly why the author added the patch. **F1 stands.**
 
-Plan: a CMake option `QMLPANEL_REQUIRE_PATCHED_FCITX5`.
-- **OFF (target default):** vendor `waylandim_public.h` (declaring `getInputMethodV2`
-  only), call it + `rawPointer` in qmlui.cpp, drop the `WaylandIM` find_package
-  component. Builds & runs on stock fcitx5.
-- **ON (current default, flake path):** use the patched `getInputMethodV2Raw`.
-- Runtime: if the published function is unavailable, degrade to classicui.
+Revised plan ("qmlpanel everywhere" honored without making a fork mandatory):
+1. **Upstream the patch** to fcitx5 (4 lines + `INSTALL` of the waylandim public
+   module) — the real, sustainable unlock: once merged, qmlpanel is a plain
+   addon on any new-enough fcitx5.
+2. **Provide a patched-fcitx5 build** (CMake/flake) for early adopters until the
+   patch lands upstream; docs explain installing it to a prefix and pointing the
+   session at it. The source/flake channels target technical users, for whom
+   this is acceptable.
+3. **classicui fallback** is the universal baseline: the CORE
+   (engine+daemon+preferences) works on *any* stock fcitx5 with the default
+   classicui UI — only the fancy caret-positioned QML bar needs the patched API.
 
-Default flips to OFF once the stock path is implemented and CI-verified
-(P0). Until then the portable **core** (engine+daemon+preferences) builds on
-stock fcitx5 with `-DBUILD_UI=OFF`.
+`BUILD_UI=ON` therefore requires a patched/upstream fcitx5 (find_package fails
+loudly on stock); `-DBUILD_UI=OFF` gives the universal core.
+
+## Verification log
+
+- **Portable core (`-DBUILD_UI=OFF`) builds + installs cleanly on all 4 major
+  distro families against stock fcitx5**, in clean containers (2026-06-17):
+  Arch (fcitx5 5.1.19, `/usr/lib`), Fedora 41 (5.1.13, `/usr/lib64`),
+  Ubuntu 24.04 (5.1.7, multiarch `/usr/lib/x86_64-linux-gnu`), openSUSE
+  Tumbleweed (5.1.17, `/usr/lib64`). GNUInstallDirs handles libdir differences;
+  systemd unit lands in `lib/systemd/user`. Encoded as the CI `core` matrix.
+- Found & fixed by verification: systemd user unit was installed under the arch
+  libdir (`lib64`) where systemd never looks → pinned to `lib/systemd/user`.
 
 ## Model distribution
 
