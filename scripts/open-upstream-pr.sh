@@ -17,13 +17,11 @@ TITLE="waylandim: expose raw zwp_input_method_v2 to external UI addons"
 
 command -v gh >/dev/null || { echo "gh (GitHub CLI) required"; exit 1; }
 me="$(gh api user -q .login)"
-echo ">> forking fcitx/fcitx5 (no-op if it exists)"
-gh repo fork fcitx/fcitx5 --clone=false || true
-
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
-git clone --quiet "https://github.com/$me/fcitx5" "$WORK/fcitx5"
-cd "$WORK/fcitx5"
-git remote add upstream https://github.com/fcitx/fcitx5 >/dev/null 2>&1 || true
+cd "$WORK"
+echo ">> forking + cloning fcitx/fcitx5 (gh handles fork propagation)"
+gh repo fork fcitx/fcitx5 --clone >/dev/null
+cd fcitx5
 git fetch --quiet upstream
 base="$(gh api repos/fcitx/fcitx5 -q .default_branch)"
 git checkout -q -b "$BRANCH" "upstream/$base"

@@ -9,8 +9,9 @@ adds `getInputMethodV2Raw` and `INSTALL`s the waylandim public module:
 [`../ui/waylandim-public.patch`](../ui/waylandim-public.patch).
 
 This is the **interim** path until the patch is accepted upstream (tracking:
-see the repo issues). Once upstream, a new-enough stock fcitx5 will carry the
-API and qmlpanel becomes a plain addon — no rebuild of fcitx5 needed.
+[fcitx/fcitx5#1583](https://github.com/fcitx/fcitx5/pull/1583)). Once upstream, a
+new-enough stock fcitx5 will carry the API and qmlpanel becomes a plain addon —
+no rebuild of fcitx5 needed.
 
 ## The sustainable path: upstream
 

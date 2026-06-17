@@ -1,112 +1,59 @@
 # predictive-ime
 
-A predictive **French/English** input method for [fcitx5](https://fcitx-im.org/):
-a thin fcitx5 engine that delegates to a fast local **n-gram daemon** (Kneser-Ney,
-µs-latency lookups), with completion, AZERTY-aware autocorrection, next-word
-prediction, an emoji picker, and learning from your own typing — all offline,
-no network, no telemetry. Quality is in the ballpark of a deployed Gboard
-n-gram model (see [`docs/internals.md`](docs/internals.md) for the benchmark).
+Predictive French/English input method for [fcitx5](https://fcitx-im.org/).
+A small fcitx5 engine queries a local n-gram daemon for completion,
+autocorrection, next-word prediction and an emoji picker. Offline, no telemetry.
 
-> **Status:** the portable core (engine + daemon + preferences) is CI-verified
-> to build against the **stock fcitx5** of Arch, Fedora, Debian/Ubuntu and
-> openSUSE. The optional caret-positioned **QML candidate bar** (`qmlpanel`)
-> needs a small fcitx5 patch — see [qmlpanel](#optional-qml-candidate-bar).
+The core runs on any stock fcitx5 (using its default candidate bar). The
+optional Qt Quick candidate bar (`qmlpanel`) needs a patched fcitx5 —
+see [docs/patched-fcitx5.md](docs/patched-fcitx5.md).
 
-## Components
+## Install
 
-| Component | What it is | Needs |
-|---|---|---|
-| `predict` | fcitx5 engine addon — buffers input, queries the daemon, shows candidates | stock fcitx5 |
-| `predictord` | n-gram prediction daemon (Unix socket + JSON) | — |
-| `ime-preferences` | small Qt app to tune language/behaviour (`config.json`) | Qt 6 |
-| `qmlpanel` | Qt Quick candidate bar positioned at the caret by the compositor | **patched** fcitx5 (Wayland) |
-| model | `words.tsv` + n-grams + emoji, built from pinned open corpora | — |
+**1. Dependencies**
 
-The engine works with fcitx5's standard **classicui** bar out of the box;
-`qmlpanel` is a cosmetic upgrade, not a requirement.
+- Arch: `pacman -S --needed base-devel cmake extra-cmake-modules fcitx5 nlohmann-json qt6-base qt6-declarative`
+- Fedora: `dnf install gcc-c++ cmake extra-cmake-modules pkgconf-pkg-config fcitx5-devel nlohmann-json-devel qt6-qtbase-devel qt6-qtdeclarative-devel`
+- Debian/Ubuntu: `apt install build-essential cmake extra-cmake-modules pkg-config nlohmann-json3-dev qt6-base-dev qt6-declarative-dev libfcitx5core-dev libfcitx5utils-dev libfcitx5config-dev`
+- openSUSE: `zypper install gcc-c++ cmake extra-cmake-modules pkg-config fcitx5-devel nlohmann_json-devel qt6-base-devel qt6-declarative-devel`
 
-## Install (core)
-
-### 1. Dependencies
-
-| Distro | Command |
-|---|---|
-| **Arch** | `sudo pacman -S --needed base-devel cmake extra-cmake-modules fcitx5 nlohmann-json qt6-base qt6-declarative` |
-| **Fedora** | `sudo dnf install gcc-c++ cmake extra-cmake-modules pkgconf-pkg-config fcitx5-devel nlohmann-json-devel qt6-qtbase-devel qt6-qtdeclarative-devel` |
-| **Debian/Ubuntu** | `sudo apt install build-essential cmake extra-cmake-modules pkg-config nlohmann-json3-dev qt6-base-dev qt6-declarative-dev libfcitx5core-dev libfcitx5utils-dev libfcitx5config-dev` |
-| **openSUSE** | `sudo zypper install gcc-c++ cmake extra-cmake-modules pkg-config fcitx5-devel nlohmann_json-devel qt6-base-devel qt6-declarative-devel` |
-
-### 2. Build & install
+**2. Build and install**
 
 ```sh
-cmake -B build -DBUILD_UI=OFF -DCMAKE_INSTALL_PREFIX=/usr
-cmake --build build -j"$(nproc)"
+cmake -B build -DBUILD_UI=OFF
+cmake --build build -j
 sudo cmake --install build
 ```
 
-This installs the `predict` engine addon, the `predictord` daemon, the
-`ime-preferences` app, and a `ime-predictord` systemd **user** service.
-
-### 3. Get the model
-
-The model is distributed as a versioned release artifact (recommended), or you
-can rebuild it from the pinned corpora:
+**3. Get the model**
 
 ```sh
-# Option A — prebuilt model from Releases (recommended).
-# Latest: https://github.com/titoo-dev/predictive-ime/releases
 sudo mkdir -p /usr/share/ime-predictord
 curl -fsSL https://github.com/titoo-dev/predictive-ime/releases/download/model-v1/ime-model-model-v1.tar.zst \
   | zstd -d | sudo tar -C /usr/share/ime-predictord -xf -
-
-# Option B — rebuild it yourself (downloads the open corpora, ~minutes):
-sudo ./build-model.sh /usr/share/ime-predictord
 ```
 
-### 4. Start the daemon & enable the input method
+**4. Enable**
 
 ```sh
-systemctl --user daemon-reload
 systemctl --user enable --now ime-predictord.service
 ```
 
-Then add **Predict** as an input method (e.g. via `fcitx5-configtool`, or add a
-`predict` item to your fcitx5 group) and restart fcitx5. Toggle it like any
-fcitx5 input method.
-
-## Optional: QML candidate bar
-
-`qmlpanel` renders the caret-positioned, themeable candidate bar. It needs the
-raw Wayland input-method object, which stock fcitx5 does **not** expose to
-external addons — so it requires a fcitx5 carrying a small public-API patch
-([`ui/waylandim-public.patch`](ui/waylandim-public.patch), 4 lines + a header
-install). Until that lands upstream, build qmlpanel against a patched fcitx5
-(the Nix flake does this automatically; a standalone recipe is in
-[`docs/patched-fcitx5.md`](docs/patched-fcitx5.md)) and run `fcitx5 --ui qmlpanel`.
-Without it, the core uses fcitx5's standard classicui bar.
+Add `Predict` as an input method (e.g. with `fcitx5-configtool`) and restart fcitx5.
 
 ## Configuration
 
-Runtime config lives in `~/.config/ime-predictord/` (hot-reloaded, no restart):
-`config.json` (language, autocorrection switches…), `snippets.tsv`, `dict.txt`
-(personal words). The `ime-preferences` app edits `config.json` for you; it also
-has a CLI: `ime-preferences --set lang=fr`. Details in
-[`docs/internals.md`](docs/internals.md).
+Settings live in `~/.config/ime-predictord/` (hot-reloaded): `config.json`,
+`snippets.tsv`, `dict.txt`. The `ime-preferences` app edits `config.json`.
 
-## Nix / NixOS
+## Rebuild the model
 
-```sh
-nix build github:titoo-dev/predictive-ime#predictord   # etc.
-```
-
-The flake exposes packages, a `nixosModules.default` (wires the addon into
-fcitx5 and runs the daemon), and builds the patched fcitx5 for qmlpanel.
+`./build-model.sh <output-dir>` rebuilds it from the pinned open corpora.
 
 ## License
 
-Source code: **MIT** ([`LICENSE`](LICENSE)). The prediction **model** is derived
-from third-party corpora (mostly CC BY) and is distributed under **CC BY-SA 4.0**
-with attribution — see [`NOTICE-DATASETS.md`](NOTICE-DATASETS.md).
+Code: MIT ([LICENSE](LICENSE)). Model: CC BY-SA 4.0, derived from open corpora —
+see [NOTICE-DATASETS.md](NOTICE-DATASETS.md).
 
-Deep design notes, the model/algorithm, interaction reference and benchmarks:
-[`docs/internals.md`](docs/internals.md).
+Design notes, algorithm and benchmarks: [docs/internals.md](docs/internals.md).
+Contributing: [CONTRIBUTING.md](CONTRIBUTING.md).

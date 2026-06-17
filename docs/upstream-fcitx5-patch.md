@@ -43,5 +43,4 @@ line so the input-method frontend is extensible the same way.
 
 ## Status
 
-- [ ] Open the PR against https://github.com/fcitx/fcitx5
-- [ ] Link the issue/PR here and in `README.md`
+- [x] PR opened: https://github.com/fcitx/fcitx5/pull/1583
