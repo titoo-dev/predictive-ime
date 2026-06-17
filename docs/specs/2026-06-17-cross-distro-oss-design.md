@@ -101,6 +101,17 @@ loudly on stock); `-DBUILD_UI=OFF` gives the universal core.
   `model-v1` release (`ime-model-*.tar.zst` + `.sha256`). Found & fixed: an
   over-specific `lib*` glob in the CI assertion missed Ubuntu's multiarch libdir.
 
+## Premortem recommendations — final status
+
+All applied: F1 upstream PR opened ([fcitx/fcitx5#1583](https://github.com/fcitx/fcitx5/pull/1583));
+F2 prebuilt model release; F3 MIT + CC BY-SA + NOTICE; F4 standalone CMake +
+install; F5 per-distro source builds (CI); F6 source + flake channels only
+(no over-fragmentation); F7 graceful fallbacks — qmlpanel colours default to a
+Catppuccin palette when DMS/override are absent, fonts fall back (Maple Mono NF
+→ monospace, Noto Color Emoji → emoji/sans-serif), preferences ship as a
+`.desktop` app, the daemon as a systemd user unit, and standard fcitx5 launch is
+documented (no reliance on the stowed autostart hack).
+
 ## Model distribution
 
 `build-model.sh` reproduces the Nix `ime-model` derivation exactly (same URLs,
