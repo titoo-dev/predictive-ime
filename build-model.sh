@@ -10,7 +10,7 @@
 # path. Per-corpus licenses: see NOTICE-DATASETS.md.
 #
 # Usage:  ./build-model.sh [OUTPUT_DIR]      (default: ./model-out)
-# Output: words.tsv  bigrams.tsv  trigrams.tsv  emoji.tsv  NOTICE
+# Output: words.tsv  morph.tsv  bigrams.tsv  trigrams.tsv  emoji.tsv  NOTICE
 set -euo pipefail
 
 OUT="${1:-$PWD/model-out}"
@@ -33,7 +33,8 @@ https://object.pouta.csc.fi/OPUS-Tatoeba/v2023-04-12/mono/fr.txt.gz|sha256-eaRS3
 https://object.pouta.csc.fi/OPUS-Tatoeba/v2023-04-12/mono/en.txt.gz|sha256-oyxVAM12uUeYWXZPt4U3pLm1P6uPo73A/ATdcPKL8ps=|tatoeba-en.txt.gz
 https://raw.githubusercontent.com/unicode-org/cldr-json/48.2.0/cldr-json/cldr-annotations-full/annotations/fr/annotations.json|sha256-M9oFL3R4J5GYnmIm1ghxyEZ5ngd6Wn+06H7Pp8o4VzM=|cldr-fr.json
 https://raw.githubusercontent.com/unicode-org/cldr-json/48.2.0/cldr-json/cldr-annotations-full/annotations/en/annotations.json|sha256-8iCDy4bf+2OmQ9W6y12YmfgtL6XTiK1POu1yGErO9QU=|cldr-en.json
-https://unicode.org/Public/emoji/16.0/emoji-test.txt|sha256-JPDFNOhs8ULiSWlT6PDkaj5wI5KRHt3NKcbM7YUTlpc=|emoji-test.txt"
+https://unicode.org/Public/emoji/16.0/emoji-test.txt|sha256-JPDFNOhs8ULiSWlT6PDkaj5wI5KRHt3NKcbM7YUTlpc=|emoji-test.txt
+https://huggingface.co/datasets/sagot/lefff_morpho/resolve/main/lefff_morpho-3.5.json|sha256-WNXsQuu8tIuX8CIILOF5qemwx/ep/85cY8UMsexgNDc=|lefff.json"
 
 # nix "sha256-<base64>" -> hex digest
 sri_to_hex() { printf '%s' "${1#sha256-}" | base64 -d | od -An -tx1 | tr -d ' \n'; }
@@ -54,14 +55,20 @@ done <<EOF
 $SOURCES
 EOF
 
-echo "==> 1/3 words.tsv (frequency-ranked, col 3 = language)" >&2
+echo "==> 1/3 words.tsv (frequency-ranked, col 3 = language by dominance)" >&2
 awk 'NF==2 && length($1)>=2 && $1 !~ /^[0-9]+$/ {
-       f[$1]+=$2; src[$1] = src[$1] " " FILENAME
+       f[$1]+=$2
+       if (FILENAME ~ /fr_50k/) { frf[$1]=$2; frtot+=$2 }
+       else                     { enf[$1]=$2; entot+=$2 }
      }
      END {
        for (w in f) {
-         fr = src[w] ~ /fr_50k/; en = src[w] ~ /en_50k/
-         print w, f[w], (fr && en ? "both" : fr ? "fr" : "en")
+         hf = (w in frf); he = (w in enf)
+         if (hf && he) {
+           rf = frf[w]/frtot; re = enf[w]/entot
+           lang = (rf >= 3*re ? "fr" : re >= 3*rf ? "en" : "both")
+         } else lang = (hf ? "fr" : "en")
+         print w, f[w], lang
        }
      }' "$WORK/fr_50k.txt" "$WORK/en_50k.txt" \
   | sort -k2,2nr > "$OUT/words.tsv"
@@ -75,6 +82,10 @@ for w in pcq bcp tkt mdr ptdr jsp jpp dsl slt stp auj rdv qd qq qqn \
   echo "$w 3000 both"
 done >> "$OUT/words.tsv"
 echo "    words.tsv: $(wc -l < "$OUT/words.tsv") words" >&2
+
+echo "==> 1b/3 morph.tsv (Lefff gender/number, restricted to vocab)" >&2
+python3 "$HERE/scripts/build_morph.py" "$WORK/lefff.json" "$OUT/words.tsv" > "$OUT/morph.tsv"
+echo "    morph.tsv: $(wc -l < "$OUT/morph.tsv") forms" >&2
 
 echo "==> 2/3 n-grams (Kneser-Ney: Leipzig news + Tatoeba conversational)" >&2
 mkdir -p "$WORK/corpus"

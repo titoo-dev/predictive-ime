@@ -16,6 +16,7 @@ build is reproducible and every input is auditable.
 | **Tatoeba via OPUS** (release v2023-04-12, `fr`, `en`) | n-grams (conversational register) | CC BY 2.0 FR | Tatoeba.org contributors; OPUS (J. Tiedemann, LREC 2012). https://opus.nlpl.eu/Tatoeba |
 | **Unicode CLDR annotations** (v48.2.0, `fr`, `en`) | emoji keyword index (`emoji.tsv`) | Unicode License v3 | Unicode, Inc. — CLDR. https://github.com/unicode-org/cldr-json |
 | **Unicode emoji-test.txt** (Emoji 16.0) | authoritative emoji list / fully-qualified forms | Unicode License v3 | Unicode, Inc. https://unicode.org/Public/emoji/16.0/ |
+| **Lefff 3.5** (Lexique des Formes Fléchies du Français) | `morph.tsv` — gender/number per inflected form, for grammatical agreement | LGPL-LR | Benoît Sagot, *The Lefff, a freely available and large-coverage morphological and syntactic lexicon for French* (LREC 2010), INRIA. Mirror: https://huggingface.co/datasets/sagot/lefff_morpho |
 
 ## On the generated model
 

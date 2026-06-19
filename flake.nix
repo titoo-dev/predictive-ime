@@ -59,6 +59,16 @@
         hash = "sha256-JPDFNOhs8ULiSWlT6PDkaj5wI5KRHt3NKcbM7YUTlpc=";
       };
 
+      # Lexique morphologique Lefff 3.5 (Sagot, INRIA) — chaque forme fléchie →
+      # genre/nombre/lemme. Sert à l'ACCORD grammatical (un déterminant pluriel
+      # remonte les formes plurielles, etc.). Miroir HuggingFace (URL resolve
+      # stable, contrairement au GitLab INRIA derrière anti-bot). Licence
+      # LGPL-LR (libre, redistribuable) — cf NOTICE-DATASETS.md.
+      lefff = pkgs.fetchurl {
+        url = "https://huggingface.co/datasets/sagot/lefff_morpho/resolve/main/lefff_morpho-3.5.json";
+        hash = "sha256-WNXsQuu8tIuX8CIILOF5qemwx/ep/85cY8UMsexgNDc=";
+      };
+
       # Modèle FR+EN: fusionne les deux listes (fréquences cumulées pour les
       # mots communs), filtre nombres et tokens d'1 caractère. → words.tsv que
       # le daemon charge pour la complétion classée par fréquence.
@@ -100,6 +110,11 @@
           echo "$w 3000 both"
         done >> $out/words.tsv
         echo "words.tsv: $(wc -l < $out/words.tsv) mots" >&2
+
+        # 1bis) morph.tsv — genre/nombre par forme (Lefff 3.5), restreint au
+        # vocabulaire ci-dessus. Sert à l'accord grammatical côté daemon.
+        python3 ${./scripts/build_morph.py} ${lefff} $out/words.tsv > $out/morph.tsv
+        echo "morph.tsv: $(wc -l < $out/morph.tsv) formes" >&2
 
         # 2) n-grammes Kneser-Ney — news (300K/langue) + Tatoeba conversationnel
         #    (l'EN Tatoeba est plafonné pour rester équilibré avec le FR).
