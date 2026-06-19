@@ -111,10 +111,14 @@ Item {
                         color: hlPos >= 0 && index === Math.round(hlPos)
                                ? colors.onAccent : colors.onSurface
                         font.pixelSize: emoji ? 17 : 14
-                        // Fallback chain (Qt 6 font.families): degrade gracefully
-                        // off systems without Maple Mono NF / Noto Color Emoji.
-                        font.families: emoji ? ["Noto Color Emoji", "emoji", "sans-serif"]
-                                             : ["Maple Mono NF", "monospace"]
+                        // NB: font.families (plural, QStringList) is NOT a
+                        // QML-assignable property of the font value type — it
+                        // exists only on the C++ QFont. Qt 6.11's QML engine
+                        // rejects it ("Cannot assign to non-existent property
+                        // families"), so the whole panel component fails to load
+                        // and keystrokes get swallowed. Use font.family (string);
+                        // glyph fallback is handled by fontconfig anyway.
+                        font.family: emoji ? "Noto Color Emoji" : "Maple Mono NF"
                     }
                 }
             }
