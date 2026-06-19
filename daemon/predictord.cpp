@@ -203,6 +203,7 @@ struct Config {
   double autoDom = 2.0;     // dominance top/2e exigée pour auto-appliquer
   int autoMinLen = 3;       // longueur mini du préfixe pour auto-appliquer
   double langBoost = 1.6;   // boost des mots de la langue active
+  double agreeBoost = 2.0;  // boost d'accord nombre/genre (×si accord, ÷sinon)
   bool multiWord = true;    // suggestion multi-mots dans le mot-suivant
   // Langue active : "auto" = détection par vote du contexte, "fr"/"en" =
   // langue CHOISIE (déterministe, aucune détection), "off" = aucun boost.
@@ -213,6 +214,9 @@ struct Model {
   std::vector<std::string> words; // tous les mots (forme d'affichage)
   std::vector<uint32_t> freq;     // fréquence par mot
   std::vector<uint8_t> lang;      // 0 = neutre/inconnu, 1 = fr, 2 = en
+  // Morphologie (Lefff) par forme repliée : genre/nombre, pour l'accord.
+  struct Morph { uint8_t g = 0; uint8_t n = 0; }; // g:1=m,2=f ; n:1=s,2=p ; 0=libre
+  std::unordered_map<std::string, Morph> morph_;
   std::vector<std::string> fold;  // forme repliée (minuscule sans accent)
   std::vector<uint32_t> byFold;   // indices triés par forme repliée
   std::unordered_set<std::string> caseWords; // mots en minuscule, accents gardés
@@ -285,6 +289,28 @@ struct Model {
     }
     fprintf(stderr, "[predictord] %zu mots chargés (%zu lignes)\n", words.size(),
             n);
+  }
+
+  // morph.tsv : "forme<TAB>genre(m|f|-)<TAB>nombre(s|p|-)<TAB>lemme" (Lefff).
+  // Clé = forme repliée (lowerKeep) pour matcher les candidats du modèle.
+  void loadMorph(const std::string &dir) {
+    std::ifstream f(dir + "morph.tsv");
+    std::string line;
+    while (std::getline(f, line)) {
+      size_t a = line.find('\t');
+      if (a == std::string::npos)
+        continue;
+      size_t b = line.find('\t', a + 1);
+      if (b == std::string::npos || b + 1 >= line.size())
+        continue;
+      Morph m;
+      char gc = line[a + 1], nc = line[b + 1];
+      m.g = gc == 'm' ? 1 : gc == 'f' ? 2 : 0;
+      m.n = nc == 's' ? 1 : nc == 'p' ? 2 : 0;
+      if (m.g || m.n)
+        morph_[lowerKeep(line.substr(0, a))] = m;
+    }
+    fprintf(stderr, "[predictord] %zu formes morpho chargées\n", morph_.size());
   }
 
   // Bigrammes KN : "v<TAB>w<TAB>p". Backoff : "v<TAB>γ".
@@ -555,6 +581,7 @@ struct Model {
           fresh.autoDom = j.value("autoDom", fresh.autoDom);
           fresh.autoMinLen = j.value("autoMinLen", fresh.autoMinLen);
           fresh.langBoost = j.value("langBoost", fresh.langBoost);
+          fresh.agreeBoost = j.value("agreeBoost", fresh.agreeBoost);
           fresh.multiWord = j.value("multiWord", fresh.multiWord);
           fresh.lang = j.value("lang", fresh.lang);
           if (fresh.lang != "auto" && fresh.lang != "fr" &&
@@ -724,6 +751,75 @@ struct Model {
     return it != id_.end() && langFactor(ctxL, it->second) == 0.0;
   }
 
+  // ------ Accord grammatical (nombre/genre) ------------------------------
+  struct Agree { uint8_t g = 0; uint8_t n = 0; }; // 0 = libre sur cette dimension
+
+  // Déterminant gouverneur → contrainte de genre/nombre qu'il impose au SN.
+  Agree determiner(const std::string &w) const {
+    static const std::unordered_map<std::string, Agree> D = {
+        {"les", {0, 2}},      {"des", {0, 2}},     {"mes", {0, 2}},
+        {"tes", {0, 2}},      {"ses", {0, 2}},     {"nos", {0, 2}},
+        {"vos", {0, 2}},      {"leurs", {0, 2}},   {"ces", {0, 2}},
+        {"aux", {0, 2}},      {"quelques", {0, 2}},{"plusieurs", {0, 2}},
+        {"certains", {1, 2}}, {"certaines", {2, 2}},
+        {"deux", {0, 2}},     {"trois", {0, 2}},   {"quatre", {0, 2}},
+        {"cinq", {0, 2}},     {"six", {0, 2}},     {"sept", {0, 2}},
+        {"huit", {0, 2}},     {"neuf", {0, 2}},    {"dix", {0, 2}},
+        {"le", {1, 1}},       {"un", {1, 1}},      {"ce", {1, 1}},
+        {"cet", {1, 1}},      {"mon", {1, 1}},     {"ton", {1, 1}},
+        {"son", {1, 1}},      {"la", {2, 1}},      {"une", {2, 1}},
+        {"cette", {2, 1}},    {"ma", {2, 1}},      {"ta", {2, 1}},
+        {"sa", {2, 1}},       {"l'", {0, 1}},
+    };
+    auto it = D.find(w);
+    return it == D.end() ? Agree{0, 0} : it->second;
+  }
+
+  // Mot qui ROMPT le groupe nominal (nouvelle proposition) → pas d'accord à
+  // travers. Best-effort : conjonctions (le candidat côté morph_ filtre déjà
+  // les non-noms/adjectifs, ce qui rattrape les verbes).
+  bool npBreaker(const std::string &w) const {
+    static const std::unordered_set<std::string> C = {"et",  "ou",  "mais",
+                                                       "donc", "car", "ni",
+                                                       "or",  "que", "qui"};
+    return C.count(w) > 0;
+  }
+
+  // Contrainte d'accord imposée par le contexte : on remonte jusqu'au
+  // déterminant gouverneur le plus proche (≤4 mots, à travers les adjectifs),
+  // en s'arrêtant à un briseur de SN.
+  Agree agreementOf(const std::vector<std::string> &context) const {
+    int steps = 0;
+    for (auto it = context.rbegin(); it != context.rend() && steps < 4;
+         ++it, ++steps) {
+      std::string w = lowerKeep(*it);
+      if (npBreaker(w))
+        break;
+      Agree a = determiner(w);
+      if (a.g || a.n)
+        return a;
+    }
+    return {0, 0};
+  }
+
+  // Facteur d'accord : ×agreeBoost si la forme s'accorde, ÷agreeBoost si elle
+  // est connue ET désaccordée. Neutre (1.0) hors-lexique ou dimension libre.
+  // Jamais 0 → ne supprime jamais un candidat (réordonne seulement).
+  double agreeFactor(const Agree &want, uint32_t wid) const {
+    if ((!want.g && !want.n) || wid >= words.size())
+      return 1.0;
+    auto it = morph_.find(lowerKeep(words[wid]));
+    if (it == morph_.end())
+      return 1.0;
+    const Morph &m = it->second;
+    double f = 1.0;
+    if (want.n && m.n)
+      f *= (m.n == want.n) ? cfg.agreeBoost : 1.0 / cfg.agreeBoost;
+    if (want.g && m.g)
+      f *= (m.g == want.g) ? cfg.agreeBoost : 1.0 / cfg.agreeBoost;
+    return f;
+  }
+
   // P1(w) : prior unigramme = mélange continuation KN + fréquence brute.
   double p1(uint32_t w) const {
     double pc = w < pcont.size() ? pcont[w] : 0.0;
@@ -803,6 +899,7 @@ struct Model {
     json j;
     j["ok"] = true;
     j["lang"] = cfg.lang; // langue active (préférences)
+    j["morph"] = morph_.size(); // formes morphologiques chargées (accord)
     j["vocab"] = words.size();
     j["bigramContexts"] = biAdj.size();
     j["trigramContexts"] = triAdj.size();
@@ -922,9 +1019,10 @@ private:
     // P(w|préfixe) ∝ fréquence (en début de phrase la fréquence brute est le
     // bon prior, la « continuation » KN n'a pas de sens sans contexte) — le
     // tout × le boost de langue (contexte fr → mots fr devant, et vice-versa).
+    const Agree want = agreementOf(context); // contrainte d'accord du SN
     auto scoreOf = [&](uint32_t wid) -> double {
       double s = hasCtx ? ctxScore(wid) : (double(freq[wid]) + 1.0) / freqTot_;
-      return s * langFactor(ctxL, wid);
+      return s * langFactor(ctxL, wid) * agreeFactor(want, wid);
     };
 
     std::vector<std::pair<std::string, double>> ranked;
@@ -1092,6 +1190,7 @@ private:
       ctx.push_back("<s>");
     const std::string prev = lowerKeep(ctx.back());
     const uint8_t ctxL = ctxLang(ctx); // langue active (filtre strict ci-dessous)
+    const Agree want = agreementOf(ctx); // contrainte d'accord (mot-suivant)
 
     // (1) bigrammes APPRIS (de confiance) pour ce contexte → priorité.
     auto ub = userBi.find(prev);
@@ -1117,17 +1216,20 @@ private:
               (ctxScore.bi ? ctxScore.bi->size() : 0) + topUni_.size());
     if (ctxScore.tri)
       for (auto &pr : *ctxScore.tri)
-        v.push_back({pr.first, pr.second * langFactor(ctxL, pr.first)});
+        v.push_back({pr.first, pr.second * langFactor(ctxL, pr.first) *
+                                   agreeFactor(want, pr.first)});
     if (ctxScore.bi)
       for (auto &pr : *ctxScore.bi)
         if (!CtxScorer::find(ctxScore.tri, pr.first)) // déjà via trigramme
           v.push_back({pr.first, (ctxScore.hasUV ? ctxScore.g3 : 1.0) *
-                                     pr.second * langFactor(ctxL, pr.first)});
+                                     pr.second * langFactor(ctxL, pr.first) *
+                                     agreeFactor(want, pr.first)});
     if (v.size() < size_t(k)) // contexte inconnu → pool des meilleurs P1
       for (uint32_t w : topUni_)
         if (!CtxScorer::find(ctxScore.tri, w) &&
             !CtxScorer::find(ctxScore.bi, w))
-          v.push_back({w, ctxScore(w) * langFactor(ctxL, w)});
+          v.push_back(
+              {w, ctxScore(w) * langFactor(ctxL, w) * agreeFactor(want, w)});
     // Exclusion stricte de langue : jeter les suiveurs au facteur 0 (langue
     // opposée quand lang=fr/en) plutôt que de les laisser au fond du tri.
     v.erase(std::remove_if(v.begin(), v.end(),
@@ -1199,6 +1301,7 @@ int main(int argc, char **argv) {
   model.loadTrigrams(dir);
   model.loadPcont(dir);
   model.loadEmoji(dir);
+  model.loadMorph(dir);
   model.indexNgrams();
   model.finalize();
 
