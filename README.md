@@ -46,6 +46,14 @@ Add `Predict` as an input method (e.g. with `fcitx5-configtool`) and restart fci
 Settings live in `~/.config/ime-predictord/` (hot-reloaded): `config.json`,
 `snippets.tsv`, `dict.txt`. The `ime-preferences` app edits `config.json`.
 
+**Grammatical agreement.** The daemon boosts candidates that agree in number
+and gender with the governing determiner found in the surrounding sentence
+(`les petits chat…` → `chats`), using the Lefff morphological lexicon
+(`morph.tsv`). `agreeBoost` in `config.json` (default `2.0`) tunes the strength
+(higher = more aggressive agreement). The engine feeds the full sentence via the
+toolkit's *surrounding text*; apps that don't expose it degrade to the words the
+IME itself committed.
+
 ## Rebuild the model
 
 `./build-model.sh <output-dir>` rebuilds it from the pinned open corpora.
