@@ -93,6 +93,13 @@ tar xzf "$WORK/fra_news.tar.gz" -C "$WORK/corpus"
 tar xzf "$WORK/eng_news.tar.gz" -C "$WORK/corpus"
 zcat "$WORK/tatoeba-fr.txt.gz" | head -n 600000 > "$WORK/corpus/tatoeba-fr.txt" || true
 zcat "$WORK/tatoeba-en.txt.gz" | head -n 600000 > "$WORK/corpus/tatoeba-en.txt" || true
+
+echo "==> 1c/3 élisions combinées (j'ai, c'est, qu'il…) → words.tsv" >&2
+python3 "$HERE/scripts/extract_elisions.py" "$OUT/words.tsv" \
+  "$WORK"/corpus/*/*-sentences.txt \
+  "$WORK/corpus/tatoeba-fr.txt" "$WORK/corpus/tatoeba-en.txt" >> "$OUT/words.tsv"
+echo "    words.tsv (+élisions): $(wc -l < "$OUT/words.tsv") words" >&2
+
 python3 "$HERE/daemon/build_ngrams.py" "$OUT/words.tsv" "$OUT" \
   "$WORK"/corpus/*/*-sentences.txt \
   "$WORK/corpus/tatoeba-fr.txt" "$WORK/corpus/tatoeba-en.txt"

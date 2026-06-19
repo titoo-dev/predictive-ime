@@ -123,6 +123,16 @@
         tar xzf ${engNews} -C corpus
         zcat ${tatoebaFr} | head -n 600000 > corpus/tatoeba-fr.txt || true
         zcat ${tatoebaEn} | head -n 600000 > corpus/tatoeba-en.txt || true
+
+        # 1ter) élisions combinées (j'ai, c'est, qu'il, aujourd'hui…) extraites
+        # du corpus et AJOUTÉES à words.tsv AVANT les n-grammes : le tokeniseur
+        # les garde combinées mais build_ngrams jette les tokens hors-vocab →
+        # sans ça, toute élision disparaît du modèle (cf extract_elisions.py).
+        python3 ${./scripts/extract_elisions.py} $out/words.tsv \
+          corpus/*/*-sentences.txt corpus/tatoeba-fr.txt corpus/tatoeba-en.txt \
+          >> $out/words.tsv
+        echo "words.tsv (+élisions): $(wc -l < $out/words.tsv) mots" >&2
+
         python3 ${./daemon/build_ngrams.py} $out/words.tsv $out \
           corpus/*/*-sentences.txt corpus/tatoeba-fr.txt corpus/tatoeba-en.txt
         echo "bigrams.tsv:  $(wc -l < $out/bigrams.tsv) bigrammes"  >&2
