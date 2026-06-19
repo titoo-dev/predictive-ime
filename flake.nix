@@ -67,15 +67,25 @@
       } ''
         mkdir -p $out
         # 1) words.tsv — complétion classée par fréquence, 3e colonne = langue
-        #    (fr / en / both selon les listes d'origine) pour le boost de
-        #    langue du daemon (un contexte français remonte les mots français).
+        #    (fr / en / both) pour le boost/filtre de langue du daemon.
+        #    Étiquetage par DOMINANCE de fréquence RELATIVE (pas « présent dans
+        #    les 2 listes ») : beaucoup de mots anglais polluent la liste FR
+        #    (the, you, to, be…) — s'ils étaient « both » ils échappaient au
+        #    filtre lang=fr. On compare la fréquence relative dans chaque corpus :
+        #    ≥3× plus fréquent côté FR → "fr", ≥3× côté EN → "en", sinon "both".
         awk 'NF==2 && length($1)>=2 && $1 !~ /^[0-9]+$/ {
-               f[$1]+=$2; src[$1] = src[$1] " " FILENAME
+               f[$1]+=$2
+               if (FILENAME ~ /fr_50k/) { frf[$1]=$2; frtot+=$2 }
+               else                     { enf[$1]=$2; entot+=$2 }
              }
              END {
                for (w in f) {
-                 fr = src[w] ~ /fr_50k/; en = src[w] ~ /en_50k/
-                 print w, f[w], (fr && en ? "both" : fr ? "fr" : "en")
+                 hf = (w in frf); he = (w in enf)
+                 if (hf && he) {
+                   rf = frf[w]/frtot; re = enf[w]/entot
+                   lang = (rf >= 3*re ? "fr" : re >= 3*rf ? "en" : "both")
+                 } else lang = (hf ? "fr" : "en")
+                 print w, f[w], lang
                }
              }' ${fr50k} ${en50k} \
           | sort -k2,2nr > $out/words.tsv

@@ -698,10 +698,30 @@ struct Model {
 
   // Facteur de boost : un contexte français remonte les mots français (et
   // réciproquement) — les mots neutres/inconnus ne bougent pas.
+  // Langue CHOISIE (cfg.lang == "fr"/"en", pas "auto") = mode STRICT : la langue
+  // opposée est EXCLUE (facteur 0 → les appelants jettent les scores <= 0). Ça
+  // supprime non seulement les mots anglais courants (the/you/to…) mais aussi
+  // les tokens de contraction anglaise à apostrophe initiale ('ai, 'am, 'all…)
+  // que la complétion fuzzy faisait remonter sur les élisions françaises (j'ai).
+  // En mode "auto" (détection par contexte), on se contente de pénaliser.
   double langFactor(uint8_t ctxL, uint32_t wid) const {
     if (!ctxL || wid >= lang.size() || !lang[wid])
       return 1.0;
-    return lang[wid] == ctxL ? cfg.langBoost : 1.0 / cfg.langBoost;
+    if (lang[wid] == ctxL)
+      return cfg.langBoost;
+    if (cfg.lang == "fr" || cfg.lang == "en")
+      return 0.0; // langue choisie → exclusion stricte de l'autre langue
+    return 1.0 / cfg.langBoost;
+  }
+
+  // Mot APPRIS à écarter en mode langue stricte : les candidats appris
+  // (userUni/userBi) sont offerts avec un score énorme qui court-circuite
+  // langFactor. S'ils sont connus du modèle DANS la langue exclue (ex. "to",
+  // "be" tapés autrefois en anglais puis appris), on les écarte aussi. Un mot
+  // appris hors-modèle (neutre, sans étiquette) est conservé.
+  bool langExcludedWord(const std::string &w, uint8_t ctxL) const {
+    auto it = id_.find(lowerKeep(w));
+    return it != id_.end() && langFactor(ctxL, it->second) == 0.0;
   }
 
   // P1(w) : prior unigramme = mélange continuation KN + fréquence brute.
@@ -910,6 +930,8 @@ private:
     std::vector<std::pair<std::string, double>> ranked;
     std::unordered_map<std::string, size_t> have;
     auto offer = [&](const std::string &w, double s) {
+      if (s <= 0.0)
+        return; // exclusion stricte de langue (langFactor → 0)
       auto [it, fresh] = have.try_emplace(w, ranked.size());
       if (fresh)
         ranked.push_back({w, s});
@@ -935,7 +957,8 @@ private:
     //     priorité absolue.
     for (auto &kv : userUni)
       if (userTrusted(kv.first, kv.second) &&
-          foldStr(kv.first).compare(0, fp.size(), fp) == 0)
+          foldStr(kv.first).compare(0, fp.size(), fp) == 0 &&
+          !langExcludedWord(kv.first, ctxL))
         offer(kv.first, 1e18 + double(kv.second));
 
     // (2) correspondances exactes du modèle.
@@ -1068,6 +1091,7 @@ private:
     if (ctx.empty())
       ctx.push_back("<s>");
     const std::string prev = lowerKeep(ctx.back());
+    const uint8_t ctxL = ctxLang(ctx); // langue active (filtre strict ci-dessous)
 
     // (1) bigrammes APPRIS (de confiance) pour ce contexte → priorité.
     auto ub = userBi.find(prev);
@@ -1079,7 +1103,8 @@ private:
       std::sort(v.begin(), v.end(),
                 [](auto &a, auto &b) { return a.second > b.second; });
       for (auto &p : v)
-        push(p.first);
+        if (!langExcludedWord(p.first, ctxL))
+          push(p.first);
     }
 
     // (2) modèle : score exact P_KN(w|ctx) × boost de langue sur les suiveurs
@@ -1087,7 +1112,6 @@ private:
     //     probabilités finales, pas besoin de repasser par operator().
     CtxScorer ctxScore;
     ctxScore.init(*this, ctx);
-    uint8_t ctxL = ctxLang(ctx);
     std::vector<std::pair<uint32_t, double>> v;
     v.reserve((ctxScore.tri ? ctxScore.tri->size() : 0) +
               (ctxScore.bi ? ctxScore.bi->size() : 0) + topUni_.size());
@@ -1104,6 +1128,11 @@ private:
         if (!CtxScorer::find(ctxScore.tri, w) &&
             !CtxScorer::find(ctxScore.bi, w))
           v.push_back({w, ctxScore(w) * langFactor(ctxL, w)});
+    // Exclusion stricte de langue : jeter les suiveurs au facteur 0 (langue
+    // opposée quand lang=fr/en) plutôt que de les laisser au fond du tri.
+    v.erase(std::remove_if(v.begin(), v.end(),
+                           [](const auto &p) { return p.second <= 0.0; }),
+            v.end());
     size_t kk = std::min<size_t>(size_t(k) * 2, v.size());
     std::partial_sort(v.begin(), v.begin() + kk, v.end(),
                       [](auto &a, auto &b) { return a.second > b.second; });
