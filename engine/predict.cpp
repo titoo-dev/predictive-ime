@@ -743,27 +743,33 @@ private:
     ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
   }
 
-  // Contexte pour une requête : nos derniers mots, sinon le texte environnant.
+  // Contexte pour une requête : la VRAIE phrase avant le curseur
+  // (SurroundingText) en priorité — source de vérité pour l'accord grammatical
+  // et le mot-suivant —, sinon nos derniers mots committés (apps sans
+  // SurroundingText : terminaux, certains Electron). Fenêtre élargie à 8 mots :
+  // le n-gramme n'en lit que 2, mais la couche d'accord du daemon a besoin de
+  // tout le groupe nominal (déterminant + adjectifs intercalés).
   std::vector<std::string> contextFor(fcitx::InputContext *ic,
                                       PredictState *state) {
-    if (!state->ctx.empty())
-      return state->ctx;
     if (ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText) &&
         ic->surroundingText().isValid()) {
       auto cps = decodeUtf8(ic->surroundingText().text());
       unsigned int cur = ic->surroundingText().cursor();
       if (cur < cps.size())
         cps.resize(cur);
-      return lastWords(cps, 4);
+      auto ws = lastWords(cps, 8);
+      if (!ws.empty())
+        return ws;
     }
-    return {};
+    return state->ctx;
   }
 
-  // 4 mots de contexte : le daemon n'utilise que les 2 derniers pour les
-  // n-grammes, mais tout le contexte vote pour la DÉTECTION DE LANGUE.
+  // 8 mots de contexte (repli quand pas de SurroundingText) : le daemon
+  // n'utilise que les 2 derniers pour les n-grammes, mais tout le contexte sert
+  // à la DÉTECTION DE LANGUE et à l'ACCORD (déterminant gouverneur du SN).
   void pushCtx(PredictState *state, const std::string &word) {
     state->ctx.push_back(word);
-    if (state->ctx.size() > 4)
+    if (state->ctx.size() > 8)
       state->ctx.erase(state->ctx.begin());
   }
 
