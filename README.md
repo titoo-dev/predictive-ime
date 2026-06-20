@@ -60,7 +60,9 @@ effective frequency of at least a baseline, multiplied by its usage confidence â
 so a rarely-learned word surfaces above ordinary words but never above a
 massively more frequent one (`j'ai`), while a heavily-used one climbs past it.
 `learnedBoost` in `config.json` (default `1.0`) scales how aggressive learned
-suggestions are (raise it if your learned words feel too weak on your corpus).
+suggestions are; `learnedFloor` (default `150000`) is the minimum effective
+frequency a trusted learned word is treated as having (raise either if your
+learned words feel too weak on your corpus).
 
 **Bare elision proclitics.** Typing `j'` proposes `j'ai`/`j'aime` ahead of the
 bare proclitic `j'` (rarely the intended final word). `proclisisDemote`

@@ -293,8 +293,11 @@ try:
 
     # 7duodecies) MOTS APPRIS À L'ÉCHELLE DU MODÈLE (amélioration A) : le boost
     #   appris est multiplicatif (fréquence effective plancher × confiance), plus
-    #   un plancher écrasant 1e18. Un mot appris rare passe devant les mots
+    #   de plancher écrasant 1e18. Un mot appris rare passe devant les mots
     #   ordinaires mais PAS devant un mot massivement plus fréquent.
+    #   (learnedFloor par défaut vise le VRAI modèle ~10^5 ; on l'abaisse ici à
+    #   l'échelle du modèle synthétique de test pour des seuils déterministes.)
+    set_config({"learnedFloor": 40000})
     req({"learn": {"prev": "", "word": "verror"}})  # OOV, préfixe 'v'
     req({"learn": {"prev": "", "word": "verror"}})  # 2 commits → de confiance
     c = cands("v")
@@ -317,6 +320,7 @@ try:
     check("A: bigramme appris faible (ne→code) < suiveur fort (ne→pas .60)",
           c and c[0] == "pas" and "code" in c, str(c))
     req({"forget": {"word": "code"}})  # nettoie ne→code ET je→code (test 6)
+    set_config({})  # restaure learnedFloor par défaut
 
     # 7terdecies) PROCLITIQUE D'ÉLISION NU rétrogradé (amélioration B) : taper
     #   « j' » doit proposer j'ai / j'aime AVANT le proclitique nu « j' ».

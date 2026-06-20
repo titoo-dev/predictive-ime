@@ -208,9 +208,15 @@ struct Config {
   // Le score appris reste sur l'ÉCHELLE du modèle (plus de plancher 1e18) — ce
   // knob permet de remonter/descendre globalement les suggestions apprises.
   double learnedBoost = 1.0;
+  // Fréquence effective PLANCHER d'un mot appris de confiance (échelle modèle,
+  // amélioration A). Calibré pour le VRAI modèle (fréquences ~10^5–10^6) ; un
+  // mot appris vaut au moins ce plancher × confiance. Réglable.
+  double learnedFloor = 150000.0;
   // Rétrogradation d'un proclitique d'élision NU (« j' », « c' »…) quand on a
-  // tapé pile ce proclitique : il est rarement le mot final voulu.
-  double proclisisDemote = 6.0;
+  // tapé pile ce proclitique : il est rarement le mot final voulu. ~25 car le
+  // proclitique nu est bien plus fréquent que chaque forme pleine (j' = 2,98M,
+  // j'aime = 144k) — il faut le diviser assez pour le faire passer dessous.
+  double proclisisDemote = 25.0;
   bool multiWord = true;    // suggestion multi-mots dans le mot-suivant
   // Langue active : "auto" = détection par vote du contexte, "fr"/"en" =
   // langue CHOISIE (déterministe, aucune détection), "off" = aucun boost.
@@ -256,12 +262,12 @@ struct Model {
   // devant le modèle (sinon un seul commit d'un fragment pollue à vie).
   static constexpr uint64_t USER_MIN = 2;
   // Mots appris à l'ÉCHELLE du modèle (amélioration A) : un mot appris « de
-  // confiance » est traité comme s'il avait au MOINS cette fréquence effective
-  // (complétion) / cette probabilité de suiveur (mot-suivant), × la confiance
-  // (count/USER_MIN × cfg.learnedBoost). Plancher = visibilité garantie ; le
-  // count croissant le fait monter jusqu'à dépasser les mots très fréquents.
-  // Plus de plancher 1e18 : un mot appris rare ne coiffe plus « j'ai » (1,6M).
-  static constexpr double USER_FLOOR_FREQ = 40000.0;
+  // confiance » est traité comme s'il avait au MOINS une fréquence effective
+  // plancher (complétion : cfg.learnedFloor) / une probabilité de suiveur
+  // plancher (mot-suivant : USER_BI_FLOOR), × la confiance (count/USER_MIN ×
+  // cfg.learnedBoost). Plancher = visibilité garantie ; le count croissant le
+  // fait monter jusqu'à dépasser les mots très fréquents. Plus de plancher
+  // 1e18 : un mot appris rare ne coiffe plus « j'ai » (1,6M).
   static constexpr double USER_BI_FLOOR = 0.5;
   // Continuation mini pour suggérer une expression multi-mots (« sais pas »).
   static constexpr double MULTI_MIN = 0.35;
@@ -605,6 +611,7 @@ struct Model {
           fresh.langBoost = j.value("langBoost", fresh.langBoost);
           fresh.agreeBoost = j.value("agreeBoost", fresh.agreeBoost);
           fresh.learnedBoost = j.value("learnedBoost", fresh.learnedBoost);
+          fresh.learnedFloor = j.value("learnedFloor", fresh.learnedFloor);
           fresh.proclisisDemote =
               j.value("proclisisDemote", fresh.proclisisDemote);
           fresh.multiWord = j.value("multiWord", fresh.multiWord);
@@ -1109,7 +1116,7 @@ private:
       auto idit = id_.find(lowerKeep(kv.first));
       double realFreq = idit != id_.end() ? double(freq[idit->second]) : 0.0;
       double effFreq =
-          std::max(realFreq, USER_FLOOR_FREQ) * learnedConf(kv.second);
+          std::max(realFreq, cfg.learnedFloor) * learnedConf(kv.second);
       double prior = (effFreq + 1.0) / freqTot_;
       double s = hasCtx ? ctxScore.backoff() * prior : prior;
       if (idit != id_.end())
