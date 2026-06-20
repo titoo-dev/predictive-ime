@@ -260,6 +260,13 @@ std::string applyCase(const std::string &cand, const std::string &buffer) {
   return out;
 }
 
+// Ponctuation « haute » qui prend une fine insécable (U+202F) AVANT, en
+// typographie française : point-virgule, deux-points, point d'exclamation,
+// point d'interrogation et guillemet fermant « » » (U+00BB).
+bool needsFrenchThinBefore(uint32_t cp) {
+  return cp == ';' || cp == ':' || cp == '!' || cp == '?' || cp == 0x00BB;
+}
+
 // Les `maxWords` derniers mots d'un texte (pour amorcer le contexte depuis le
 // texte environnant de l'application). S'ARRÊTE aux fins de phrase « . ! ? » :
 // le contexte ne traverse jamais une frontière de phrase.
@@ -638,11 +645,22 @@ public:
                       (cp == '.' || cp == ',' || cp == ';' || cp == ':' ||
                        cp == '!' || cp == '?') &&
                       !isTriggerBuffer(state->buffer);
+      bool fr = engineCfg().frenchSpacing && !mod &&
+                !isTriggerBuffer(state->buffer);
+      // typographie française (opt-in) — guillemet OUVRANT « : committer le mot,
+      // puis « + fine insécable, et AVALER la touche (sinon « arriverait APRÈS
+      // la fine). « U+00AB » suivi de « U+202F ».
+      if (fr && cp == 0x00AB) {
+        commitWord(ic, state, state->buffer, /*space=*/false);
+        ic->commitString("\xC2\xAB\xE2\x80\xAF");
+        event.filterAndAccept();
+        return;
+      }
       commitWord(ic, state, punctFix ? chooseOnSpace(state) : state->buffer,
                  /*space=*/false);
-      // typographie française (opt-in) : espace fine insécable avant ; : ! ?
-      if (engineCfg().frenchSpacing && punctFix &&
-          (cp == ';' || cp == ':' || cp == '!' || cp == '?'))
+      // fine insécable AVANT ; : ! ? et guillemet fermant » (la touche file
+      // ensuite à l'appli, qui insère la ponctuation après la fine).
+      if (fr && needsFrenchThinBefore(cp))
         ic->commitString("\xE2\x80\xAF"); // U+202F
       if (cp == '.' || cp == '!' || cp == '?')
         state->ctx.clear(); // fin de phrase → on repart à neuf
@@ -711,6 +729,19 @@ public:
       clearPanel(ic);
     if (cp == '.' || cp == '!' || cp == '?')
       state->ctx.clear();
+    // typographie française (opt-in) AUSSI quand le buffer est vide (mot déjà
+    // committé, p.ex. après une espace) : « ouvrant → « + fine (touche avalée) ;
+    // ; : ! ? » → fine insécable avant, en absorbant une espace ordinaire déjà
+    // tapée (« mot ! » → mot + U+202F + !, jamais de double espace).
+    if (engineCfg().frenchSpacing) {
+      if (cp == 0x00AB) {
+        ic->commitString("\xC2\xAB\xE2\x80\xAF");
+        event.filterAndAccept();
+        return;
+      }
+      if (needsFrenchThinBefore(cp))
+        frenchThinBefore(ic);
+    }
     // Espace sur buffer vide (après ponctuation, typiquement) : la touche file
     // à l'appli ET on affiche la barre de suggestion — contexte vide compris
     // (le daemon répond avec les amorces de phrase <s>).
@@ -741,6 +772,25 @@ private:
     ic->inputPanel().reset();
     ic->updatePreedit();
     ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
+  }
+
+  // Insère une fine insécable (U+202F) avant la ponctuation haute (amélioration
+  // C). Absorbe une espace ORDINAIRE déjà tapée (sinon « mot  ! » double espace)
+  // et ne fait rien si une fine est déjà là — best-effort via SurroundingText.
+  void frenchThinBefore(fcitx::InputContext *ic) {
+    if (ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText) &&
+        ic->surroundingText().isValid()) {
+      auto cps = decodeUtf8(ic->surroundingText().text());
+      unsigned int cur = ic->surroundingText().cursor();
+      if (cur > 0 && cur <= cps.size()) {
+        uint32_t prev = cps[cur - 1];
+        if (prev == 0x202F)
+          return; // déjà une fine insécable → ne rien ajouter
+        if (prev == ' ')
+          ic->deleteSurroundingText(-1, 1); // absorbe l'espace ordinaire
+      }
+    }
+    ic->commitString("\xE2\x80\xAF"); // U+202F
   }
 
   // Contexte pour une requête : la VRAIE phrase avant le curseur
@@ -839,8 +889,13 @@ private:
                   bool learn = true) {
     bool trigger = isTriggerBuffer(state->buffer); // emoji ':' / snippet ';'
     std::string word = applyCase(raw, state->buffer);
-    if (engineCfg().autoCapitalize && !trigger && state->ctx.empty())
-      word = capFirst(word); // début de phrase
+    // Auto-majuscule (amélioration D) en DÉBUT DE PHRASE : on s'appuie sur le
+    // contexte EFFECTIF (contextFor → SurroundingText prioritaire). lastWords
+    // s'arrête aux frontières « . ! ? », donc un contexte VIDE signifie début de
+    // champ OU juste après une fin de phrase — exactement les cas à capitaliser.
+    // capFirst ne touche que la 1re lettre (sigles/mots déjà capitalisés sains).
+    if (engineCfg().autoCapitalize && !trigger && contextFor(ic, state).empty())
+      word = capFirst(word);
     ic->commitString(trailingSpace ? word + " " : word);
     if (trigger) {
       // un emoji/snippet choisi compte comme « favori » (le daemon le
