@@ -155,6 +155,14 @@ struct Harness {
     t[0].tv_nsec = t[1].tv_nsec = 0;
     ::utimensat(AT_FDCWD, p.c_str(), t, 0);
   }
+  // Recrée un InputContext neuf (état/contexte vierge) — isole les groupes de
+  // tests (le contexte committé s'accumule sinon entre les tests).
+  void reset() {
+    tf->call<fcitx::ITestFrontend::destroyInputContext>(uuid);
+    uuid = tf->call<fcitx::ITestFrontend::createInputContext>("app");
+    ic = instance->inputContextManager().findByUUID(uuid);
+    ic->focusIn();
+  }
   void setCaps(fcitx::CapabilityFlags caps) { ic->setCapabilityFlags(caps); }
   void setSurrounding(const std::string &text, unsigned cursor) {
     ic->surroundingText().setText(text, cursor, cursor);
@@ -270,6 +278,66 @@ void capabilityTests(Harness &h) {
   check("password: pas de preedit", h.preedit().empty(), h.preedit());
 }
 
+void interactionTests(Harness &h) {
+  h.reset();
+  h.setCaps(fcitx::CapabilityFlags{fcitx::CapabilityFlag::Preedit,
+                                   fcitx::CapabilityFlag::SurroundingText});
+  h.setSurrounding("", 0);
+
+  // déclencheur snippet ';mail' → expansion committée sur Espace (chemin trigger
+  // — même code que l'emoji ':')
+  h.daemon->setReply({"dev@x"}, "dev@x", false);
+  h.expectCommit("dev@x ");
+  h.type(";mail");
+  h.type(" ");
+  check("interaction: snippet ';mail' → expansion committée", true);
+
+  // navigation : Tab surligne le 1er candidat, Espace le committe
+  h.daemon->setReply({"alpha", "beta"}, "", false);
+  h.expectCommit("alpha ");
+  h.type("al");
+  h.key("Tab");
+  h.type(" ");
+  check("interaction: Tab puis Espace committe le candidat surligné", true);
+
+  // ponctuation : committe le mot (sans espace) ; le '.' file à l'application
+  h.daemon->setReply({"fin"}, "", true);
+  h.expectCommit("fin");
+  h.type("fin");
+  h.key("period");
+  check("interaction: ponctuation committe le mot, '.' file à l'app", true);
+}
+
+void optInTests(Harness &h) {
+  h.reset();
+  h.setCaps(fcitx::CapabilityFlags{fcitx::CapabilityFlag::Preedit,
+                                   fcitx::CapabilityFlag::SurroundingText});
+  h.setSurrounding("", 0);
+
+  // frenchSpacing : fine insécable U+202F insérée avant '!'
+  h.setConfig({{"frenchSpacing", true}});
+  h.daemon->setReply({"bonjour"}, "", /*literalIsWord=*/true);
+  h.expectCommit("bonjour");        // le mot
+  h.expectCommit("\xE2\x80\xAF");    // U+202F, avant que l'app insère '!'
+  h.type("bonjour");
+  h.key("exclam");
+  check("optin: frenchSpacing → U+202F avant '!'", true);
+
+  // autoCapitalize : début de champ (IC neuf, contexte vide) → 1re lettre en maj
+  h.reset();
+  h.setCaps(fcitx::CapabilityFlags{fcitx::CapabilityFlag::Preedit,
+                                   fcitx::CapabilityFlag::SurroundingText});
+  h.setSurrounding("", 0);
+  h.setConfig({{"autoCapitalize", true}});
+  h.daemon->setReply({"bonjour"}, "bonjour", false);
+  h.expectCommit("Bonjour ");
+  h.type("bonjour");
+  h.type(" ");
+  check("optin: autoCapitalize début de champ → Bonjour", true);
+
+  h.setConfig(json::object()); // restaure les défauts
+}
+
 } // namespace
 
 int main() {
@@ -323,6 +391,8 @@ int main() {
     compositionTests(h);
     backspaceTests(h);
     capabilityTests(h);
+    interactionTests(h);
+    optInTests(h);
 
     instance.exit();
   });
