@@ -54,6 +54,26 @@ and gender with the governing determiner found in the surrounding sentence
 toolkit's *surrounding text*; apps that don't expose it degrade to the words the
 IME itself committed.
 
+**Learned words.** Words you commit are learned and ranked **on the model's own
+scale** (no overriding floor): a trusted learned word is treated as having an
+effective frequency of at least a baseline, multiplied by its usage confidence —
+so a rarely-learned word surfaces above ordinary words but never above a
+massively more frequent one (`j'ai`), while a heavily-used one climbs past it.
+`learnedBoost` in `config.json` (default `1.0`) scales how aggressive learned
+suggestions are (raise it if your learned words feel too weak on your corpus).
+
+**Bare elision proclitics.** Typing `j'` proposes `j'ai`/`j'aime` ahead of the
+bare proclitic `j'` (rarely the intended final word). `proclisisDemote`
+(default `6.0`) divides the score of a bare proclitic form (`j'`, `c'`, `qu'`,
+`d'`, `n'`, `s'`, `t'`, `m'`, `l'`) when you typed exactly that proclitic.
+
+**French typography (opt-in).** `frenchSpacing` (default `false`) inserts a
+narrow no-break space (U+202F) before `;` `:` `!` `?` and the closing guillemet
+`»`, and after the opening guillemet `«` — absorbing a regular space you already
+typed. `autoCapitalize` (default `false`) capitalises the first letter at the
+start of a field and after a sentence end (`. ! ?`), detected from the
+surrounding text; it only touches the first letter (acronyms stay intact).
+
 ## Rebuild the model
 
 `./build-model.sh <output-dir>` rebuilds it from the pinned open corpora.
