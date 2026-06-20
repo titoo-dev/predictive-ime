@@ -19,6 +19,8 @@ WORDS = {
     "interesting": 2000, "internet": 2500, "développement": 1500,
     "travail": 6000, "travailler": 4000, "aujourd'hui": 7000,
     "pc": 3000, "soleil": 3000, "solar": 3500,
+    # élisions : proclitique nu (j') vs formes pleines (j'ai/j'aime) — pour B.
+    "j'": 12000, "j'ai": 50000, "j'aime": 8000,
 }
 # 3e colonne de words.tsv : langue (boost selon la langue du contexte)
 LANGS = {"bonjour": "fr", "soleil": "fr", "solar": "en", "the": "en"}
@@ -288,6 +290,41 @@ try:
     check("stats: vocab/userWords/snippets exposés",
           r.get("ok") and r.get("vocab", 0) > 20 and r.get("snippets") == 2,
           str({k: r.get(k) for k in ("ok", "vocab", "snippets")}))
+
+    # 7duodecies) MOTS APPRIS À L'ÉCHELLE DU MODÈLE (amélioration A) : le boost
+    #   appris est multiplicatif (fréquence effective plancher × confiance), plus
+    #   un plancher écrasant 1e18. Un mot appris rare passe devant les mots
+    #   ordinaires mais PAS devant un mot massivement plus fréquent.
+    req({"learn": {"prev": "", "word": "verror"}})  # OOV, préfixe 'v'
+    req({"learn": {"prev": "", "word": "verror"}})  # 2 commits → de confiance
+    c = cands("v")
+    check("A: appris 'verror' présent mais SOUS 'vous' (50000 ≫ plancher)",
+          "verror" in c and "vous" in c and c.index("vous") < c.index("verror"),
+          str(c))
+    check("A: appris 'verror' AU-DESSUS d'un mot ordinaire ('va' 9000)",
+          "va" in c and c.index("verror") < c.index("va"), str(c))
+    for _ in range(8):  # très appris (count=10) → la confiance le fait monter
+        req({"learn": {"prev": "", "word": "verror"}})
+    c = cands("v")
+    check("A: 'verror' fortement appris finit par dépasser 'vous'",
+          c.index("verror") < c.index("vous"), str(c))
+    req({"forget": {"word": "verror"}})
+    # predictNext : un bigramme appris FAIBLE ne court-circuite plus un suiveur
+    # modèle très probable (ne→pas .60), mais reste prioritaire sur les moyens.
+    req({"learn": {"prev": "ne", "word": "code"}})
+    req({"learn": {"prev": "ne", "word": "code"}})
+    c = cands("", ["ne"])
+    check("A: bigramme appris faible (ne→code) < suiveur fort (ne→pas .60)",
+          c and c[0] == "pas" and "code" in c, str(c))
+    req({"forget": {"word": "code"}})  # nettoie ne→code ET je→code (test 6)
+
+    # 7terdecies) PROCLITIQUE D'ÉLISION NU rétrogradé (amélioration B) : taper
+    #   « j' » doit proposer j'ai / j'aime AVANT le proclitique nu « j' ».
+    c = cands("j'")
+    check("B: 'j'' nu rétrogradé sous j'ai ET j'aime",
+          "j'" in c and "j'ai" in c and "j'aime" in c and
+          c.index("j'") > c.index("j'ai") and c.index("j'") > c.index("j'aime"),
+          str(c))
 
     # 8) EMOJI PICKER (préfixe ':') — mots-clés CLDR repliés, favoris appris.
     c = cands(":coeur")

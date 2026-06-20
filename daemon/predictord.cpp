@@ -204,6 +204,13 @@ struct Config {
   int autoMinLen = 3;       // longueur mini du préfixe pour auto-appliquer
   double langBoost = 1.6;   // boost des mots de la langue active
   double agreeBoost = 2.0;  // boost d'accord nombre/genre (×si accord, ÷sinon)
+  // Agressivité des mots APPRIS : multiplicateur sur la confiance (cf USER_MIN).
+  // Le score appris reste sur l'ÉCHELLE du modèle (plus de plancher 1e18) — ce
+  // knob permet de remonter/descendre globalement les suggestions apprises.
+  double learnedBoost = 1.0;
+  // Rétrogradation d'un proclitique d'élision NU (« j' », « c' »…) quand on a
+  // tapé pile ce proclitique : il est rarement le mot final voulu.
+  double proclisisDemote = 6.0;
   bool multiWord = true;    // suggestion multi-mots dans le mot-suivant
   // Langue active : "auto" = détection par vote du contexte, "fr"/"en" =
   // langue CHOISIE (déterministe, aucune détection), "off" = aucun boost.
@@ -248,6 +255,14 @@ struct Model {
   // Un mot APPRIS hors vocabulaire doit avoir été vu >= 2 fois avant de passer
   // devant le modèle (sinon un seul commit d'un fragment pollue à vie).
   static constexpr uint64_t USER_MIN = 2;
+  // Mots appris à l'ÉCHELLE du modèle (amélioration A) : un mot appris « de
+  // confiance » est traité comme s'il avait au MOINS cette fréquence effective
+  // (complétion) / cette probabilité de suiveur (mot-suivant), × la confiance
+  // (count/USER_MIN × cfg.learnedBoost). Plancher = visibilité garantie ; le
+  // count croissant le fait monter jusqu'à dépasser les mots très fréquents.
+  // Plus de plancher 1e18 : un mot appris rare ne coiffe plus « j'ai » (1,6M).
+  static constexpr double USER_FLOOR_FREQ = 40000.0;
+  static constexpr double USER_BI_FLOOR = 0.5;
   // Continuation mini pour suggérer une expression multi-mots (« sais pas »).
   static constexpr double MULTI_MIN = 0.35;
 
@@ -551,6 +566,13 @@ struct Model {
     return count >= USER_MIN || caseWords.count(lowerKeep(word)) > 0;
   }
 
+  // Confiance d'un mot appris (amélioration A) : >= 1 dès le seuil de confiance
+  // (count == USER_MIN), croît linéairement avec l'usage, modulée par le knob
+  // cfg.learnedBoost. Multiplie le prior/probabilité plancher du mot appris.
+  double learnedConf(uint64_t count) const {
+    return (double(count) / double(USER_MIN)) * cfg.learnedBoost;
+  }
+
   // ------------- Config / dictionnaire perso / snippets / veto (à chaud) ----
   // $XDG_CONFIG_HOME/ime-predictord/{config.json,dict.txt,snippets.tsv} —
   // rechargés quand leur mtime change (stow-ables dans les dotfiles).
@@ -582,6 +604,9 @@ struct Model {
           fresh.autoMinLen = j.value("autoMinLen", fresh.autoMinLen);
           fresh.langBoost = j.value("langBoost", fresh.langBoost);
           fresh.agreeBoost = j.value("agreeBoost", fresh.agreeBoost);
+          fresh.learnedBoost = j.value("learnedBoost", fresh.learnedBoost);
+          fresh.proclisisDemote =
+              j.value("proclisisDemote", fresh.proclisisDemote);
           fresh.multiWord = j.value("multiWord", fresh.multiWord);
           fresh.lang = j.value("lang", fresh.lang);
           if (fresh.lang != "auto" && fresh.lang != "fr" &&
@@ -751,6 +776,15 @@ struct Model {
     return it != id_.end() && langFactor(ctxL, it->second) == 0.0;
   }
 
+  // Forme = proclitique d'élision NU (proclitique + apostrophe, rien après) :
+  // « j' », « c' », « qu' »… Rarement le mot final voulu (amélioration B) ; on
+  // les rétrograde quand l'utilisateur a tapé pile ce proclitique.
+  static bool isBareProcliticFold(const std::string &f) {
+    static const std::unordered_set<std::string> P = {
+        "j'", "c'", "qu'", "d'", "n'", "s'", "t'", "m'", "l'"};
+    return P.count(f) > 0;
+  }
+
   // ------ Accord grammatical (nombre/genre) ------------------------------
   struct Agree { uint8_t g = 0; uint8_t n = 0; }; // 0 = libre sur cette dimension
 
@@ -891,6 +925,10 @@ struct Model {
         return *p;
       return (hasUV ? g3 : 1.0) * pBi(w);
     }
+    // Poids de repli appliqué à un prior unigramme P1(w) pour un mot NON observé
+    // dans ce contexte (ni trigramme ni bigramme) : (γ3?)·γ2. Sert à placer un
+    // mot APPRIS hors-contexte sur la même échelle que les candidats du modèle.
+    double backoff() const { return (hasUV ? g3 : 1.0) * g2; }
   };
 
   // ------------------------------------------------------------- stats -----
@@ -1022,7 +1060,12 @@ private:
     const Agree want = agreementOf(context); // contrainte d'accord du SN
     auto scoreOf = [&](uint32_t wid) -> double {
       double s = hasCtx ? ctxScore(wid) : (double(freq[wid]) + 1.0) / freqTot_;
-      return s * langFactor(ctxL, wid) * agreeFactor(want, wid);
+      s *= langFactor(ctxL, wid) * agreeFactor(want, wid);
+      // B : rétrograder un proclitique d'élision NU quand on a tapé pile ce
+      //     proclitique — « j' » propose j'ai/j'aime avant le « j' » nu.
+      if (fold[wid] == fp && isBareProcliticFold(fold[wid]))
+        s /= cfg.proclisisDemote;
+      return s;
     };
 
     std::vector<std::pair<std::string, double>> ranked;
@@ -1051,13 +1094,28 @@ private:
       offer(it->second, 3e18);
     }
 
-    // (1) mots APPRIS (de confiance) dont le repli commence par le préfixe →
-    //     priorité absolue.
-    for (auto &kv : userUni)
-      if (userTrusted(kv.first, kv.second) &&
-          foldStr(kv.first).compare(0, fp.size(), fp) == 0 &&
-          !langExcludedWord(kv.first, ctxL))
-        offer(kv.first, 1e18 + double(kv.second));
+    // (1) mots APPRIS (de confiance) dont le repli commence par le préfixe.
+    //     Score sur l'ÉCHELLE DU MODÈLE (amélioration A) : fréquence effective
+    //     = max(freq réelle, USER_FLOOR_FREQ) × confiance, convertie en prior
+    //     unigramme et repliée dans le contexte courant — ils CONCURRENCENT les
+    //     candidats du modèle au lieu de les court-circuiter (plus de 1e18). Un
+    //     mot appris rare passe devant les mots ordinaires, jamais devant un mot
+    //     massivement plus fréquent (« j'ai ») ; très appris, il finit devant.
+    for (auto &kv : userUni) {
+      if (!userTrusted(kv.first, kv.second) ||
+          foldStr(kv.first).compare(0, fp.size(), fp) != 0 ||
+          langExcludedWord(kv.first, ctxL))
+        continue;
+      auto idit = id_.find(lowerKeep(kv.first));
+      double realFreq = idit != id_.end() ? double(freq[idit->second]) : 0.0;
+      double effFreq =
+          std::max(realFreq, USER_FLOOR_FREQ) * learnedConf(kv.second);
+      double prior = (effFreq + 1.0) / freqTot_;
+      double s = hasCtx ? ctxScore.backoff() * prior : prior;
+      if (idit != id_.end())
+        s *= langFactor(ctxL, idit->second) * agreeFactor(want, idit->second);
+      offer(kv.first, s);
+    }
 
     // (2) correspondances exactes du modèle.
     size_t exact = 0;
@@ -1080,7 +1138,8 @@ private:
     //  - préfixe assez long (un sigle de 2 lettres « az » ne devient pas
     //    « aziz ») ;
     //  - le top doit DOMINER le 2e candidat (ambigu → on garde le littéral,
-    //    Tab choisit) — sauf mot appris (priorité voulue) ;
+    //    Tab choisit) — sauf expansion FORCÉE (snippet) ; un mot appris suit
+    //    désormais la même règle de dominance (échelle modèle, amélioration A) ;
     //  - une correction FLOUE ne raccourcit jamais la frappe (« pcq » ne
     //    devient pas « pc ») et jamais à travers une apostrophe/trait d'union
     //    (on ne mutile pas une contraction, « j'ai » ≠ jail).
@@ -1092,9 +1151,9 @@ private:
       const std::string ftop = foldStr(top);
       bool topIsPrefix = ftop.compare(0, fp.size(), fp) == 0;
       bool fpHasPunct = fp.find_first_of("'-;") != std::string::npos;
-      bool isUser = ranked.size() >= 1 && ranked[0].second >= 1e18;
+      bool isForced = ranked.size() >= 1 && ranked[0].second >= 1e18; // snippet
       bool dominant =
-          isUser || ranked.size() < 2 ||
+          isForced || ranked.size() < 2 ||
           ranked[0].second >= cfg.autoDom * std::max(ranked[1].second, 1e-300);
       bool fuzzyOk = ftop.size() >= fp.size() && !fpHasPunct;
       if (dominant && (topIsPrefix || fuzzyOk))
@@ -1192,25 +1251,31 @@ private:
     const uint8_t ctxL = ctxLang(ctx); // langue active (filtre strict ci-dessous)
     const Agree want = agreementOf(ctx); // contrainte d'accord (mot-suivant)
 
-    // (1) bigrammes APPRIS (de confiance) pour ce contexte → priorité.
+    // (1) bigrammes APPRIS (de confiance), sur l'ÉCHELLE DU MODÈLE (amélioration
+    //     A) : score = max(P_KN(w|ctx), USER_BI_FLOOR) × confiance. Plus de
+    //     priorité absolue — ils sont FUSIONNÉS au tri du modèle plus bas. Un
+    //     bigramme appris faible ne coiffe plus un suiveur très probable
+    //     (ne→pas .60) mais reste devant les suiveurs moyens.
+    CtxScorer ctxScore;
+    ctxScore.init(*this, ctx);
+    std::vector<std::pair<std::string, double>> learned; // (mot appris, score)
     auto ub = userBi.find(prev);
-    if (ub != userBi.end()) {
-      std::vector<std::pair<std::string, uint64_t>> v;
-      for (auto &p : ub->second)
-        if (userTrusted(p.first, p.second))
-          v.push_back(p);
-      std::sort(v.begin(), v.end(),
-                [](auto &a, auto &b) { return a.second > b.second; });
-      for (auto &p : v)
-        if (!langExcludedWord(p.first, ctxL))
-          push(p.first);
-    }
+    if (ub != userBi.end())
+      for (auto &p : ub->second) {
+        if (!userTrusted(p.first, p.second) || langExcludedWord(p.first, ctxL))
+          continue;
+        auto idit = id_.find(lowerKeep(p.first));
+        double ms = idit != id_.end() ? ctxScore(idit->second) : 0.0;
+        double s = std::max(ms, USER_BI_FLOOR) * learnedConf(p.second);
+        if (idit != id_.end())
+          s *= langFactor(ctxL, idit->second) * agreeFactor(want, idit->second);
+        if (s > 0.0)
+          learned.push_back({p.first, s});
+      }
 
     // (2) modèle : score exact P_KN(w|ctx) × boost de langue sur les suiveurs
     //     OBSERVÉS (tri ∪ bi), itérés SUR PLACE — les p stockés sont déjà les
     //     probabilités finales, pas besoin de repasser par operator().
-    CtxScorer ctxScore;
-    ctxScore.init(*this, ctx);
     std::vector<std::pair<uint32_t, double>> v;
     v.reserve((ctxScore.tri ? ctxScore.tri->size() : 0) +
               (ctxScore.bi ? ctxScore.bi->size() : 0) + topUni_.size());
@@ -1239,36 +1304,60 @@ private:
     std::partial_sort(v.begin(), v.begin() + kk, v.end(),
                       [](auto &a, auto &b) { return a.second > b.second; });
 
-    // (3) MULTI-MOTS : si le meilleur candidat a une continuation très sûre
-    //     (P >= MULTI_MIN), proposer l'expression entière en FIN de barre
-    //     (« sais pas ») — visible sans déplacer le top des mots simples.
-    std::string phrase;
-    if (cfg.multiWord && kk > 0) {
-      std::vector<std::string> c2(ctx);
-      c2.push_back(words[v[0].first]);
-      if (c2.size() > 2)
-        c2.erase(c2.begin(), c2.end() - 2);
-      CtxScorer s2;
-      s2.init(*this, c2);
-      uint32_t best = 0;
-      double bp = 0;
-      if (s2.tri)
-        for (auto &pr : *s2.tri)
-          if (pr.second > bp) {
-            bp = pr.second;
-            best = pr.first;
-          }
-      if (s2.bi)
-        for (auto &pr : *s2.bi)
-          if (pr.second > bp) {
-            bp = pr.second;
-            best = pr.first;
-          }
-      if (bp >= MULTI_MIN)
-        phrase = words[v[0].first] + ' ' + words[best];
-    }
+    // (3) FUSION appris + modèle : on ne passe aux chaînes que pour le PETIT
+    //     haut de liste (kk) plus les bigrammes appris (poignée) — le hot path
+    //     entier (itération des milliers de suiveurs) reste intact. Déduplique
+    //     par mot en gardant le meilleur score, puis retri global.
+    std::vector<std::pair<std::string, double>> cand;
+    std::unordered_map<std::string, size_t> at;
+    auto add = [&](const std::string &w, double s) {
+      auto [it, fresh] = at.try_emplace(w, cand.size());
+      if (fresh)
+        cand.push_back({w, s});
+      else if (s > cand[it->second].second)
+        cand[it->second].second = s;
+    };
     for (size_t i = 0; i < kk; i++)
-      push(words[v[i].first]);
+      add(words[v[i].first], v[i].second);
+    for (auto &p : learned)
+      add(p.first, p.second);
+    size_t ck = std::min<size_t>(size_t(k) * 2, cand.size());
+    std::partial_sort(cand.begin(), cand.begin() + ck, cand.end(),
+                      [](auto &a, auto &b) { return a.second > b.second; });
+
+    // (4) MULTI-MOTS : si le meilleur candidat (mot du modèle) a une
+    //     continuation très sûre (P >= MULTI_MIN), proposer l'expression
+    //     entière en FIN de barre (« sais pas ») — sans déplacer le top.
+    std::string phrase;
+    if (cfg.multiWord && ck > 0) {
+      auto topId = id_.find(lowerKeep(cand[0].first));
+      if (topId != id_.end()) {
+        std::vector<std::string> c2(ctx);
+        c2.push_back(words[topId->second]);
+        if (c2.size() > 2)
+          c2.erase(c2.begin(), c2.end() - 2);
+        CtxScorer s2;
+        s2.init(*this, c2);
+        uint32_t best = 0;
+        double bp = 0;
+        if (s2.tri)
+          for (auto &pr : *s2.tri)
+            if (pr.second > bp) {
+              bp = pr.second;
+              best = pr.first;
+            }
+        if (s2.bi)
+          for (auto &pr : *s2.bi)
+            if (pr.second > bp) {
+              bp = pr.second;
+              best = pr.first;
+            }
+        if (bp >= MULTI_MIN)
+          phrase = cand[0].first + ' ' + words[best];
+      }
+    }
+    for (size_t i = 0; i < ck; i++)
+      push(cand[i].first);
     if (!phrase.empty()) {
       if ((int)res.candidates.size() >= k)
         res.candidates.back() = phrase;
