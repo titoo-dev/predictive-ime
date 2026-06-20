@@ -787,6 +787,20 @@ private:
     ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
   }
 
+  // Affiche la préédition en respectant la capacité du client (pattern fcitx5
+  // standard, cf moteur clavier amont) : préédition CÔTÉ CLIENT (inline, rendue
+  // par l'app — l'app reporte alors la position du curseur, le panneau de
+  // candidats s'y ancre) UNIQUEMENT si l'app l'annonce (CapabilityFlag::Preedit) ;
+  // SINON préédition CÔTÉ SERVEUR (dessinée par fcitx au curseur, panneau collé).
+  // Avant : setClientPreedit inconditionnel → dans une app sans preedit client,
+  // la préédition était perdue ET le panneau ne suivait plus le curseur.
+  void applyPreedit(fcitx::InputContext *ic, const fcitx::Text &preedit) {
+    if (ic->capabilityFlags().test(fcitx::CapabilityFlag::Preedit))
+      applyPreedit(ic, preedit);
+    else
+      ic->inputPanel().setPreedit(preedit);
+  }
+
   // Insère une fine insécable (U+202F) avant la ponctuation haute (amélioration
   // C). Absorbe une espace ORDINAIRE déjà tapée (sinon « mot  ! » double espace)
   // et ne fait rien si une fine est déjà là — best-effort via SurroundingText.
@@ -887,7 +901,7 @@ private:
                               : applyCase(state->cands[next], state->buffer);
       fcitx::Text preedit(shown, fcitx::TextFormatFlag::Underline);
       preedit.setCursor(shown.size());
-      ic->inputPanel().setClientPreedit(preedit);
+      applyPreedit(ic, preedit);
       ic->updatePreedit();
     }
     ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
