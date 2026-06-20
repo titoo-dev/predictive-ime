@@ -230,6 +230,41 @@
         default = self.packages.${system}.fcitx5-predict;
       };
 
+      # Tests : `nix flake check` (et la CI) lancent le harnais engine headless
+      # + la suite comportementale du daemon.
+      checks.${system} = {
+        # Engine : build le harnais (BUILD_TESTING) et l'exécute (vrai
+        # libpredict.so piloté via testfrontend, mock daemon in-process).
+        engine = pkgs.stdenv.mkDerivation {
+          pname = "fcitx5-predict-engine-test";
+          version = "0.1";
+          src = ./engine;
+          nativeBuildInputs = [
+            pkgs.cmake
+            pkgs.kdePackages.extra-cmake-modules
+            pkgs.pkg-config
+          ];
+          buildInputs = [ pkgs.fcitx5 pkgs.nlohmann_json ];
+          cmakeFlags = [ "-DBUILD_TESTING=ON" ];
+          doCheck = true;
+          checkPhase = ''
+            runHook preCheck
+            export XDG_RUNTIME_DIR=$(mktemp -d)
+            ./test_predict_engine
+            runHook postCheck
+          '';
+          installPhase = "touch $out";
+        };
+
+        # Daemon : la suite comportementale existante (modèle synthétique).
+        daemon = pkgs.runCommand "ime-predictord-test"
+          { nativeBuildInputs = [ pkgs.python3 ]; } ''
+          python3 ${./daemon/test_predict.py} \
+            ${self.packages.${system}.predictord}/bin/predictord
+          touch $out
+        '';
+      };
+
       # Module NixOS : branche l'addon dans fcitx5 + lance le daemon (service
       # utilisateur). À importer dans la config + `i18n.inputMethod.type="fcitx5"`.
       # Module turn-key : importe-le et l'IME prédictif + sa barre QML sont
