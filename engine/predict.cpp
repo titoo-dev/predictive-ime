@@ -564,6 +564,19 @@ public:
       return;
     }
 
+    // (2bis) Backspace AVEC BUFFER VIDE : on supprime du texte DÉJÀ committé
+    //        — Backspace simple (un caractère) ou Ctrl+Backspace (un MOT). La
+    //        barre mot-suivant est spéculative : on la FERME et on laisse la
+    //        touche filer à l'application (pas de filterAndAccept). Sans cette
+    //        branche, Ctrl+Backspace (mod) tombait dans « (4) if (mod) return »
+    //        et la barre restait ouverte même une fois l'input entièrement vidé.
+    if (sym == FcitxKey_BackSpace && state->buffer.empty()) {
+      state->navigating = false;
+      if (ic->inputPanel().candidateList())
+        clearPanel(ic);
+      return; // l'app reçoit le Backspace / la suppression de mot
+    }
+
     // (3) Composition active (buffer non vide). Les branches dédiées exigent
     //     « sans modificateur » : Ctrl+Tab (onglet suivant), Ctrl+Entrée
     //     (envoi)… committent le littéral et FILENT à l'application (la
