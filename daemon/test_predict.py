@@ -330,6 +330,28 @@ try:
           c.index("j'") > c.index("j'ai") and c.index("j'") > c.index("j'aime"),
           str(c))
 
+    # 7quaterdecies) TRIGRAMMES APPRIS : le contexte 2-mots prime sur le bigramme.
+    #   Même mot précédent ('vais') mais deux contextes différents → deux suites.
+    #   Reconstruit côté daemon depuis la chaîne de commits (aucun prev2 envoyé).
+    #   Sans trigrammes, seul le bigramme 'vais'→{manger,dormir} jouerait (à
+    #   égalité) → l'un des deux checks échouerait. Avec, chaque contexte gagne.
+    for _ in range(2):
+        req({"learn": {"prev": "", "word": "je"}})
+        req({"learn": {"prev": "je", "word": "vais"}})
+        req({"learn": {"prev": "vais", "word": "manger"}})
+    for _ in range(2):
+        req({"learn": {"prev": "", "word": "tu"}})
+        req({"learn": {"prev": "tu", "word": "vais"}})
+        req({"learn": {"prev": "vais", "word": "dormir"}})
+    c1 = cands("", ["je", "vais"])
+    check("trigramme: 'je vais' → 'manger' en tête (pas 'dormir')",
+          c1 and c1[0] == "manger", str(c1))
+    c2 = cands("", ["tu", "vais"])
+    check("trigramme: 'tu vais' → 'dormir' en tête (pas 'manger')",
+          c2 and c2[0] == "dormir", str(c2))
+    req({"forget": {"word": "manger"}})
+    req({"forget": {"word": "dormir"}})
+
     # 8) EMOJI PICKER (préfixe ':') — mots-clés CLDR repliés, favoris appris.
     c = cands(":coeur")
     check("emoji: ':coeur' → ❤️ en tête", c and c[0] == "❤️", str(c))

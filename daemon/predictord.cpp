@@ -269,6 +269,9 @@ struct Model {
   // fait monter jusqu'à dépasser les mots très fréquents. Plus de plancher
   // 1e18 : un mot appris rare ne coiffe plus « j'ai » (1,6M).
   static constexpr double USER_BI_FLOOR = 0.5;
+  // Trigramme appris (contexte 2 mots) = signal personnel PLUS spécifique que le
+  // bigramme → plancher de probabilité plus haut, il prime à confiance égale.
+  static constexpr double USER_TRI_FLOOR = 0.7;
   // Continuation mini pour suggérer une expression multi-mots (« sais pas »).
   static constexpr double MULTI_MIN = 0.35;
 
@@ -495,7 +498,12 @@ struct Model {
   std::unordered_map<std::string, uint64_t> userUni; // mot -> usage
   std::unordered_map<std::string, std::unordered_map<std::string, uint64_t>>
       userBi; // prev -> mot -> usage
-  std::string userLog;
+  // Trigrammes appris : clé "prev2\tprev1" (repliée) -> mot -> usage. Reconstruit
+  // depuis la chaîne de commits (cf learn) ; journal séparé user.tri.log.
+  std::unordered_map<std::string, std::unordered_map<std::string, uint64_t>>
+      userTri;
+  std::string lastPrev_, lastWord_; // 2 derniers commits (repli), pour le tri.
+  std::string userLog, userTriLog;
 
   void loadUser(const std::string &path) {
     userLog = path;
@@ -518,6 +526,32 @@ struct Model {
       fprintf(stderr, "[predictord] %zu événements utilisateur rejoués\n", n);
   }
 
+  // Journal trigramme : lignes "prev2\tprev1\tword" (explicite, pas de
+  // reconstruction au replay — l'ordre du journal bigramme n'est pas garanti
+  // après vieillissement).
+  void loadUserTri(const std::string &path) {
+    userTriLog = path;
+    std::ifstream f(path);
+    std::string line;
+    size_t n = 0;
+    while (std::getline(f, line)) {
+      size_t t1 = line.find('\t');
+      if (t1 == std::string::npos)
+        continue;
+      size_t t2 = line.find('\t', t1 + 1);
+      if (t2 == std::string::npos)
+        continue;
+      std::string p2 = line.substr(0, t1), p1 = line.substr(t1 + 1, t2 - t1 - 1),
+                  word = line.substr(t2 + 1);
+      if (p2.empty() || p1.empty() || word.empty())
+        continue;
+      userTri[lowerKeep(p2) + "\t" + lowerKeep(p1)][word]++;
+      n++;
+    }
+    if (n)
+      fprintf(stderr, "[predictord] %zu trigrammes utilisateur rejoués\n", n);
+  }
+
   size_t learnEvents_ = 0;
 
   void learn(const std::string &prev, const std::string &word) {
@@ -530,6 +564,21 @@ struct Model {
       std::ofstream f(userLog, std::ios::app);
       f << prev << '\t' << word << '\n';
     }
+    // Trigramme : reconstruit depuis la chaîne de commits. Le commit précédent
+    // était (lastPrev_ -> lastWord_) ; si le présent enchaîne dessus
+    // (prev == lastWord_) et qu'il y a bien un mot AVANT prev (lastPrev_), alors
+    // (lastPrev_, prev) -> word est un trigramme observé.
+    if (!lastPrev_.empty() && !lastWord_.empty() &&
+        lowerKeep(prev) == lowerKeep(lastWord_)) {
+      std::string key = lowerKeep(lastPrev_) + "\t" + lowerKeep(prev);
+      userTri[key][word]++;
+      if (!userTriLog.empty()) {
+        std::ofstream f(userTriLog, std::ios::app);
+        f << lastPrev_ << '\t' << prev << '\t' << word << '\n';
+      }
+    }
+    lastPrev_ = prev;
+    lastWord_ = word;
     if (++learnEvents_ % 512 == 0)
       ageUser();
   }
@@ -550,6 +599,23 @@ struct Model {
           it = kv.second.erase(it);
         else
           ++it;
+    // Trigrammes : même déclin ×3/4, et journal trigramme recompacté.
+    for (auto &kv : userTri)
+      for (auto it = kv.second.begin(); it != kv.second.end();)
+        if ((it->second = it->second * 3 / 4) == 0)
+          it = kv.second.erase(it);
+        else
+          ++it;
+    if (!userTriLog.empty()) {
+      std::ofstream ft(userTriLog, std::ios::trunc);
+      for (auto &kv : userTri) {
+        size_t sep = kv.first.find('\t'); // clé = "prev2\tprev1"
+        std::string p2 = kv.first.substr(0, sep), p1 = kv.first.substr(sep + 1);
+        for (auto &p : kv.second)
+          for (uint64_t i = 0; i < p.second; i++)
+            ft << p2 << '\t' << p1 << '\t' << p.first << '\n';
+      }
+    }
     if (userLog.empty())
       return;
     std::ofstream f(userLog, std::ios::trunc);
@@ -698,10 +764,13 @@ struct Model {
     }
   }
 
-  // Oublie un mot appris (userUni + tous ses bigrammes) et réécrit le journal.
+  // Oublie un mot appris (userUni + bigrammes + trigrammes) et réécrit les
+  // journaux correspondants.
   size_t forget(const std::string &word) {
     size_t removed = userUni.erase(word);
     for (auto &kv : userBi)
+      removed += kv.second.erase(word);
+    for (auto &kv : userTri)
       removed += kv.second.erase(word);
     if (!userLog.empty()) {
       std::ifstream in(userLog);
@@ -713,6 +782,19 @@ struct Model {
       }
       in.close();
       std::ofstream out(userLog, std::ios::trunc);
+      out << keep;
+    }
+    // Journal trigramme : retire les lignes dont le mot final == word.
+    if (!userTriLog.empty()) {
+      std::ifstream in(userTriLog);
+      std::string line, keep;
+      while (std::getline(in, line)) {
+        size_t t = line.rfind('\t');
+        if (t == std::string::npos || line.substr(t + 1) != word)
+          keep += line + '\n';
+      }
+      in.close();
+      std::ofstream out(userTriLog, std::ios::trunc);
       out << keep;
     }
     return removed;
@@ -951,6 +1033,7 @@ struct Model {
     j["emojis"] = emojis_.size();
     j["snippets"] = snips_.size();
     j["userWords"] = userUni.size();
+    j["userTrigrams"] = userTri.size();
     size_t nv = 0;
     for (auto &kv : veto_)
       nv += kv.second.size();
@@ -1266,6 +1349,28 @@ private:
     CtxScorer ctxScore;
     ctxScore.init(*this, ctx);
     std::vector<std::pair<std::string, double>> learned; // (mot appris, score)
+
+    // (1a) trigrammes APPRIS (contexte 2 mots) : signal personnel plus spécifique
+    //      → plancher plus haut (USER_TRI_FLOOR). Fusionnés comme les bigrammes ;
+    //      à mot égal, le max gagne → le trigramme prime sur le bigramme.
+    if (ctx.size() >= 2) {
+      std::string triKey = lowerKeep(ctx[ctx.size() - 2]) + "\t" + prev;
+      auto ut = userTri.find(triKey);
+      if (ut != userTri.end())
+        for (auto &p : ut->second) {
+          if (!userTrusted(p.first, p.second) || langExcludedWord(p.first, ctxL))
+            continue;
+          auto idit = id_.find(lowerKeep(p.first));
+          double ms = idit != id_.end() ? ctxScore(idit->second) : 0.0;
+          double s = std::max(ms, USER_TRI_FLOOR) * learnedConf(p.second);
+          if (idit != id_.end())
+            s *= langFactor(ctxL, idit->second) *
+                 agreeFactor(want, idit->second);
+          if (s > 0.0)
+            learned.push_back({p.first, s});
+        }
+    }
+
     auto ub = userBi.find(prev);
     if (ub != userBi.end())
       for (auto &p : ub->second) {
@@ -1410,6 +1515,7 @@ int main(int argc, char **argv) {
   mkdir(userBase.c_str(), 0755);
   mkdir(userDir.c_str(), 0755);
   model.loadUser(userDir + "/user.log");
+  model.loadUserTri(userDir + "/user.tri.log");
   model.loadVeto(userDir + "/veto.log");
 
   // config/dictionnaire perso/snippets ($XDG_CONFIG_HOME/ime-predictord),
