@@ -338,6 +338,84 @@ void optInTests(Harness &h) {
   h.setConfig(json::object()); // restaure les défauts
 }
 
+void revertTests(Harness &h) {
+  h.reset();
+  h.setCaps(fcitx::CapabilityFlags{fcitx::CapabilityFlag::Preedit,
+                                   fcitx::CapabilityFlag::SurroundingText});
+  h.setSurrounding("", 0);
+
+  // auto-application puis Backspace IMMÉDIAT = revert : restaure le littéral,
+  // rouvre la composition, et le prochain Espace garde le littéral (veto).
+  h.daemon->setReply({"bonjour"}, "bonjour", false);
+  h.expectCommit("bonjour "); // 'bonjou' + Espace auto-applique
+  h.type("bonjou");
+  h.type(" ");
+  h.key("BackSpace"); // fenêtre de revert
+  check("revert: Backspace rouvre la composition sur le littéral 'bonjou'",
+        h.preedit().rfind("bonjou", 0) == 0, h.preedit());
+  h.expectCommit("bonjou "); // veto : le littéral est gardé cette fois
+  h.type(" ");
+  check("revert: après revert, Espace garde le littéral (veto)", true);
+}
+
+void multiWordTests(Harness &h) {
+  h.reset();
+  h.setCaps(fcitx::CapabilityFlags{fcitx::CapabilityFlag::Preedit,
+                                   fcitx::CapabilityFlag::SurroundingText});
+  h.setSurrounding("", 0);
+
+  // candidat multi-mots (« sais pas ») proposé en barre mot-suivant, sélectionné
+  // au Tab+Espace → committé en entier (l'engine apprend mot à mot en interne).
+  h.daemon->setReply({"sais pas", "autre"}, "", false);
+  h.expectCommit("je ");
+  h.type("je");
+  h.type(" "); // commit + barre mot-suivant avec 'sais pas'
+  h.expectCommit("sais pas ");
+  h.key("Tab"); // surligne 'sais pas'
+  h.type(" ");  // committe le candidat surligné
+  check("multi-mots: 'sais pas' committé en entier", true);
+}
+
+void surroundingContextTests(Harness &h) {
+  h.reset();
+  h.setCaps(fcitx::CapabilityFlags{fcitx::CapabilityFlag::Preedit,
+                                   fcitx::CapabilityFlag::SurroundingText});
+  // le texte AVANT le curseur sert de contexte envoyé au daemon
+  h.setSurrounding("je suis ", 8);
+  h.daemon->setReply({"content"}, "", false);
+  h.type("co");
+  auto ctx = h.daemon->lastContext();
+  bool hasJe = false, hasSuis = false;
+  std::string dump;
+  for (auto &w : ctx) {
+    if (w == "je")
+      hasJe = true;
+    if (w == "suis")
+      hasSuis = true;
+    dump += w + " ";
+  }
+  check("contexte: le SurroundingText 'je suis' est envoyé au daemon",
+        hasJe && hasSuis, dump);
+}
+
+void nextWordBarTests(Harness &h) {
+  h.reset();
+  h.setCaps(fcitx::CapabilityFlags{fcitx::CapabilityFlag::Preedit,
+                                   fcitx::CapabilityFlag::SurroundingText});
+  h.setSurrounding("", 0);
+
+  // nextWordBar=false : pas de barre spéculative après commit (mode calme — la
+  // piste de mitigation Ghostty). La barre de COMPLÉTION pendant la frappe reste.
+  h.setConfig({{"nextWordBar", false}});
+  h.daemon->setReply({"jour"}, "", false);
+  h.expectCommit("je ");
+  h.type("je");
+  h.type(" "); // commit → PAS de barre mot-suivant attendue
+  check("nextWordBar=false: aucune barre spéculative après commit",
+        h.candidates().empty(), h.candidates().empty() ? "" : h.candidates()[0]);
+  h.setConfig(json::object()); // restaure
+}
+
 } // namespace
 
 int main() {
@@ -393,6 +471,10 @@ int main() {
     capabilityTests(h);
     interactionTests(h);
     optInTests(h);
+    revertTests(h);
+    multiWordTests(h);
+    surroundingContextTests(h);
+    nextWordBarTests(h);
 
     instance.exit();
   });
