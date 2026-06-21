@@ -156,13 +156,15 @@ struct Harness {
     ::utimensat(AT_FDCWD, p.c_str(), t, 0);
   }
   // Recrée un InputContext neuf (état/contexte vierge) — isole les groupes de
-  // tests (le contexte committé s'accumule sinon entre les tests).
-  void reset() {
+  // tests (le contexte committé s'accumule sinon entre les tests). `program`
+  // simule l'app cliente (sert au gating par programme, cf nextWordBarExclude).
+  void resetWith(const std::string &program) {
     tf->call<fcitx::ITestFrontend::destroyInputContext>(uuid);
-    uuid = tf->call<fcitx::ITestFrontend::createInputContext>("app");
+    uuid = tf->call<fcitx::ITestFrontend::createInputContext>(program);
     ic = instance->inputContextManager().findByUUID(uuid);
     ic->focusIn();
   }
+  void reset() { resetWith("app"); }
   void setCaps(fcitx::CapabilityFlags caps) { ic->setCapabilityFlags(caps); }
   void setSurrounding(const std::string &text, unsigned cursor) {
     ic->surroundingText().setText(text, cursor, cursor);
@@ -416,6 +418,40 @@ void nextWordBarTests(Harness &h) {
   h.setConfig(json::object()); // restaure
 }
 
+void ghosttyTests(Harness &h) {
+  // Mitigation suivi-curseur terminal : la barre spéculative mot-suivant (sans
+  // preedit pour l'ancrer) est supprimée pour les programmes de nextWordBarExclude
+  // (motif sous-chaîne sur ic->program()). La complétion pendant la frappe reste.
+  h.setConfig({{"nextWordBarExclude", json::array({"ghostty"})}});
+
+  // (a) dans Ghostty (programme matché) → pas de barre spéculative après commit
+  h.resetWith("com.mitchellh.ghostty");
+  h.setCaps(fcitx::CapabilityFlags{fcitx::CapabilityFlag::Preedit,
+                                   fcitx::CapabilityFlag::SurroundingText});
+  h.setSurrounding("", 0);
+  h.daemon->setReply({"jour", "suis"}, "", false);
+  h.expectCommit("je ");
+  h.type("je");
+  h.type(" ");
+  check("ghostty: nextWordBarExclude → pas de barre spéculative",
+        h.candidates().empty(), h.candidates().empty() ? "" : h.candidates()[0]);
+
+  // (b) hors terminal (programme NON matché) → la barre spéculative s'affiche
+  h.resetWith("org.kde.kwrite");
+  h.setCaps(fcitx::CapabilityFlags{fcitx::CapabilityFlag::Preedit,
+                                   fcitx::CapabilityFlag::SurroundingText});
+  h.setSurrounding("", 0);
+  h.daemon->setReply({"jour", "suis"}, "", false);
+  h.expectCommit("je ");
+  h.type("je");
+  h.type(" ");
+  check("ghostty: hors terminal → barre spéculative présente",
+        !h.candidates().empty(),
+        h.candidates().empty() ? "vide" : h.candidates()[0]);
+
+  h.setConfig(json::object());
+}
+
 } // namespace
 
 int main() {
@@ -475,6 +511,7 @@ int main() {
     multiWordTests(h);
     surroundingContextTests(h);
     nextWordBarTests(h);
+    ghosttyTests(h);
 
     instance.exit();
   });

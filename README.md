@@ -76,6 +76,14 @@ typed. `autoCapitalize` (default `false`) capitalises the first letter at the
 start of a field and after a sentence end (`. ! ?`), detected from the
 surrounding text; it only touches the first letter (acronyms stay intact).
 
+**Speculative bar in terminals.** The next-word bar shown *between* words has no
+preedit to anchor it to the cursor, so in some terminals it trails behind the
+caret. `nextWordBarExclude` (default `[]`) is a list of program substrings
+(case-insensitive, matched against the client's program/app-id) for which that
+speculative bar is suppressed — the inline completion bar (anchored to the
+preedit while you type) is kept. Example: `"nextWordBarExclude": ["ghostty"]`.
+Set `nextWordBar` to `false` to disable the speculative bar everywhere.
+
 ## Rebuild the model
 
 `./build-model.sh <output-dir>` rebuilds it from the pinned open corpora.

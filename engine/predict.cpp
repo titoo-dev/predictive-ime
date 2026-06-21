@@ -69,6 +69,11 @@ struct EngineCfg {
   bool nextWordBar = true;
   bool autoApplyNeedsRevert = true;
   bool escapeForward = true;
+  // Programmes (sous-chaînes de ic->program(), ex. "ghostty") où la barre
+  // SPÉCULATIVE mot-suivant est supprimée : dans un terminal elle n'a pas de
+  // preedit pour s'ancrer au curseur et « traîne » derrière lui. La complétion
+  // pendant la frappe (ancrée au preedit) reste, elle.
+  std::vector<std::string> nextWordBarExclude;
 };
 
 const EngineCfg &engineCfg() {
@@ -97,6 +102,10 @@ const EngineCfg &engineCfg() {
         fresh.autoApplyNeedsRevert =
             j.value("autoApplyNeedsRevert", fresh.autoApplyNeedsRevert);
         fresh.escapeForward = j.value("escapeForward", fresh.escapeForward);
+        for (const auto &e :
+             j.value("nextWordBarExclude", nlohmann::json::array()))
+          if (e.is_string())
+            fresh.nextWordBarExclude.push_back(e.get<std::string>());
       } catch (...) {
       }
     }
@@ -1007,6 +1016,22 @@ private:
       clearPanel(ic);
       return;
     }
+    // Programme exclu (terminal où la barre ne peut pas s'ancrer au curseur) :
+    // mode calme ciblé, sans toucher la complétion pendant la frappe. Match
+    // sous-chaîne INSENSIBLE à la casse (« ghostty » matche « com.…Ghostty »).
+    auto lc = [](std::string s) {
+      for (char &c : s)
+        if (c >= 'A' && c <= 'Z')
+          c += 32;
+      return s;
+    };
+    const std::string prog = lc(ic->program());
+    for (const auto &pat : engineCfg().nextWordBarExclude)
+      if (!pat.empty() && prog.find(lc(pat)) != std::string::npos) {
+        state->cands.clear();
+        clearPanel(ic);
+        return;
+      }
     auto ctx = contextFor(ic, state);
     auto reply = queryDaemon(ctx, "");
     state->cands = reply.candidates;
