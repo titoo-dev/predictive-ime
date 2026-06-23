@@ -208,6 +208,22 @@
           buildInputs = [ pkgs.nlohmann_json ];
         };
 
+        # Prédicteur neuronal (libllama), CLI d'isolation. Build pur via le flake
+        # — valide le câblage llama-cpp (headers dev + libllama + backends CPU).
+        # Wrappé pour pointer GGML_BACKEND_PATH sur les backends ggml-cpu-*.so.
+        neural-predict = pkgs.stdenv.mkDerivation {
+          pname = "neural-predict";
+          version = "0.1";
+          src = ./daemon;
+          nativeBuildInputs = [ pkgs.cmake pkgs.makeWrapper ];
+          buildInputs = [ pkgs.nlohmann_json pkgs.llama-cpp ];
+          cmakeFlags = [ "-DWITH_NEURAL=ON" ];
+          postInstall = ''
+            wrapProgram $out/bin/neural_predict \
+              --set GGML_BACKEND_PATH ${pkgs.llama-cpp}/bin
+          '';
+        };
+
         # Track A : l'engine fcitx5 (réutilise le frontend Wayland éprouvé).
         fcitx5-predict = pkgs.stdenv.mkDerivation {
           pname = "fcitx5-predict";
