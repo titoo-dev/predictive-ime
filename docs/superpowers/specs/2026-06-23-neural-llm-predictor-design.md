@@ -189,6 +189,27 @@ NEXT (not done):
   (deployment to the live system — user-gated; keyboard risk).
 - `eval_model.py`: hit@k neural vs n-gram on held-out Leipzig (target: beat 24% hit@3).
 
+## Deployment recipe (user-gated — touches the live keyboard)
+
+Decided: model = **Qwen3-1.7B Q4_K_M**, daemon = `predictord-neural`, engine =
+raise `nextWordTimeoutMs`. Everything below is READY; the user runs it when they
+choose (it pushes to the public repo + rebuilds the live system).
+
+1. Push the branch (or merge to main): `git push -u origin feat/neural-llm-predictor`.
+2. Get the GGUF on the machine: `llama-cli -hf unsloth/Qwen3-1.7B-GGUF:Q4_K_M`
+   (caches to `~/.cache`), or pin it in `flake.nix` via `fetchurl` for a pure build.
+   (Later: produce a `-Base` GGUF for a quality bump — instruct is a proxy.)
+3. nix-config: `nix flake update predictive-ime`, then point the
+   `ime-predictord` user service at `predictord-neural` and set
+   `Environment = "IME_NEURAL_MODEL=<gguf path>"` (the binary is already wrapped
+   with `GGML_BACKEND_PATH`; the env supplies the model path so no store-path leaks
+   into the user config).
+4. dotfiles `config.json`: `{"neural": true, "neuralTopk": 6, "neuralThreads": 4,
+   "nextWordTimeoutMs": 250}` (add `"neuralOnly": true` for pure-neural next-word).
+5. **ISOLATION-test first** (`./test-e2e.sh` / headless sway) — never rebuild blind;
+   a broken engine kills the session keyboard.
+6. `make rebuild` + relogin. Rollback: revert `flake.lock` + rebuild.
+
 ## Out of scope (this step)
 
 - Async two-phase protocol (instant n-gram + pushed neural update).

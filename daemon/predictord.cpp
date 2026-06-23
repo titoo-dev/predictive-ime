@@ -1554,16 +1554,23 @@ int main(int argc, char **argv) {
   // modèle (~Go) ne se recharge pas à chaud ; l'usage par requête revérifie
   // model.cfg.neural (toggle OFF possible à chaud, ON nécessite un restart).
   NeuralPredictor neural;
-  if (model.cfg.neural && !model.cfg.neuralModel.empty()) {
-    const char *bdir = getenv("GGML_BACKEND_PATH");
-    if (neural.init(model.cfg.neuralModel, model.cfg.neuralThreads, 2048,
-                    bdir ? bdir : ""))
-      fprintf(stderr, "[predictord] neural ON: %s (threads=%d, topk=%d)\n",
-              model.cfg.neuralModel.c_str(), model.cfg.neuralThreads,
-              model.cfg.neuralTopk);
-    else
-      fprintf(stderr, "[predictord] neural model load FAILED (%s) — n-gram seul\n",
-              model.cfg.neuralModel.c_str());
+  {
+    // Chemin du GGUF : config.json (neuralModel) sinon env IME_NEURAL_MODEL — ce
+    // dernier laisse le service systemd fournir le modèle SANS hardcoder un
+    // store-path dans la config perso (déploiement propre via le module NixOS).
+    const char *envModel = getenv("IME_NEURAL_MODEL");
+    std::string nmodel = !model.cfg.neuralModel.empty()
+                             ? model.cfg.neuralModel
+                             : (envModel ? std::string(envModel) : std::string());
+    if (model.cfg.neural && !nmodel.empty()) {
+      const char *bdir = getenv("GGML_BACKEND_PATH");
+      if (neural.init(nmodel, model.cfg.neuralThreads, 2048, bdir ? bdir : ""))
+        fprintf(stderr, "[predictord] neural ON: %s (threads=%d, topk=%d)\n",
+                nmodel.c_str(), model.cfg.neuralThreads, model.cfg.neuralTopk);
+      else
+        fprintf(stderr, "[predictord] neural model load FAILED (%s) — n-gram seul\n",
+                nmodel.c_str());
+    }
   }
 #endif
 
