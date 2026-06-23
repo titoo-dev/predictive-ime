@@ -157,17 +157,23 @@ DONE & verified (branch `feat/neural-llm-predictor`):
   preceding context for neural, case-insensitive), 15 held-out FR Leipzig sentences,
   259 next-word predictions:
 
-  | model (best regime)            | hit@1 | hit@3 | hit@6 |
-  |--------------------------------|-------|-------|-------|
-  | n-gram (2-word, instant)       | 12.4% | 19.7% | 27.4% |
-  | **Qwen3-4B (full context)**    |**21.6%**|**32.8%**|**38.6%**|
+  | model (best regime)         | hit@1 | hit@3 | hit@6 | ms/tok | tok/200ms |
+  |-----------------------------|-------|-------|-------|--------|-----------|
+  | n-gram (2-word, instant)    | 12.4% | 19.7% | 27.4% | ~0     | —         |
+  | **Qwen3-1.7B (full ctx)**   | 16.6% |**31.7%**| 35.9% | **~60**| **~3**    |
+  | Qwen3-4B (full ctx)         |**21.6%**| 32.8% |**38.6%**| 132   | ~1        |
 
-  → neural wins **+9.2 pts hit@1 (+74% rel), +13 pts hit@3 (+66% rel)** — and this
-  UNDERSTATES it (multi-token target words show as a fragment candidate → counted
-  as a miss; candidate expansion would raise it further). At 2-word context neural
-  LOSES (10.8/17.4) — its edge REQUIRES long context (its design point), which the
-  incremental KV cache makes even faster (full-context run 41 s < 2-word 60 s).
-  Confirms the bpb face-off with a task metric.
+  → neural wins clearly over n-gram (4B +9.2 hit@1/+13 hit@3; 1.7B +4.2/+12) — and
+  UNDERSTATED (multi-token target words show as a fragment candidate → counted as a
+  miss; candidate expansion would raise it). At 2-word context neural LOSES — its
+  edge REQUIRES long context (its design point), which the incremental KV cache makes
+  even faster (full-ctx runs faster than 2-word). Confirms the bpb face-off.
+
+  **DEPLOY PICK = Qwen3-1.7B.** It keeps ~the 4B's hit@3 (31.7 vs 32.8 — the metric
+  that matters for a 3-6 candidate bar), beats n-gram by +12 hit@3, and is **~2.2×
+  faster** (60 vs 132 ms/tok → ~3 tokens in the 200 ms budget = multi-token
+  completions, better live feel). The 4B's only real edge is hit@1 (top-1), less
+  critical when a candidate bar shows several options.
 - BUGFIX (2026-06-23): byte-level BPE can split a multi-byte char across tokens →
   a candidate can be INCOMPLETE UTF-8 → `nlohmann::json::dump()` threw
   (type_error.316) and KILLED the daemon. Fixed at the root (`valid_utf8` filter in
