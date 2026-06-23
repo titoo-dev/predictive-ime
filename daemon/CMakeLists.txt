@@ -23,9 +23,15 @@ option(WITH_NEURAL "Build the neural (libllama) predictor" OFF)
 if(WITH_NEURAL)
   find_package(llama REQUIRED)
   find_package(ggml REQUIRED)
-  add_executable(neural_predict neural_predict.cpp)
+  # CLI d'isolation/diagnostic.
+  add_executable(neural_predict neural_predict.cpp neural.cpp)
   target_link_libraries(neural_predict llama ggml)
   install(TARGETS neural_predict DESTINATION "${CMAKE_INSTALL_BINDIR}")
+  # Intégration daemon : predictord linke le prédicteur neuronal (WITH_NEURAL
+  # active le bloc #ifdef dans predictord.cpp ; neural OFF par défaut côté config).
+  target_sources(predictord PRIVATE neural.cpp)
+  target_link_libraries(predictord llama ggml)
+  target_compile_definitions(predictord PRIVATE WITH_NEURAL=1)
 endif()
 
 install(FILES sample-corpus.txt

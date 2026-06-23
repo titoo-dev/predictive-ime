@@ -41,6 +41,10 @@
 #include <unordered_set>
 #include <vector>
 
+#ifdef WITH_NEURAL
+#include "neural.h"
+#endif
+
 #include <cerrno>
 #include <fcntl.h>
 #include <poll.h>
@@ -221,6 +225,20 @@ struct Config {
   // Langue active : "auto" = détection par vote du contexte, "fr"/"en" =
   // langue CHOISIE (déterministe, aucune détection), "off" = aucun boost.
   std::string lang = "auto";
+
+  // --- Prédiction NEURONALE (libllama, opt-in). OFF par défaut → comportement
+  // n-gram strictement inchangé. ON + neuralModel chargé au démarrage : les
+  // candidats neuronaux passent EN TÊTE du mot-suivant (prefix vide) ; le n-gram
+  // reste pour la complétion intra-mot, literalIsWord et autocomplete (sémantique
+  // conservatrice d'auto-application). Voir docs/superpowers/specs/2026-06-23-…
+  bool neural = false;
+  std::string neuralModel; // chemin GGUF (vide → neural désactivé)
+  int neuralThreads = 4;
+  int neuralTopk = 6;
+  // true → mot-suivant 100% NEURONAL (n-gram complètement écarté pour le
+  // mot-suivant ; il ne sert plus que de fallback si le neural ne rend rien).
+  // C'est l'option "remplacer le n-gram" : neural seul aux commandes.
+  bool neuralOnly = false;
 };
 
 struct Model {
@@ -688,6 +706,11 @@ struct Model {
                     fresh.lang.c_str());
             fresh.lang = "auto";
           }
+          fresh.neural = j.value("neural", fresh.neural);
+          fresh.neuralModel = j.value("neuralModel", fresh.neuralModel);
+          fresh.neuralThreads = j.value("neuralThreads", fresh.neuralThreads);
+          fresh.neuralTopk = j.value("neuralTopk", fresh.neuralTopk);
+          fresh.neuralOnly = j.value("neuralOnly", fresh.neuralOnly);
         } catch (const std::exception &e) {
           fprintf(stderr, "[predictord] config.json invalide: %s\n", e.what());
         }
@@ -1526,6 +1549,24 @@ int main(int argc, char **argv) {
                   "/ime-predictord";
   model.maybeReload();
 
+#ifdef WITH_NEURAL
+  // Prédicteur neuronal chargé UNE fois au démarrage si activé en config. Le
+  // modèle (~Go) ne se recharge pas à chaud ; l'usage par requête revérifie
+  // model.cfg.neural (toggle OFF possible à chaud, ON nécessite un restart).
+  NeuralPredictor neural;
+  if (model.cfg.neural && !model.cfg.neuralModel.empty()) {
+    const char *bdir = getenv("GGML_BACKEND_PATH");
+    if (neural.init(model.cfg.neuralModel, model.cfg.neuralThreads, 2048,
+                    bdir ? bdir : ""))
+      fprintf(stderr, "[predictord] neural ON: %s (threads=%d, topk=%d)\n",
+              model.cfg.neuralModel.c_str(), model.cfg.neuralThreads,
+              model.cfg.neuralTopk);
+    else
+      fprintf(stderr, "[predictord] neural model load FAILED (%s) — n-gram seul\n",
+              model.cfg.neuralModel.c_str());
+  }
+#endif
+
   std::string sockpath = argc > 2 ? argv[2] : "/tmp/ime-predictord.sock";
   unlink(sockpath.c_str());
   int srv = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0);
@@ -1540,7 +1581,7 @@ int main(int argc, char **argv) {
   fprintf(stderr, "[predictord] écoute sur %s\n", sockpath.c_str());
 
   // Traite UNE ligne de protocole, renvoie la réponse ('\n' terminée).
-  auto handleLine = [&model](const std::string &line) -> std::string {
+  auto handleLine = [&](const std::string &line) -> std::string {
     json resp;
     try {
       json req = json::parse(line);
@@ -1569,6 +1610,26 @@ int main(int argc, char **argv) {
         std::string prefix = req.value("prefix", std::string{});
         model.maybeReload(); // config/dict/snippets à chaud (mtime)
         Result r = model.predict(ctx, prefix);
+#ifdef WITH_NEURAL
+        // Neural EN TÊTE pour le mot-suivant (prefix vide) ; n-gram conservé pour
+        // la complétion intra-mot + literalIsWord/autocomplete (auto-apply sûr).
+        if (neural.ready() && model.cfg.neural && prefix.empty() && !ctx.empty()) {
+          std::vector<std::string> nc = neural.nextWords(ctx, model.cfg.neuralTopk);
+          if (!nc.empty()) {
+            if (model.cfg.neuralOnly) {
+              r.candidates = nc; // mot-suivant 100% neuronal (n-gram écarté)
+            } else {
+              std::vector<std::string> merged = nc;
+              for (auto &w : r.candidates) {
+                bool dup = false;
+                for (auto &m : merged) if (m == w) { dup = true; break; }
+                if (!dup) merged.push_back(w);
+              }
+              r.candidates.swap(merged);
+            }
+          }
+        }
+#endif
         resp["candidates"] = r.candidates;
         resp["literalIsWord"] = r.literalIsWord;
         resp["autocomplete"] = r.autocomplete;

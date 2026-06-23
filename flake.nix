@@ -224,6 +224,23 @@
           '';
         };
 
+        # Le daemon AVEC la couche neuronale (WITH_NEURAL). `predictord` reste pur
+        # n-gram (service live inchangé, zéro dép lourde) ; on bascule le service
+        # sur celui-ci quand on veut activer le neural (config.json: neural=true).
+        # Wrappé pour que libllama trouve les backends ggml-cpu-*.so.
+        predictord-neural = pkgs.stdenv.mkDerivation {
+          pname = "ime-predictord-neural";
+          version = "0.1";
+          src = ./daemon;
+          nativeBuildInputs = [ pkgs.cmake pkgs.makeWrapper ];
+          buildInputs = [ pkgs.nlohmann_json pkgs.llama-cpp ];
+          cmakeFlags = [ "-DWITH_NEURAL=ON" ];
+          postInstall = ''
+            wrapProgram $out/bin/predictord \
+              --set GGML_BACKEND_PATH ${pkgs.llama-cpp}/bin
+          '';
+        };
+
         # Track A : l'engine fcitx5 (réutilise le frontend Wayland éprouvé).
         fcitx5-predict = pkgs.stdenv.mkDerivation {
           pname = "fcitx5-predict";
