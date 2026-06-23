@@ -324,10 +324,21 @@ python3 ime/daemon/test_predict.py "$(nix build ./ime#predictord --no-link --pri
       chiffres publiés Gboard (cf section) : in-vocab **16,9/27,0 %** =
       niveau CIFG-LSTM déployé ; forcer la langue ≈ gratuit (−0,3 pt hit@3
       au pire, à contre-emploi).
-- [ ] Rerank neuronal async optionnel (GRU/GPT-2-mini int8 via ONNX, patron
-      SwiftKey 2025 : reranke les candidats n-gram, ~+3-5 pts hit@3), non
-      bloquant. (Toujours pas prioritaire : à reconsidérer seulement si le
-      ressenti de frappe est bon et que la qualité des candidats plafonne.)
+- [x] **Couche NEURONALE (libllama, GGUF) — implémentée 2026-06-23.**
+      `daemon/neural.{h,cpp}` (NeuralPredictor : cache KV incrémental + top-k
+      tokens initiaux de mot), intégrée dans `predictord` derrière `WITH_NEURAL`
+      + config `neural`/`neuralModel`/`neuralThreads`/`neuralTopk`/`neuralOnly`
+      (rechargés à chaud). Le neural mène le MOT-SUIVANT (prefix vide), le n-gram
+      garde la complétion intra-mot + `literalIsWord`/`autocomplete` ;
+      `neuralOnly=true` = mot-suivant 100% neuronal. Paquet flake
+      `predictord-neural` (wrappé `GGML_BACKEND_PATH`) ; `predictord` reste pur
+      n-gram (service live inchangé). Validé : Qwen3-4B Q4, qualité FR+EN très
+      supérieure, liste candidats ~120 ms incrémental ; `test_predict.py` 0
+      régression. Spec + bench : `docs/superpowers/specs/2026-06-23-neural-llm-predictor-design.md`.
+      RESTE (non fait) : timeout engine 150 ms → relever ou passer ASYNC
+      (instant n-gram + refresh neuronal poussé) sinon le 4B (~120-200 ms) est
+      coupé côté engine ; GGUF *base* (vs instruct) ; pin du modèle + bascule du
+      module ; éval hit@k neural vs n-gram ; test live.
 - [ ] (Polish) auto-accent quand la forme sans accent est au dico (ex. `garcon`
       reste `garcon` car présent dans le corpus) — limite de qualité du corpus.
 

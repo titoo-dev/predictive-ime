@@ -134,6 +134,28 @@ cached `Qwen3-4B-Q4_K_M.gguf`, i5-1335U, 4 threads:
   words are single tokens), incremental KV mandatory, 4B is at the budget edge →
   **Qwen3-1.7B (2× faster) is the likely deploy pick** for multi-token headroom.
 
+## Status — 2026-06-23
+
+DONE & verified (branch `feat/neural-llm-predictor`):
+- `NeuralPredictor` (`daemon/neural.{h,cpp}`) — libllama, incremental KV, fast
+  top-k word-initial candidates.
+- Integrated into `predictord` behind `WITH_NEURAL` + config (`neural`,
+  `neuralModel`, `neuralThreads`, `neuralTopk`, `neuralOnly`), hot-reloaded.
+  Neural leads next-word; n-gram keeps completion + auto-apply semantics.
+- `flake.nix`: `neural-predict` (CLI) + `predictord-neural` (daemon, wrapped);
+  `predictord` unchanged (pure n-gram, live service safe).
+- Verified: `test_predict.py` all pass (zero regression); socket E2E serves
+  neural FR+EN next-word; `neuralOnly` → pure-neural next-word.
+
+NEXT (not done):
+- Engine: 150 ms socket timeout clips a ~120-200 ms neural reply → raise it, or
+  go ASYNC (instant n-gram + a pushed neural refresh). Required before the live
+  keyboard shows neural candidates. Touches `engine/predict.cpp` → isolation-test
+  (a broken engine kills the session keyboard).
+- Produce a Qwen3-4B-**Base** GGUF (instruct used so far is a latency proxy).
+- Pin the model + switch the NixOS module's service to `predictord-neural`.
+- `eval_model.py`: hit@k neural vs n-gram on held-out Leipzig (target: beat 24% hit@3).
+
 ## Out of scope (this step)
 
 - Async two-phase protocol (instant n-gram + pushed neural update).
