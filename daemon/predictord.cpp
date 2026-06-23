@@ -1638,7 +1638,13 @@ int main(int argc, char **argv) {
       resp["candidates"] = json::array();
       resp["error"] = e.what();
     }
-    return resp.dump() + "\n";
+    // dump() PEUT lever (ex. chaîne UTF-8 incomplète d'un candidat) — hors du try
+    // ci-dessus : on le borne ici pour qu'aucune réponse ne puisse tuer le daemon.
+    try {
+      return resp.dump() + "\n";
+    } catch (...) {
+      return std::string("{\"candidates\":[]}\n");
+    }
   };
 
   // Boucle poll() mono-thread MULTI-CLIENTS : un client lent ou resté ouvert

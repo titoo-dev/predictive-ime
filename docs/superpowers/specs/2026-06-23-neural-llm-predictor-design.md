@@ -153,6 +153,27 @@ DONE & verified (branch `feat/neural-llm-predictor`):
   `checks.engine` harness passes (isolation, keyboard-safe). The live keyboard can
   now wait for a neural next-word (a hitch after Space — quality > UX, accepted).
 
+- EVAL (2026-06-23, DONE) — hit@k neural vs n-gram, **identical harness** (full
+  preceding context for neural, case-insensitive), 15 held-out FR Leipzig sentences,
+  259 next-word predictions:
+
+  | model (best regime)            | hit@1 | hit@3 | hit@6 |
+  |--------------------------------|-------|-------|-------|
+  | n-gram (2-word, instant)       | 12.4% | 19.7% | 27.4% |
+  | **Qwen3-4B (full context)**    |**21.6%**|**32.8%**|**38.6%**|
+
+  → neural wins **+9.2 pts hit@1 (+74% rel), +13 pts hit@3 (+66% rel)** — and this
+  UNDERSTATES it (multi-token target words show as a fragment candidate → counted
+  as a miss; candidate expansion would raise it further). At 2-word context neural
+  LOSES (10.8/17.4) — its edge REQUIRES long context (its design point), which the
+  incremental KV cache makes even faster (full-context run 41 s < 2-word 60 s).
+  Confirms the bpb face-off with a task metric.
+- BUGFIX (2026-06-23): byte-level BPE can split a multi-byte char across tokens →
+  a candidate can be INCOMPLETE UTF-8 → `nlohmann::json::dump()` threw
+  (type_error.316) and KILLED the daemon. Fixed at the root (`valid_utf8` filter in
+  `nextWords`) + defensively wrapped `resp.dump()` in `predictord` so no response
+  can ever crash the daemon. Found by the eval (the socket test had missed it).
+
 NEXT (not done):
 - ASYNC refinement (better feel than a raised timeout): instant n-gram bar, then a
   pushed neural refresh — needs the engine to read the daemon fd from fcitx5's

@@ -21,6 +21,23 @@ static bool word_punct_(char c) {
   return c == '\n' || std::strchr(".,;:!?\"'()[]{}<>/\\|`~@#$%^&*+=", c) != nullptr;
 }
 
+// Byte-level BPE can split a multi-byte char across tokens → a single token's
+// piece may be INCOMPLETE UTF-8. Such a string crashes nlohmann::json::dump()
+// (type_error.316) and would kill the daemon. Reject non-UTF-8 candidates.
+static bool valid_utf8(const std::string &s) {
+  size_t i = 0, n = s.size();
+  while (i < n) {
+    unsigned char c = (unsigned char)s[i];
+    int len = c < 0x80 ? 1 : (c >> 5) == 0x6 ? 2 : (c >> 4) == 0xE ? 3
+              : (c >> 3) == 0x1E ? 4 : 0;
+    if (len == 0 || i + (size_t)len > n) return false;
+    for (int k = 1; k < len; ++k)
+      if ((((unsigned char)s[i + k]) >> 6) != 0x2) return false;
+    i += len;
+  }
+  return true;
+}
+
 bool NeuralPredictor::init(const std::string &modelPath, int threads, int nCtx,
                            const std::string &backendDir) {
   if (!backendDir.empty()) ggml_backend_load_all_from_path(backendDir.c_str());
@@ -90,7 +107,7 @@ std::vector<std::string> NeuralPredictor::nextWords(const std::vector<std::strin
     std::string p = piece_(vo, idx[i]);
     if (p.empty() || p[0] != ' ') continue;          // word-initial tokens only
     std::string w = p.substr(1);
-    if (w.empty() || word_punct_(w[0])) continue;
+    if (w.empty() || word_punct_(w[0]) || !valid_utf8(w)) continue; // skip BPE byte-fragments
     bool dup = false; for (auto &o : out) if (o == w) { dup = true; break; }
     if (!dup) out.push_back(w);
   }
