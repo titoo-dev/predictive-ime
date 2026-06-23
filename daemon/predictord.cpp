@@ -1554,15 +1554,19 @@ int main(int argc, char **argv) {
   // modèle (~Go) ne se recharge pas à chaud ; l'usage par requête revérifie
   // model.cfg.neural (toggle OFF possible à chaud, ON nécessite un restart).
   NeuralPredictor neural;
+  // neuralForced : le service (module NixOS) a fourni IME_NEURAL_MODEL → intention
+  // explicite d'activer le neural, SANS exiger neural:true dans le config.json perso.
+  bool neuralForced = false;
   {
     // Chemin du GGUF : config.json (neuralModel) sinon env IME_NEURAL_MODEL — ce
     // dernier laisse le service systemd fournir le modèle SANS hardcoder un
     // store-path dans la config perso (déploiement propre via le module NixOS).
     const char *envModel = getenv("IME_NEURAL_MODEL");
+    neuralForced = (envModel != nullptr && envModel[0] != '\0');
     std::string nmodel = !model.cfg.neuralModel.empty()
                              ? model.cfg.neuralModel
-                             : (envModel ? std::string(envModel) : std::string());
-    if (model.cfg.neural && !nmodel.empty()) {
+                             : (neuralForced ? std::string(envModel) : std::string());
+    if ((model.cfg.neural || neuralForced) && !nmodel.empty()) {
       const char *bdir = getenv("GGML_BACKEND_PATH");
       if (neural.init(nmodel, model.cfg.neuralThreads, 2048, bdir ? bdir : ""))
         fprintf(stderr, "[predictord] neural ON: %s (threads=%d, topk=%d)\n",
@@ -1620,7 +1624,8 @@ int main(int argc, char **argv) {
 #ifdef WITH_NEURAL
         // Neural EN TÊTE pour le mot-suivant (prefix vide) ; n-gram conservé pour
         // la complétion intra-mot + literalIsWord/autocomplete (auto-apply sûr).
-        if (neural.ready() && model.cfg.neural && prefix.empty() && !ctx.empty()) {
+        if (neural.ready() && (model.cfg.neural || neuralForced) &&
+            prefix.empty() && !ctx.empty()) {
           std::vector<std::string> nc = neural.nextWords(ctx, model.cfg.neuralTopk);
           if (!nc.empty()) {
             if (model.cfg.neuralOnly) {
