@@ -147,13 +147,19 @@ DONE & verified (branch `feat/neural-llm-predictor`):
 - Verified: `test_predict.py` all pass (zero regression); socket E2E serves
   neural FR+EN next-word; `neuralOnly` → pure-neural next-word.
 
+- ENGINE timeout (2026-06-23, DONE): `engine/predict.cpp` — per-request timeout.
+  Completion stays `socketTimeoutMs` (150 ms, no freeze); next-word uses
+  `nextWordTimeoutMs` (config, raise to ~300 for neural). Engine builds +
+  `checks.engine` harness passes (isolation, keyboard-safe). The live keyboard can
+  now wait for a neural next-word (a hitch after Space — quality > UX, accepted).
+
 NEXT (not done):
-- Engine: 150 ms socket timeout clips a ~120-200 ms neural reply → raise it, or
-  go ASYNC (instant n-gram + a pushed neural refresh). Required before the live
-  keyboard shows neural candidates. Touches `engine/predict.cpp` → isolation-test
-  (a broken engine kills the session keyboard).
+- ASYNC refinement (better feel than a raised timeout): instant n-gram bar, then a
+  pushed neural refresh — needs the engine to read the daemon fd from fcitx5's
+  event loop. Bigger refactor; the configurable timeout above is the usable v1.
 - Produce a Qwen3-4B-**Base** GGUF (instruct used so far is a latency proxy).
-- Pin the model + switch the NixOS module's service to `predictord-neural`.
+- Pin the model + switch the NixOS module's service to `predictord-neural`
+  (deployment to the live system — user-gated; keyboard risk).
 - `eval_model.py`: hit@k neural vs n-gram on held-out Leipzig (target: beat 24% hit@3).
 
 ## Out of scope (this step)

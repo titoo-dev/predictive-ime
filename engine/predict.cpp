@@ -69,6 +69,12 @@ struct EngineCfg {
   bool nextWordBar = true;
   bool autoApplyNeedsRevert = true;
   bool escapeForward = true;
+  // Timeout socket (ms). La complétion intra-mot (n-gram, <1 ms) garde
+  // socketTimeoutMs → jamais de gel clavier. Le MOT-SUIVANT peut être neural
+  // (~120-200 ms) : nextWordTimeoutMs le borne SÉPARÉMENT (à relever, ex. 300,
+  // quand neural est activé ; au prix d'un léger hitch après Espace).
+  int socketTimeoutMs = 150;
+  int nextWordTimeoutMs = 150;
   // Programmes (sous-chaînes de ic->program(), ex. "ghostty") où la barre
   // SPÉCULATIVE mot-suivant est supprimée : dans un terminal elle n'a pas de
   // preedit pour s'ancrer au curseur et « traîne » derrière lui. La complétion
@@ -102,6 +108,9 @@ const EngineCfg &engineCfg() {
         fresh.autoApplyNeedsRevert =
             j.value("autoApplyNeedsRevert", fresh.autoApplyNeedsRevert);
         fresh.escapeForward = j.value("escapeForward", fresh.escapeForward);
+        fresh.socketTimeoutMs = j.value("socketTimeoutMs", fresh.socketTimeoutMs);
+        fresh.nextWordTimeoutMs =
+            j.value("nextWordTimeoutMs", fresh.nextWordTimeoutMs);
         for (const auto &e :
              j.value("nextWordBarExclude", nlohmann::json::array()))
           if (e.is_string())
@@ -319,7 +328,7 @@ struct DaemonReply {
 // frappe continue sans candidats.
 constexpr int kDaemonTimeoutMs = 150;
 
-int connectDaemon() {
+int connectDaemon(int timeoutMs = kDaemonTimeoutMs) {
   const char *envSock = ::getenv("IME_PREDICTORD_SOCK");
   std::string path = envSock ? envSock : "/tmp/ime-predictord.sock";
   int fd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0);
@@ -335,7 +344,7 @@ int connectDaemon() {
   int fl = ::fcntl(fd, F_GETFL);
   if (fl >= 0)
     ::fcntl(fd, F_SETFL, fl & ~O_NONBLOCK);
-  timeval tv{0, kDaemonTimeoutMs * 1000};
+  timeval tv{timeoutMs / 1000, (timeoutMs % 1000) * 1000};
   ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
   ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
   return fd;
@@ -344,7 +353,12 @@ int connectDaemon() {
 DaemonReply queryDaemon(const std::vector<std::string> &context,
                         const std::string &prefix) {
   DaemonReply out;
-  int fd = connectDaemon();
+  // Mot-suivant (prefix vide) = peut être neural → budget séparé, relevable.
+  // Complétion intra-mot (prefix non vide) = n-gram rapide → timeout court, le
+  // clavier ne gèle jamais derrière le daemon.
+  int timeoutMs = prefix.empty() ? engineCfg().nextWordTimeoutMs
+                                  : engineCfg().socketTimeoutMs;
+  int fd = connectDaemon(timeoutMs);
   if (fd < 0)
     return out;
   json req;
