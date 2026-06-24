@@ -30,6 +30,11 @@ public:
   // Returns [] if not ready or context is empty.
   std::vector<std::string> nextWords(const std::vector<std::string> &context, int k);
 
+  // Up to n rephrasings of `sentence` (instruct generation, on-demand — seconds,
+  // NOT per-keystroke). Uses the Qwen3 chat template + greedy generation, parses
+  // one variant per line. Returns [] if not ready. Resets the nextWords KV cache.
+  std::vector<std::string> reformulate(const std::string &sentence, int n);
+
 private:
   void *model_ = nullptr;       // llama_model*
   void *ctx_ = nullptr;         // llama_context*

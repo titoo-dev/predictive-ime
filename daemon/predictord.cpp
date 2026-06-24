@@ -1615,6 +1615,18 @@ int main(int argc, char **argv) {
         resp["ok"] = true;
       } else if (req.contains("stats")) {
         resp = model.stats();
+      } else if (req.contains("reformulate")) {
+        // Reformulation à la demande (sélection → 3 variantes). Génératif → neural.
+        std::string sentence = req.value("reformulate", std::string{});
+        int n = req.value("n", 3);
+#ifdef WITH_NEURAL
+        if (neural.ready())
+          resp["variants"] = neural.reformulate(sentence, n);
+        else
+          resp["variants"] = json::array();
+#else
+        resp["variants"] = json::array();
+#endif
       } else {
         std::vector<std::string> ctx =
             req.value("context", std::vector<std::string>{});

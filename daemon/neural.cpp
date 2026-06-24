@@ -2,11 +2,13 @@
 #include "llama.h"
 #include "ggml-backend.h"
 #include <cstring>
+#include <sstream>
 
-static std::vector<llama_token> tokenize_(const llama_vocab *v, const std::string &t, bool bos) {
-  int n = -llama_tokenize(v, t.c_str(), (int)t.size(), nullptr, 0, bos, false);
+static std::vector<llama_token> tokenize_(const llama_vocab *v, const std::string &t,
+                                          bool bos, bool special = false) {
+  int n = -llama_tokenize(v, t.c_str(), (int)t.size(), nullptr, 0, bos, special);
   std::vector<llama_token> toks(n > 0 ? n : 0);
-  int got = llama_tokenize(v, t.c_str(), (int)t.size(), toks.data(), (int)toks.size(), bos, false);
+  int got = llama_tokenize(v, t.c_str(), (int)t.size(), toks.data(), (int)toks.size(), bos, special);
   if (got < 0) toks.clear(); else toks.resize(got);
   return toks;
 }
@@ -112,6 +114,69 @@ std::vector<std::string> NeuralPredictor::nextWords(const std::vector<std::strin
     if (!dup) out.push_back(w);
   }
   return out;
+}
+
+std::vector<std::string> NeuralPredictor::reformulate(const std::string &sentence, int n) {
+  if (!ctx_ || sentence.empty()) return {};
+  if (n < 1) n = 3;
+  const llama_vocab *vo = (const llama_vocab *)vocab_;
+  llama_context *c = (llama_context *)ctx_;
+  llama_memory_t mem = (llama_memory_t)mem_;
+
+  // Prompt chat Qwen3. "/no_think" coupe le mode raisonnement → sortie directe.
+  std::string sys =
+      "Tu reformules des phrases (français ou anglais). Donne EXACTEMENT " +
+      std::to_string(n) +
+      " reformulations differentes et naturelles de la phrase de l'utilisateur, "
+      "une par ligne, sans numerotation, sans guillemets, sans commentaire, "
+      "meme langue que l'entree.";
+  std::string prompt = "<|im_start|>system\n" + sys + "<|im_end|>\n" +
+                       "<|im_start|>user\n" + sentence + " /no_think<|im_end|>\n" +
+                       "<|im_start|>assistant\n";
+
+  // génération : KV propre (et on invalide le cache incrémental de nextWords)
+  llama_memory_clear(mem, true);
+  prev_.clear();
+
+  std::vector<llama_token> toks = tokenize_(vo, prompt, /*bos=*/true, /*special=*/true);
+  if (toks.empty()) return {};
+  {
+    llama_batch b = llama_batch_get_one(toks.data(), (int)toks.size());
+    if (llama_decode(c, b) != 0) { llama_memory_clear(mem, true); return {}; }
+  }
+
+  std::string out;
+  const int maxTok = 256;
+  for (int i = 0; i < maxTok; ++i) {
+    float *lg = llama_get_logits_ith(c, -1);
+    if (!lg) break;
+    int best = 0; float bv = lg[0];
+    for (int v = 1; v < n_vocab_; ++v) if (lg[v] > bv) { bv = lg[v]; best = v; }
+    if (llama_vocab_is_eog(vo, best)) break;
+    out += piece_(vo, best);
+    llama_batch bb = llama_batch_get_one(&best, 1);
+    if (llama_decode(c, bb) != 0) break;
+  }
+  // la génération a pollué le KV → reset pour les prochains nextWords
+  llama_memory_clear(mem, true);
+  prev_.clear();
+
+  // retire un éventuel bloc de raisonnement <think>...</think>
+  size_t te = out.rfind("</think>");
+  if (te != std::string::npos) out = out.substr(te + 8);
+
+  // une variante par ligne (trim ponctuation/numérotation de tête, UTF-8 valide)
+  std::vector<std::string> variants;
+  std::stringstream ss(out);
+  std::string line;
+  while (std::getline(ss, line) && (int)variants.size() < n) {
+    size_t a = line.find_first_not_of(" \t\r\"'-*•0123456789.)(");
+    if (a == std::string::npos) continue;
+    size_t z = line.find_last_not_of(" \t\r\"");
+    std::string v = line.substr(a, z - a + 1);
+    if (!v.empty() && valid_utf8(v)) variants.push_back(v);
+  }
+  return variants;
 }
 
 NeuralPredictor::~NeuralPredictor() {
