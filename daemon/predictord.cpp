@@ -45,6 +45,8 @@
 #include "neural.h"
 #endif
 
+#include "reformulate_http.h" // reformulation via API externe (Groq), repli local
+
 #include <cerrno>
 #include <fcntl.h>
 #include <poll.h>
@@ -239,6 +241,16 @@ struct Config {
   // mot-suivant ; il ne sert plus que de fallback si le neural ne rend rien).
   // C'est l'option "remplacer le n-gram" : neural seul aux commandes.
   bool neuralOnly = false;
+
+  // --- REFORMULATION (Ctrl+Alt+R sur une sélection). Source des variantes :
+  //   "auto"  → API externe si une clé est dispo, sinon local (neural)
+  //   "groq"  → API externe (repli local si l'appel échoue)
+  //   "local" → uniquement le neural local (hors-ligne, plus lent)
+  // La clé n'est JAMAIS ici : $GROQ_API_KEY ou ~/.config/ime-predictord/groq.key.
+  std::string reformProvider = "auto";
+  std::string reformModel = "llama-3.3-70b-versatile";
+  std::string reformBaseUrl = "https://api.groq.com/openai/v1/chat/completions";
+  int reformTimeoutMs = 20000;
 };
 
 struct Model {
@@ -711,6 +723,10 @@ struct Model {
           fresh.neuralThreads = j.value("neuralThreads", fresh.neuralThreads);
           fresh.neuralTopk = j.value("neuralTopk", fresh.neuralTopk);
           fresh.neuralOnly = j.value("neuralOnly", fresh.neuralOnly);
+          fresh.reformProvider = j.value("reformProvider", fresh.reformProvider);
+          fresh.reformModel = j.value("reformModel", fresh.reformModel);
+          fresh.reformBaseUrl = j.value("reformBaseUrl", fresh.reformBaseUrl);
+          fresh.reformTimeoutMs = j.value("reformTimeoutMs", fresh.reformTimeoutMs);
         } catch (const std::exception &e) {
           fprintf(stderr, "[predictord] config.json invalide: %s\n", e.what());
         }
@@ -1616,17 +1632,23 @@ int main(int argc, char **argv) {
       } else if (req.contains("stats")) {
         resp = model.stats();
       } else if (req.contains("reformulate")) {
-        // Reformulation à la demande (sélection → 3 variantes). Génératif → neural.
+        // Reformulation à la demande (sélection → variantes). Source = API
+        // externe (Groq) si configurée + clé dispo, SINON le neural local.
         std::string sentence = req.value("reformulate", std::string{});
         int n = req.value("n", 3);
+        std::vector<std::string> variants;
+        // 1) externe (qualité + vitesse) sauf si l'utilisateur force "local".
+        if (model.cfg.reformProvider != "local")
+          variants = reformulateHttp(sentence, n, model.cfg.reformBaseUrl,
+                                     model.cfg.reformModel, model.cfgDir_,
+                                     model.cfg.reformTimeoutMs);
 #ifdef WITH_NEURAL
-        if (neural.ready())
-          resp["variants"] = neural.reformulate(sentence, n);
-        else
-          resp["variants"] = json::array();
-#else
-        resp["variants"] = json::array();
+        // 2) repli LOCAL hors-ligne si l'externe n'a rien rendu (pas de clé,
+        //    réseau coupé, erreur HTTP…).
+        if (variants.empty() && neural.ready())
+          variants = neural.reformulate(sentence, n);
 #endif
+        resp["variants"] = variants;
       } else {
         std::vector<std::string> ctx =
             req.value("context", std::vector<std::string>{});

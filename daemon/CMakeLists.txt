@@ -6,9 +6,11 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 include(GNUInstallDirs)
 
 find_package(nlohmann_json REQUIRED)
+# libcurl : reformulation via API externe (Groq) — cf reformulate_http.cpp.
+find_package(CURL REQUIRED)
 
-add_executable(predictord predictord.cpp)
-target_link_libraries(predictord nlohmann_json::nlohmann_json)
+add_executable(predictord predictord.cpp reformulate_http.cpp)
+target_link_libraries(predictord nlohmann_json::nlohmann_json CURL::libcurl)
 install(TARGETS predictord DESTINATION "${CMAKE_INSTALL_BINDIR}")
 
 # Outil de bench (le "spike" latence), optionnel.

@@ -204,8 +204,9 @@
           pname = "ime-predictord";
           version = "0.1";
           src = ./daemon;
-          nativeBuildInputs = [ pkgs.cmake ];
-          buildInputs = [ pkgs.nlohmann_json ];
+          nativeBuildInputs = [ pkgs.cmake pkgs.pkg-config ];
+          # curl : reformulation via API externe (Groq) — cf reformulate_http.cpp.
+          buildInputs = [ pkgs.nlohmann_json pkgs.curl ];
         };
 
         # Prédicteur neuronal (libllama), CLI d'isolation. Build pur via le flake
@@ -215,8 +216,8 @@
           pname = "neural-predict";
           version = "0.1";
           src = ./daemon;
-          nativeBuildInputs = [ pkgs.cmake pkgs.makeWrapper ];
-          buildInputs = [ pkgs.nlohmann_json pkgs.llama-cpp ];
+          nativeBuildInputs = [ pkgs.cmake pkgs.makeWrapper pkgs.pkg-config ];
+          buildInputs = [ pkgs.nlohmann_json pkgs.llama-cpp pkgs.curl ];
           cmakeFlags = [ "-DWITH_NEURAL=ON" ];
           postInstall = ''
             wrapProgram $out/bin/neural_predict \
@@ -232,8 +233,8 @@
           pname = "ime-predictord-neural";
           version = "0.1";
           src = ./daemon;
-          nativeBuildInputs = [ pkgs.cmake pkgs.makeWrapper ];
-          buildInputs = [ pkgs.nlohmann_json pkgs.llama-cpp ];
+          nativeBuildInputs = [ pkgs.cmake pkgs.makeWrapper pkgs.pkg-config ];
+          buildInputs = [ pkgs.nlohmann_json pkgs.llama-cpp pkgs.curl ];
           cmakeFlags = [ "-DWITH_NEURAL=ON" ];
           postInstall = ''
             wrapProgram $out/bin/predictord \
