@@ -161,7 +161,8 @@ Item {
                     anchors.verticalCenter: parent.verticalCenter
                     text: loading
                           ? "Reformulation…"
-                          : "Reformuler · 1–" + candidates.length + " / ↹ / ⏎"
+                          : (headerText.length ? headerText
+                                               : "Reformuler · 1–" + candidates.length)
                     color: colors.onSurface
                     opacity: 0.65
                     font.pixelSize: 11
@@ -448,6 +449,7 @@ PanelView::PanelView() {
     ctx->setContextProperty("listMode", false);
     ctx->setContextProperty("loading", false);
     ctx->setContextProperty("spin", 0.0);
+    ctx->setContextProperty("headerText", QString{});
 
     component_ = new QQmlComponent(view_->engine());
     component_->setData(kPanelQml, QUrl());
@@ -475,7 +477,7 @@ void PanelView::setColors(const QVariantMap &colors) {
 void PanelView::update(const QStringList &candidates, int highlight,
                        const QVariantList &autoMark, bool composing,
                        bool grid, const QStringList &labels, bool listMode,
-                       bool loading) {
+                       bool loading, const QString &headerText) {
     auto now = Clock::now();
     if (loading && !loading_)
         spinStart_ = now; // (re)démarre la rotation du spinner
@@ -509,6 +511,7 @@ void PanelView::update(const QStringList &candidates, int highlight,
     labels_ = labels;
     listMode_ = listMode;
     loading_ = loading;
+    headerText_ = headerText;
 }
 
 int PanelView::hideGraceMs() const { return animMs(90) + 80; }
@@ -536,6 +539,7 @@ void PanelView::hidden() {
     labels_.clear();
     listMode_ = false;
     loading_ = false;
+    headerText_.clear();
     hl_ = {};
     hl_.to = -1.0;
 }
@@ -575,6 +579,7 @@ QImage PanelView::render() {
     ctx->setContextProperty("labels", labels_);
     ctx->setContextProperty("listMode", listMode_);
     ctx->setContextProperty("loading", loading_);
+    ctx->setContextProperty("headerText", headerText_);
     // rotation du spinner : ~1 tour / 0,9 s tant que loading_
     double spin = 0.0;
     if (loading_) {

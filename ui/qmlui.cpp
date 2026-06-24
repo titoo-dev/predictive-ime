@@ -198,8 +198,11 @@ private:
         bool loading = cands.size() == 1 && cands[0].startsWith(QChar(0x27F3));
         if (loading)
             listMode = true;
+        // header du mode liste : auxUp posé par l'engine (mode + badge source).
+        QString headerText =
+            QString::fromStdString(ic->inputPanel().auxUp().toString());
         view_->update(cands, highlight, autoMark, composing, grid, labels,
-                      listMode, loading);
+                      listMode, loading, headerText);
         if (!renderFrame())
             return;
         mapped_ = true;
