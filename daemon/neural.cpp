@@ -241,13 +241,15 @@ std::vector<std::string> NeuralPredictor::reformulate(const std::string &sentenc
       fr ? ("Tu reformules. Réécris la phrase de l'utilisateur en " +
             std::to_string(want) +
             " reformulations différentes, une par ligne. Garde EXACTEMENT le "
-            "même sens et la même langue (français) — ne traduis pas. Varie la "
-            "formulation. Pas de numéro, pas de commentaire, pas de guillemets.")
+            "même sens et la même langue (français) — ne traduis pas. Conserve la "
+            "ponctuation finale (. ? !) de la phrase. Varie la formulation. Pas de "
+            "numéro, pas de commentaire, pas de guillemets.")
          : ("You rephrase text. Rewrite the user's sentence as " +
             std::to_string(want) +
             " different paraphrases, one per line. Keep EXACTLY the same meaning "
-            "and the same language (English) — do not translate. Vary the "
-            "wording. No numbering, no commentary, no quotes.");
+            "and the same language (English) — do not translate. Keep the "
+            "sentence's final punctuation (. ? !). Vary the wording. No "
+            "numbering, no commentary, no quotes.");
   // Bloc <think></think> PRÉ-REMPLI dans le tour assistant = méthode officielle
   // Qwen3 pour DÉSACTIVER le raisonnement → sortie directe (sinon le modèle
   // "pense" ~200 tokens avant de répondre = 10-15 s de génération).
