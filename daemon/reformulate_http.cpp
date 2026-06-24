@@ -1,10 +1,12 @@
 #include "reformulate_http.h"
+#include "reform_prompts.h"
 
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <functional>
 #include <mutex>
 #include <sstream>
 
@@ -123,7 +125,8 @@ std::vector<std::string> reformulateHttp(const std::string &sentence, int n,
                                          const std::string &baseUrl,
                                          const std::string &model,
                                          const std::string &cfgDir,
-                                         long timeoutMs) {
+                                         long timeoutMs, const std::string &mode,
+                                         uint32_t nonce) {
   if (sentence.empty()) return {};
   if (n < 1) n = 3;
   std::string key = readKey(cfgDir);
@@ -136,27 +139,17 @@ std::vector<std::string> reformulateHttp(const std::string &sentence, int n,
   static std::once_flag once;
   std::call_once(once, [] { curl_global_init(CURL_GLOBAL_DEFAULT); });
 
-  // ÉPINGLAGE DE LANGUE : prompt système rédigé DANS la langue cible + interdit
-  // la traduction (sinon un gros modèle peut dériver). On sur-génère (n+1).
+  // Prompt partagé avec le neural (reform_prompts.h) : mode + épinglage de
+  // langue (translate inverse la langue). On sur-génère (n+1).
   bool fr = isFrench(sentence);
   int want = n + 1;
-  std::string sys =
-      fr ? ("Tu reformules. Réécris la phrase de l'utilisateur en " +
-            std::to_string(want) +
-            " reformulations différentes, une par ligne. Garde EXACTEMENT le "
-            "même sens et la même langue (français) — ne traduis pas. Conserve la "
-            "ponctuation finale (. ? !) de la phrase. Varie la formulation. Pas de "
-            "numéro, pas de commentaire, pas de guillemets.")
-         : ("You rephrase text. Rewrite the user's sentence as " +
-            std::to_string(want) +
-            " different paraphrases, one per line. Keep EXACTLY the same meaning "
-            "and the same language (English) — do not translate. Keep the "
-            "sentence's final punctuation (. ? !). Vary the wording. No "
-            "numbering, no commentary, no quotes.");
+  std::string sys = reformSystemPrompt(mode, fr, want);
 
   json body = {
       {"model", model},
       {"temperature", 0.7},
+      // seed = hash(phrase) ^ nonce : « régénérer » (nonce++) → autres variantes.
+      {"seed", (int)((uint32_t)std::hash<std::string>{}(sentence) ^ nonce)},
       {"max_tokens", 600},
       {"messages",
        json::array({{{"role", "system"}, {"content", sys}},

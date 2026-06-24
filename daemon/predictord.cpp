@@ -1636,19 +1636,27 @@ int main(int argc, char **argv) {
         // externe (Groq) si configurée + clé dispo, SINON le neural local.
         std::string sentence = req.value("reformulate", std::string{});
         int n = req.value("n", 3);
+        std::string mode = req.value("mode", std::string{"rephrase"});
+        uint32_t nonce = (uint32_t)req.value("nonce", 0);
         std::vector<std::string> variants;
+        std::string source = "none";
         // 1) externe (qualité + vitesse) sauf si l'utilisateur force "local".
-        if (model.cfg.reformProvider != "local")
+        if (model.cfg.reformProvider != "local") {
           variants = reformulateHttp(sentence, n, model.cfg.reformBaseUrl,
                                      model.cfg.reformModel, model.cfgDir_,
-                                     model.cfg.reformTimeoutMs);
+                                     model.cfg.reformTimeoutMs, mode, nonce);
+          if (!variants.empty()) source = "groq";
+        }
 #ifdef WITH_NEURAL
         // 2) repli LOCAL hors-ligne si l'externe n'a rien rendu (pas de clé,
         //    réseau coupé, erreur HTTP…).
-        if (variants.empty() && neural.ready())
-          variants = neural.reformulate(sentence, n);
+        if (variants.empty() && neural.ready()) {
+          variants = neural.reformulate(sentence, n, mode, nonce);
+          if (!variants.empty()) source = "local";
+        }
 #endif
         resp["variants"] = variants;
+        resp["source"] = source; // pour le badge de la bulle (engine → UI)
       } else {
         std::vector<std::string> ctx =
             req.value("context", std::vector<std::string>{});

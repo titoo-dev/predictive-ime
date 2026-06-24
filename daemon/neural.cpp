@@ -1,6 +1,7 @@
 #include "neural.h"
 #include "llama.h"
 #include "ggml-backend.h"
+#include "reform_prompts.h"
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -223,7 +224,8 @@ std::vector<std::string> NeuralPredictor::nextWords(const std::vector<std::strin
   return out;
 }
 
-std::vector<std::string> NeuralPredictor::reformulate(const std::string &sentence, int n) {
+std::vector<std::string> NeuralPredictor::reformulate(const std::string &sentence, int n,
+                                                      const std::string &mode, uint32_t nonce) {
   if (!ctx_ || sentence.empty()) return {};
   if (n < 1) n = 3;
   const llama_vocab *vo = (const llama_vocab *)vocab_;
@@ -234,22 +236,10 @@ std::vector<std::string> NeuralPredictor::reformulate(const std::string &sentenc
   // parfois deux lignes proches, mieux vaut avoir une marge.
   const int want = n + 2;
 
-  // ÉPINGLAGE DE LANGUE : le prompt rédigé DANS la langue cible ancre la sortie
-  // (un prompt français faisait traduire les phrases anglaises en français).
+  // ÉPINGLAGE DE LANGUE + MODE : prompt partagé avec le backend Groq
+  // (reform_prompts.h) → sémantique identique. translate inverse la langue.
   bool fr = isFrench(sentence);
-  std::string sys =
-      fr ? ("Tu reformules. Réécris la phrase de l'utilisateur en " +
-            std::to_string(want) +
-            " reformulations différentes, une par ligne. Garde EXACTEMENT le "
-            "même sens et la même langue (français) — ne traduis pas. Conserve la "
-            "ponctuation finale (. ? !) de la phrase. Varie la formulation. Pas de "
-            "numéro, pas de commentaire, pas de guillemets.")
-         : ("You rephrase text. Rewrite the user's sentence as " +
-            std::to_string(want) +
-            " different paraphrases, one per line. Keep EXACTLY the same meaning "
-            "and the same language (English) — do not translate. Keep the "
-            "sentence's final punctuation (. ? !). Vary the wording. No "
-            "numbering, no commentary, no quotes.");
+  std::string sys = reformSystemPrompt(mode, fr, want);
   // Bloc <think></think> PRÉ-REMPLI dans le tour assistant = méthode officielle
   // Qwen3 pour DÉSACTIVER le raisonnement → sortie directe (sinon le modèle
   // "pense" ~200 tokens avant de répondre = 10-15 s de génération).
@@ -275,9 +265,11 @@ std::vector<std::string> NeuralPredictor::reformulate(const std::string &sentenc
   float topP = envF("IME_REFORM_TOPP", 0.92f);
   int topK = (int)envF("IME_REFORM_TOPK", 60.0f);
   const char *seedEnv = getenv("IME_REFORM_SEED");
+  // nonce : varie à chaque « régénérer » (Ctrl+Alt+R re-pressé) → nouvelles
+  // variantes même phrase/mode (sinon seed=hash(phrase) = déterministe).
   uint32_t seed = (seedEnv && *seedEnv)
                       ? (uint32_t)std::strtoul(seedEnv, nullptr, 10)
-                      : (uint32_t)std::hash<std::string>{}(sentence);
+                      : (uint32_t)std::hash<std::string>{}(sentence) ^ nonce;
   std::mt19937 rng(seed);
 
   // token retour-à-la-ligne : sert à FORCER la variante suivante si le modèle

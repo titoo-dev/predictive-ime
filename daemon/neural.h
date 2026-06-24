@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -33,7 +34,10 @@ public:
   // Up to n rephrasings of `sentence` (instruct generation, on-demand — seconds,
   // NOT per-keystroke). Uses the Qwen3 chat template + greedy generation, parses
   // one variant per line. Returns [] if not ready. Resets the nextWords KV cache.
-  std::vector<std::string> reformulate(const std::string &sentence, int n);
+  // mode : rephrase|formal|simple|short|correct|translate (cf reform_prompts.h).
+  // nonce : varie le seed pour « régénérer » (nouvelles variantes même phrase).
+  std::vector<std::string> reformulate(const std::string &sentence, int n,
+                                       const std::string &mode, uint32_t nonce);
 
 private:
   void *model_ = nullptr;       // llama_model*
