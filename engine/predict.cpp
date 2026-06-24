@@ -417,6 +417,40 @@ void vetoDaemon(const std::string &typed, const std::string &applied) {
   ::close(fd);
 }
 
+// Reformulation : on envoie la phrase sélectionnée, le daemon GÉNÈRE (plusieurs
+// secondes) 3 variantes. Timeout long (≠ prédiction par-frappe) — c'est une
+// action explicite, l'utilisateur attend. (Bloquant pour l'instant ; async = TODO.)
+std::vector<std::string> reformulateDaemon(const std::string &sentence) {
+  std::vector<std::string> out;
+  int fd = connectDaemon(/*timeoutMs=*/12000);
+  if (fd < 0)
+    return out;
+  json req;
+  req["reformulate"] = sentence;
+  req["n"] = 3;
+  std::string line = req.dump() + "\n";
+  if (::send(fd, line.data(), line.size(), MSG_NOSIGNAL) < 0) {
+    ::close(fd);
+    return out;
+  }
+  std::string buf;
+  char tmp[8192];
+  ssize_t n;
+  while ((n = ::read(fd, tmp, sizeof(tmp))) > 0) {
+    buf.append(tmp, n);
+    if (!buf.empty() && buf.back() == '\n')
+      break;
+  }
+  ::close(fd);
+  try {
+    json resp = json::parse(buf);
+    for (auto &v : resp.value("variants", json::array()))
+      out.push_back(v.get<std::string>());
+  } catch (...) {
+  }
+  return out;
+}
+
 // État par contexte d'entrée.
 struct PredictState : public fcitx::InputContextProperty {
   std::string buffer;                // mot en cours (préfixe, UTF-8)
@@ -431,6 +465,7 @@ struct PredictState : public fcitx::InputContextProperty {
   std::string lastAutoWord;          // le mot qui avait été appliqué
   uint32_t lastAutoCps = 0;          // points de code committés à effacer
   bool vetoAuto = false;             // l'utilisateur a refusé : Espace garde le littéral
+  bool reformulating = false;        // mode reformulation : cands = variantes de la sélection
 };
 
 class PredictCandidate : public fcitx::CandidateWord {
@@ -517,9 +552,43 @@ public:
                states.test(fcitx::KeyState::Super);
     uint32_t cp = fcitx::Key::keySymToUnicode(sym);
     if (::getenv("IME_DEBUG"))
-      fprintf(stderr, "[predict] sym=0x%x cp=0x%x buf='%s' nav=%d cands=%zu\n",
+      fprintf(stderr, "[predict] sym=0x%x cp=0x%x buf='%s' nav=%d cands=%zu reform=%d\n",
               sym, cp, state->buffer.c_str(), int(state->navigating),
-              state->cands.size());
+              state->cands.size(), int(state->reformulating));
+
+    // (R) MODE REFORMULATION : la barre montre 3 variantes de la sélection ;
+    // 1-3 ou Tab/flèches+Entrée REMPLACE la sélection, Échap annule. Toute autre
+    // touche quitte le mode et retombe dans la saisie normale.
+    if (state->reformulating) {
+      int n = (int)state->cands.size();
+      if (sym == FcitxKey_Escape) { exitReformulation(ic, state); return; }
+      if (!mod && cp >= '1' && cp <= '9' && int(cp - '1') < n) {
+        commitReformulation(ic, state, int(cp - '1'));
+        return;
+      }
+      if (!mod && (sym == FcitxKey_Tab || sym == FcitxKey_Right) && n) {
+        state->navIndex = (state->navIndex + 1) % n;
+        setReformulationCandidates(ic, state);
+        return;
+      }
+      if (!mod && (sym == FcitxKey_ISO_Left_Tab || sym == FcitxKey_Left) && n) {
+        state->navIndex = (state->navIndex - 1 + n) % n;
+        setReformulationCandidates(ic, state);
+        return;
+      }
+      if (!mod && (sym == FcitxKey_Return || sym == FcitxKey_KP_Enter)) {
+        commitReformulation(ic, state, state->navIndex);
+        return;
+      }
+      exitReformulation(ic, state); // autre touche → on sort et on continue
+    }
+
+    // (R-trig) DÉCLENCHEUR : Ctrl+Alt+R sur une SÉLECTION → 3 reformulations.
+    if (states.test(fcitx::KeyState::Ctrl) &&
+        states.test(fcitx::KeyState::Alt) && sym == FcitxKey_r) {
+      enterReformulation(ic, state); // si pas de sélection/variantes : no-op
+      return;                        // on consomme le raccourci dans tous les cas
+    }
 
     // (0) Fenêtre de REVERT : Backspace IMMÉDIATEMENT après une
     // auto-application efface le mot appliqué, restaure le littéral tapé et
@@ -1056,6 +1125,49 @@ private:
     setCandidates(ic, state);
     ic->updatePreedit();
     ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
+  }
+
+  // --- Reformulation : sélection → 3 variantes LLM, le choix remplace ---
+  void setReformulationCandidates(fcitx::InputContext *ic, PredictState *state) {
+    auto list = std::make_unique<PredictCandidateList>();
+    for (auto &v : state->cands)
+      list->append(v, /*autoApply=*/false); // verbatim (phrases) — pas d'applyCase
+    list->setCursorIndex(state->navIndex);   // variante surlignée
+    ic->inputPanel().setCandidateList(std::move(list));
+    ic->updatePreedit();
+    ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
+  }
+
+  void enterReformulation(fcitx::InputContext *ic, PredictState *state) {
+    if (!ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText) ||
+        !ic->surroundingText().isValid())
+      return; // l'app n'expose pas la sélection (ex. certains Electron)
+    std::string sel = ic->surroundingText().selectedText();
+    if (sel.empty())
+      return; // rien de sélectionné
+    auto variants = reformulateDaemon(sel); // BLOQUANT quelques secondes (génération)
+    if (variants.empty())
+      return;
+    state->cands = std::move(variants);
+    state->navIndex = 0;
+    state->navigating = true;
+    state->reformulating = true;
+    setReformulationCandidates(ic, state);
+  }
+
+  void exitReformulation(fcitx::InputContext *ic, PredictState *state) {
+    state->reformulating = false;
+    state->navigating = false;
+    state->cands.clear();
+    ic->inputPanel().reset();
+    ic->updatePreedit();
+    ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
+  }
+
+  void commitReformulation(fcitx::InputContext *ic, PredictState *state, int idx) {
+    if (idx >= 0 && idx < (int)state->cands.size())
+      ic->commitString(state->cands[idx]); // remplace la sélection (commit-over-selection)
+    exitReformulation(ic, state);
   }
 
   void setCandidates(fcitx::InputContext *ic, PredictState *state) {
