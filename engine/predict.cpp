@@ -1150,12 +1150,14 @@ private:
   }
 
   void enterReformulation(fcitx::InputContext *ic, PredictState *state) {
-    if (!ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText) ||
-        !ic->surroundingText().isValid())
-      return; // l'app n'expose pas la sélection (ex. certains Electron)
-    std::string sel = ic->surroundingText().selectedText();
-    if (sel.empty())
-      return; // rien de sélectionné
+    bool cap = ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText);
+    bool valid = cap && ic->surroundingText().isValid();
+    std::string sel = valid ? ic->surroundingText().selectedText() : std::string{};
+    if (::getenv("IME_DEBUG"))
+      fprintf(stderr, "[reform-enter] cap=%d valid=%d selLen=%zu sel='%.60s'\n",
+              int(cap), int(valid), sel.size(), sel.c_str());
+    if (!cap || !valid || sel.empty())
+      return; // pas de SurroundingText / rien de sélectionné dans l'app
     // Feedback IMMÉDIAT : la génération (~qqs s) NE doit PAS geler le clavier.
     // On affiche un placeholder, puis on génère dans un THREAD et on remet le
     // résultat sur le thread principal de fcitx via l'eventDispatcher.
