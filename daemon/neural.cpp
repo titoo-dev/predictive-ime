@@ -124,15 +124,15 @@ std::vector<std::string> NeuralPredictor::reformulate(const std::string &sentenc
   llama_memory_t mem = (llama_memory_t)mem_;
 
   // Prompt chat Qwen3. "/no_think" coupe le mode raisonnement → sortie directe.
-  std::string sys =
-      "Tu reformules des phrases (français ou anglais). Donne EXACTEMENT " +
-      std::to_string(n) +
-      " reformulations differentes et naturelles de la phrase de l'utilisateur, "
-      "une par ligne, sans numerotation, sans guillemets, sans commentaire, "
-      "meme langue que l'entree.";
+  std::string sys = "Reformule la phrase en " + std::to_string(n) +
+                    " variantes naturelles, une par ligne, meme langue, "
+                    "sans numero ni commentaire.";
+  // Bloc <think></think> PRÉ-REMPLI dans le tour assistant = méthode officielle
+  // Qwen3 pour DÉSACTIVER le raisonnement → sortie directe (sinon le modèle
+  // "pense" ~200 tokens avant de répondre = 10-15 s de génération).
   std::string prompt = "<|im_start|>system\n" + sys + "<|im_end|>\n" +
-                       "<|im_start|>user\n" + sentence + " /no_think<|im_end|>\n" +
-                       "<|im_start|>assistant\n";
+                       "<|im_start|>user\n" + sentence + "<|im_end|>\n" +
+                       "<|im_start|>assistant\n<think>\n\n</think>\n\n";
 
   // génération : KV propre (et on invalide le cache incrémental de nextWords)
   llama_memory_clear(mem, true);
@@ -145,18 +145,27 @@ std::vector<std::string> NeuralPredictor::reformulate(const std::string &sentenc
     if (llama_decode(c, b) != 0) { llama_memory_clear(mem, true); return {}; }
   }
 
+  // Génération greedy, BORNÉE : on s'arrête à EOG, ou dès qu'on a assez de lignes
+  // (n variantes), ou au plafond de tokens. Évite les générations qui s'emballent.
   std::string out;
-  const int maxTok = 256;
+  const int maxTok = 160;
+  int newlines = 0, gen = 0;
   for (int i = 0; i < maxTok; ++i) {
     float *lg = llama_get_logits_ith(c, -1);
     if (!lg) break;
     int best = 0; float bv = lg[0];
     for (int v = 1; v < n_vocab_; ++v) if (lg[v] > bv) { bv = lg[v]; best = v; }
     if (llama_vocab_is_eog(vo, best)) break;
-    out += piece_(vo, best);
+    std::string p = piece_(vo, best);
+    out += p;
+    ++gen;
+    for (char ch : p) if (ch == '\n') ++newlines;
+    if (newlines > n) break; // n lignes complètes obtenues → assez
     llama_batch bb = llama_batch_get_one(&best, 1);
     if (llama_decode(c, bb) != 0) break;
   }
+  if (getenv("IME_DEBUG"))
+    fprintf(stderr, "[reformulate] gen=%d tok, nl=%d, raw=\"%.300s\"\n", gen, newlines, out.c_str());
   // la génération a pollué le KV → reset pour les prochains nextWords
   llama_memory_clear(mem, true);
   prev_.clear();

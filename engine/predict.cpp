@@ -19,6 +19,7 @@
 #include <fcitx-utils/capabilityflags.h>
 #include <fcitx-utils/key.h>
 #include <fcitx-utils/keysym.h>
+#include <fcitx-utils/eventdispatcher.h>
 #include <fcitx/addonfactory.h>
 #include <fcitx/addonmanager.h>
 #include <fcitx/candidatelist.h>
@@ -37,6 +38,7 @@
 #include <fstream>
 #include <functional>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <fcntl.h>
@@ -466,6 +468,7 @@ struct PredictState : public fcitx::InputContextProperty {
   uint32_t lastAutoCps = 0;          // points de code committés à effacer
   bool vetoAuto = false;             // l'utilisateur a refusé : Espace garde le littéral
   bool reformulating = false;        // mode reformulation : cands = variantes de la sélection
+  bool reformLoading = false;        // génération en cours (placeholder « ⟳ »)
 };
 
 class PredictCandidate : public fcitx::CandidateWord {
@@ -564,8 +567,9 @@ public:
     // 1-3 ou Tab/flèches+Entrée REMPLACE la sélection, Échap annule. Toute autre
     // touche quitte le mode et retombe dans la saisie normale.
     if (state->reformulating) {
-      int n = (int)state->cands.size();
       if (sym == FcitxKey_Escape) { exitReformulation(ic, state); return; }
+      if (state->reformLoading) return; // génération en cours → Échap pour annuler
+      int n = (int)state->cands.size();
       if (!mod && cp >= '1' && cp <= '9' && int(cp - '1') < n) {
         commitReformulation(ic, state, int(cp - '1'));
         return;
@@ -1152,18 +1156,44 @@ private:
     std::string sel = ic->surroundingText().selectedText();
     if (sel.empty())
       return; // rien de sélectionné
-    auto variants = reformulateDaemon(sel); // BLOQUANT quelques secondes (génération)
-    if (variants.empty())
-      return;
-    state->cands = std::move(variants);
-    state->navIndex = 0;
-    state->navigating = true;
+    // Feedback IMMÉDIAT : la génération (~qqs s) NE doit PAS geler le clavier.
+    // On affiche un placeholder, puis on génère dans un THREAD et on remet le
+    // résultat sur le thread principal de fcitx via l'eventDispatcher.
     state->reformulating = true;
+    state->reformLoading = true;
+    state->navigating = false;
+    state->navIndex = 0;
+    state->cands = {"⟳ Reformulation…"};
     setReformulationCandidates(ic, state);
+
+    auto ref = ic->watch();
+    std::string sentence = sel;
+    std::thread([this, ref, sentence]() mutable {
+      std::vector<std::string> variants = reformulateDaemon(sentence); // bloque DANS le thread
+      instance_->eventDispatcher().scheduleWithContext(
+          ref, [this, ref, variants]() {
+            fcitx::InputContext *ic = ref.get();
+            if (!ic)
+              return;
+            auto *st = ic->propertyFor(&factory_);
+            if (!st->reformulating)
+              return; // l'utilisateur a annulé entre-temps
+            st->reformLoading = false;
+            if (variants.empty()) {
+              exitReformulation(ic, st);
+              return;
+            }
+            st->cands = variants;
+            st->navIndex = 0;
+            st->navigating = true;
+            setReformulationCandidates(ic, st);
+          });
+    }).detach();
   }
 
   void exitReformulation(fcitx::InputContext *ic, PredictState *state) {
     state->reformulating = false;
+    state->reformLoading = false;
     state->navigating = false;
     state->cands.clear();
     ic->inputPanel().reset();
