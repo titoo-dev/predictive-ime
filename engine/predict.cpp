@@ -499,10 +499,22 @@ public:
   void append(std::string text, bool autoApply) {
     cands_.push_back(
         std::make_unique<PredictCandidate>(std::move(text), autoApply));
+    labels_.emplace_back(); // pas de label (chips de mots/emoji)
+  }
+  // Candidat AVEC label (numéro) : mode reformulation → l'UI passe en liste
+  // verticale numérotée (le label non vide est le signal lu par qmlui).
+  void appendLabeled(std::string text, const std::string &label) {
+    cands_.push_back(
+        std::make_unique<PredictCandidate>(std::move(text), /*autoApply=*/false));
+    fcitx::Text t;
+    t.append(label);
+    labels_.push_back(std::move(t));
   }
   void setCursorIndex(int i) { cursor_ = i; }
 
-  const fcitx::Text &label(int) const override { return emptyLabel_; }
+  const fcitx::Text &label(int idx) const override {
+    return (idx >= 0 && idx < (int)labels_.size()) ? labels_[idx] : emptyLabel_;
+  }
   const fcitx::CandidateWord &candidate(int idx) const override {
     return *cands_[idx];
   }
@@ -514,6 +526,7 @@ public:
 
 private:
   std::vector<std::unique_ptr<PredictCandidate>> cands_;
+  std::vector<fcitx::Text> labels_;
   fcitx::Text emptyLabel_;
   int cursor_ = -1;
 };
@@ -1141,9 +1154,18 @@ private:
   // --- Reformulation : sélection → 3 variantes LLM, le choix remplace ---
   void setReformulationCandidates(fcitx::InputContext *ic, PredictState *state) {
     auto list = std::make_unique<PredictCandidateList>();
-    for (auto &v : state->cands)
-      list->append(v, /*autoApply=*/false); // verbatim (phrases) — pas d'applyCase
-    list->setCursorIndex(state->navIndex);   // variante surlignée
+    // Pendant le chargement, un seul candidat « ⟳ … » SANS numéro (l'UI le
+    // détecte → spinner). Sinon, chaque variante est NUMÉROTÉE (1,2,3…) : le
+    // label non vide fait basculer l'UI en liste verticale lisible.
+    if (state->reformLoading) {
+      for (auto &v : state->cands)
+        list->append(v, /*autoApply=*/false);
+    } else {
+      int i = 1;
+      for (auto &v : state->cands)
+        list->appendLabeled(v, std::to_string(i++)); // verbatim (phrases)
+    }
+    list->setCursorIndex(state->navIndex); // variante surlignée
     ic->inputPanel().setCandidateList(std::move(list));
     ic->updatePreedit();
     ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);

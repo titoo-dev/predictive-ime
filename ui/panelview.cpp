@@ -16,109 +16,243 @@
 #include <QQuickWindow>
 #include <QSGRendererInterface>
 
-// QML : barre de chips horizontales COMPACTE (dense, façon Gboard) —
-// surface arrondie + liseré, PILL accent qui GLISSE entre les candidats
-// (hlPos flottant animé côté C++), apparition fade + slide-up (appear 0→1).
-// Les emojis (picker ':') sont détectés et rendus plus grands avec la fonte
-// couleur. Couleurs via la context property `colors` (matugen, cf qmlui.cpp).
+// QML : DEUX rendus dans une même surface, choisis par `listMode` —
+//  • COMPACT (mots / emoji) : barre de chips horizontales dense (façon Gboard),
+//    PILL accent qui GLISSE entre les candidats (hlPos flottant animé en C++).
+//  • LISTE (reformulation) : lignes verticales NUMÉROTÉES pleine largeur, texte
+//    qui passe à la ligne (les variantes sont des phrases — illisibles élidées à
+//    190px). Header de mode + ligne d'attente avec spinner (`spin`) quand
+//    `loading`. Apparition fade + slide-up commune (appear 0→1).
+// Couleurs via la context property `colors` (matugen, cf qmlui.cpp).
 static const char *kPanelQml = R"QML(
 import QtQuick
 
 Item {
     id: root
-    implicitWidth: bar.width + 10
-    implicitHeight: bar.height + 10
+    implicitWidth: card.width + 10
+    implicitHeight: card.height + 10
 
     Rectangle {
-        id: bar
+        id: card
         x: 5
         y: 5 + (1 - appear) * 6        // slide-up à l'apparition
         opacity: appear
-        width: row.width + 18
-        height: row.height + 8         // 1 ligne = 34 ; grille emoji = 3 lignes
-        radius: 11
+        radius: listMode ? 14 : 11
         color: colors.surface
         border.width: 1
         border.color: colors.outline
+        width:  listMode ? listLayout.width  : compact.width
+        height: listMode ? listLayout.height : compact.height
 
-        // indicateur de mode : accent = mot en cours (composition),
-        // discret = barre passive (mot-suivant / amorce)
-        Rectangle {
-            x: 5
-            width: 3
-            height: 12
-            radius: 1.5
-            anchors.verticalCenter: parent.verticalCenter
-            color: composing ? colors.accent : colors.outline
+        // ===================== COMPACT (mots + emoji) =====================
+        Item {
+            id: compact
+            visible: !listMode
+            width: row.width + 18
+            height: row.height + 8     // 1 ligne = 34 ; grille emoji = 3 lignes
+
+            // indicateur de mode : accent = mot en cours (composition),
+            // discret = barre passive (mot-suivant / amorce)
+            Rectangle {
+                x: 5
+                width: 3
+                height: 12
+                radius: 1.5
+                anchors.verticalCenter: parent.verticalCenter
+                color: composing ? colors.accent : colors.outline
+            }
+
+            // pill de surlignage : interpole position/taille entre les chips —
+            // en x ET en y (la grille emoji a plusieurs lignes)
+            Rectangle {
+                id: pill
+                visible: hlPos >= 0 && rep.count > 0
+                property real p: Math.max(0, Math.min(hlPos, rep.count - 1))
+                property int i0: Math.floor(p)
+                property real f: p - i0
+                property Item a: rep.count > 0 ? rep.itemAt(i0) : null
+                property Item b: rep.count > 0
+                    ? rep.itemAt(Math.min(i0 + 1, rep.count - 1)) : null
+                x: a ? row.x + a.x + (b ? (b.x - a.x) * f : 0) : 0
+                y: a ? row.y + a.y + (b ? (b.y - a.y) * f : 0) : 0
+                width: a ? a.width + (b ? (b.width - a.width) * f : 0) : 0
+                height: 26
+                radius: 8
+                color: colors.accent
+            }
+
+            Grid {
+                id: row
+                x: 12
+                spacing: 1
+                anchors.verticalCenter: parent.verticalCenter
+                // grille emoji : 8 colonnes ; sinon une seule ligne
+                columns: gridMode ? 8 : Math.max(1, rep.count)
+                Repeater {
+                    id: rep
+                    model: listMode ? [] : candidates
+                    delegate: Item {
+                        required property int index
+                        required property string modelData
+                        // décision C++ (cf looksEmoji) : l'heuristique « 1er
+                        // point de code > 0x2100 » ratait les keycaps (1️⃣), ©️…
+                        readonly property bool emoji:
+                            index < emojiMark.length && emojiMark[index] === true
+                        readonly property bool isAuto:
+                            index < autoMark.length && autoMark[index] === true
+                        width: gridMode ? 30 : label.width + 16
+                        height: 26
+                        // liseré accent = « l'Espace appliquera CE candidat »
+                        Rectangle {
+                            anchors.fill: parent
+                            radius: 8
+                            color: "transparent"
+                            border.width: 1
+                            border.color: colors.accent
+                            opacity: 0.9
+                            visible: isAuto && hlPos < 0
+                        }
+                        Text {
+                            id: label
+                            anchors.centerIn: parent
+                            text: modelData
+                            width: Math.min(implicitWidth, 190)
+                            elide: Text.ElideRight
+                            color: hlPos >= 0 && index === Math.round(hlPos)
+                                   ? colors.onAccent : colors.onSurface
+                            font.pixelSize: emoji ? 17 : 14
+                            // NB: font.families (plural, QStringList) is NOT a
+                            // QML-assignable property of the font value type — it
+                            // exists only on the C++ QFont. Qt 6.11's QML engine
+                            // rejects it ("Cannot assign to non-existent property
+                            // families"), so the whole panel component fails to
+                            // load and keystrokes get swallowed. Use font.family
+                            // (string); glyph fallback is fontconfig's job.
+                            font.family: emoji ? "Noto Color Emoji" : "Maple Mono NF"
+                        }
+                    }
+                }
+            }
         }
 
-        // pill de surlignage : interpole position/taille entre les chips —
-        // en x ET en y (la grille emoji a plusieurs lignes)
-        Rectangle {
-            id: pill
-            visible: hlPos >= 0 && rep.count > 0
-            property real p: Math.max(0, Math.min(hlPos, rep.count - 1))
-            property int i0: Math.floor(p)
-            property real f: p - i0
-            property Item a: rep.count > 0 ? rep.itemAt(i0) : null
-            property Item b: rep.count > 0
-                ? rep.itemAt(Math.min(i0 + 1, rep.count - 1)) : null
-            x: a ? row.x + a.x + (b ? (b.x - a.x) * f : 0) : 0
-            y: a ? row.y + a.y + (b ? (b.y - a.y) * f : 0) : 0
-            width: a ? a.width + (b ? (b.width - a.width) * f : 0) : 0
-            height: 26
-            radius: 8
-            color: colors.accent
-        }
+        // ===================== LISTE (reformulation) =====================
+        Column {
+            id: listLayout
+            visible: listMode
+            width: 380
+            topPadding: 7
+            bottomPadding: 8
+            spacing: 2
 
-        Grid {
-            id: row
-            x: 12
-            spacing: 1
-            anchors.verticalCenter: parent.verticalCenter
-            // grille emoji : 8 colonnes ; sinon une seule ligne
-            columns: gridMode ? 8 : Math.max(1, rep.count)
+            // header : titre du mode + (si chargement) spinner qui tourne
+            Item {
+                width: listLayout.width
+                height: 22
+                Rectangle {                       // pastille accent du mode
+                    id: dot
+                    x: 12
+                    width: 6; height: 6; radius: 3
+                    anchors.verticalCenter: parent.verticalCenter
+                    color: colors.accent
+                }
+                Text {
+                    anchors.left: dot.right
+                    anchors.leftMargin: 8
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: loading
+                          ? "Reformulation…"
+                          : "Reformuler · 1–" + candidates.length + " / ↹ / ⏎"
+                    color: colors.onSurface
+                    opacity: 0.65
+                    font.pixelSize: 11
+                    font.family: "Maple Mono NF"
+                }
+                Text {                            // spinner (rotation pilotée C++)
+                    visible: loading
+                    anchors.right: parent.right
+                    anchors.rightMargin: 13
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: "⟳"
+                    color: colors.accent
+                    font.pixelSize: 14
+                    font.family: "Maple Mono NF"
+                    transformOrigin: Item.Center
+                    rotation: spin
+                }
+            }
+
+            Rectangle {                           // séparateur
+                width: listLayout.width
+                height: 1
+                opacity: 0.5
+                color: colors.outline
+            }
+
+            // ligne d'attente pendant la génération (placeholder discret)
+            Item {
+                visible: loading
+                width: listLayout.width
+                height: 30
+                Text {
+                    x: 14
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: "génération des variantes…"
+                    color: colors.onSurface
+                    opacity: 0.5
+                    font.pixelSize: 13
+                    font.family: "Maple Mono NF"
+                }
+            }
+
+            // les variantes, numérotées, pleine largeur, multi-lignes
             Repeater {
-                id: rep
-                model: candidates
+                id: lrep
+                model: loading ? [] : candidates
                 delegate: Item {
                     required property int index
                     required property string modelData
-                    // décision C++ (cf looksEmoji) : l'heuristique « 1er point
-                    // de code > 0x2100 » ratait les keycaps (1️⃣), ©️, ‼️…
-                    readonly property bool emoji:
-                        index < emojiMark.length && emojiMark[index] === true
-                    readonly property bool isAuto:
-                        index < autoMark.length && autoMark[index] === true
-                    width: gridMode ? 30 : label.width + 16
-                    height: 26
-                    // liseré accent = « l'Espace appliquera CE candidat »
-                    Rectangle {
+                    readonly property bool sel: hlPos >= 0
+                        && index === Math.round(hlPos)
+                    width: listLayout.width
+                    height: Math.max(30, vtxt.implicitHeight + 13)
+
+                    Rectangle {                   // surlignage pleine ligne
                         anchors.fill: parent
+                        anchors.leftMargin: 5
+                        anchors.rightMargin: 5
+                        anchors.topMargin: 1
+                        anchors.bottomMargin: 1
                         radius: 8
-                        color: "transparent"
-                        border.width: 1
-                        border.color: colors.accent
-                        opacity: 0.9
-                        visible: isAuto && hlPos < 0
+                        color: sel ? colors.accent : "transparent"
+                    }
+                    Rectangle {                   // badge numéro
+                        id: badge
+                        x: 11
+                        width: 18; height: 18; radius: 9
+                        anchors.verticalCenter: parent.verticalCenter
+                        color: sel ? colors.onAccent : colors.accent
+                        opacity: sel ? 0.22 : 0.16
                     }
                     Text {
-                        id: label
-                        anchors.centerIn: parent
+                        anchors.centerIn: badge
+                        text: (index < labels.length && labels[index].length)
+                              ? labels[index] : (index + 1)
+                        color: sel ? colors.onAccent : colors.accent
+                        font.pixelSize: 11
+                        font.family: "Maple Mono NF"
+                    }
+                    Text {
+                        id: vtxt
+                        anchors.left: badge.right
+                        anchors.leftMargin: 10
+                        anchors.right: parent.right
+                        anchors.rightMargin: 13
+                        anchors.verticalCenter: parent.verticalCenter
                         text: modelData
-                        width: Math.min(implicitWidth, 190)
-                        elide: Text.ElideRight
-                        color: hlPos >= 0 && index === Math.round(hlPos)
-                               ? colors.onAccent : colors.onSurface
-                        font.pixelSize: emoji ? 17 : 14
-                        // NB: font.families (plural, QStringList) is NOT a
-                        // QML-assignable property of the font value type — it
-                        // exists only on the C++ QFont. Qt 6.11's QML engine
-                        // rejects it ("Cannot assign to non-existent property
-                        // families"), so the whole panel component fails to load
-                        // and keystrokes get swallowed. Use font.family (string);
-                        // glyph fallback is handled by fontconfig anyway.
-                        font.family: emoji ? "Noto Color Emoji" : "Maple Mono NF"
+                        wrapMode: Text.WordWrap
+                        color: sel ? colors.onAccent : colors.onSurface
+                        font.pixelSize: 13
+                        font.family: "Maple Mono NF"
                     }
                 }
             }
@@ -310,6 +444,10 @@ PanelView::PanelView() {
     ctx->setContextProperty("emojiMark", QVariantList{});
     ctx->setContextProperty("composing", false);
     ctx->setContextProperty("gridMode", false);
+    ctx->setContextProperty("labels", QStringList{});
+    ctx->setContextProperty("listMode", false);
+    ctx->setContextProperty("loading", false);
+    ctx->setContextProperty("spin", 0.0);
 
     component_ = new QQmlComponent(view_->engine());
     component_->setData(kPanelQml, QUrl());
@@ -336,8 +474,11 @@ void PanelView::setColors(const QVariantMap &colors) {
 
 void PanelView::update(const QStringList &candidates, int highlight,
                        const QVariantList &autoMark, bool composing,
-                       bool grid) {
+                       bool grid, const QStringList &labels, bool listMode,
+                       bool loading) {
     auto now = Clock::now();
+    if (loading && !loading_)
+        spinStart_ = now; // (re)démarre la rotation du spinner
     if (!shown_) {
         // si un fondu de fermeture court encore, on repart de l'opacité
         // COURANTE (durée au prorata du chemin restant) — sinon la barre
@@ -365,6 +506,9 @@ void PanelView::update(const QStringList &candidates, int highlight,
     highlight_ = highlight;
     autoMark_ = autoMark;
     grid_ = grid;
+    labels_ = labels;
+    listMode_ = listMode;
+    loading_ = loading;
 }
 
 int PanelView::hideGraceMs() const { return animMs(90) + 80; }
@@ -389,6 +533,9 @@ void PanelView::hidden() {
     highlight_ = -1;
     cands_.clear();
     emojiMark_.clear();
+    labels_.clear();
+    listMode_ = false;
+    loading_ = false;
     hl_ = {};
     hl_.to = -1.0;
 }
@@ -397,6 +544,10 @@ bool PanelView::animating() const {
     auto now = Clock::now();
     if (hiding_)
         return !hide_.done(now);
+    // le spinner de chargement tourne en continu → garder la boucle de frames
+    // vivante tant que la génération n'est pas finie.
+    if (shown_ && loading_)
+        return true;
     return shown_ && (!appear_.done(now) || !hl_.done(now));
 }
 
@@ -421,6 +572,17 @@ QImage PanelView::render() {
     ctx->setContextProperty("emojiMark", emojiMark_);
     ctx->setContextProperty("composing", composing_);
     ctx->setContextProperty("gridMode", grid_);
+    ctx->setContextProperty("labels", labels_);
+    ctx->setContextProperty("listMode", listMode_);
+    ctx->setContextProperty("loading", loading_);
+    // rotation du spinner : ~1 tour / 0,9 s tant que loading_
+    double spin = 0.0;
+    if (loading_) {
+        double ms = std::chrono::duration<double, std::milli>(now - spinStart_)
+                        .count();
+        spin = std::fmod(ms / 900.0 * 360.0, 360.0);
+    }
+    ctx->setContextProperty("spin", spin);
     QCoreApplication::processEvents(); // laisse bindings + resize se résoudre
     QImage img = view_->grabWindow();
     return img.convertToFormat(QImage::Format_ARGB32_Premultiplied);

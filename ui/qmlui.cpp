@@ -162,6 +162,7 @@ private:
         // (composition si un préedit client est actif)
         auto list = ic->inputPanel().candidateList();
         QStringList cands;
+        QStringList labels;
         QVariantList autoMark;
         int highlight = -1;
         if (list) {
@@ -169,6 +170,9 @@ private:
             for (int i = 0; i < list->size(); i++) {
                 const fcitx::Text &t = list->candidate(i).text();
                 cands << QString::fromStdString(t.toString());
+                // label par candidat (numéro 1,2,3… posé par l'engine en mode
+                // reformulation ; vide pour les chips de mots/emoji).
+                labels << QString::fromStdString(list->label(i).toString());
                 bool bold = false;
                 for (size_t s = 0; s < t.size(); s++) {
                     if (t.formatAt(s).test(TextFormatFlag::Bold)) {
@@ -182,7 +186,20 @@ private:
         std::string pre = ic->inputPanel().clientPreedit().toString();
         bool composing = !pre.empty();
         bool grid = !pre.empty() && pre[0] == ':'; // mode emoji → grille
-        view_->update(cands, highlight, autoMark, composing, grid);
+        // Mode LISTE (reformulation) : des labels numériques sont posés sur les
+        // candidats. Le placeholder de génération est un candidat unique
+        // commençant par ⟳ (U+27F3) → mode liste + état « loading ».
+        bool listMode = false;
+        for (const QString &l : labels)
+            if (!l.isEmpty()) {
+                listMode = true;
+                break;
+            }
+        bool loading = cands.size() == 1 && cands[0].startsWith(QChar(0x27F3));
+        if (loading)
+            listMode = true;
+        view_->update(cands, highlight, autoMark, composing, grid, labels,
+                      listMode, loading);
         if (!renderFrame())
             return;
         mapped_ = true;

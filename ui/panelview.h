@@ -39,9 +39,15 @@ public:
     // le surlignage a bougé (mêmes candidats). `autoMark[i]` dit si le
     // candidat i sera appliqué par l'Espace (liseré accent) ; `composing` :
     // un mot est en cours (indicateur de mode).
+    // MODE LISTE (`listMode`) : rendu vertical, numéroté, pleine largeur, avec
+    // retour à la ligne — pour la reformulation (les variantes sont des PHRASES,
+    // illisibles dans les chips horizontales élidées). `labels[i]` = numéro
+    // affiché ; `loading` = génération en cours → ligne d'attente + spinner
+    // animé (la rotation tourne tant que `loading`).
     void update(const QStringList &candidates, int highlight,
                 const QVariantList &autoMark = {}, bool composing = false,
-                bool grid = false);
+                bool grid = false, const QStringList &labels = {},
+                bool listMode = false, bool loading = false);
     // Démarre le FONDU de fermeture ; false si la barre n'était pas visible.
     // Pendant le fondu, animating() reste vrai ; à la fin hideDone() == true
     // et l'appelant démappe la surface.
@@ -84,4 +90,8 @@ private:
     QVariantList emojiMark_;  // candidat emoji (fonte couleur), par index
     bool composing_ = false;  // mot en cours (indicateur de mode)
     bool grid_ = false;       // mode emoji : grille 8 colonnes
+    QStringList labels_;      // mode liste : numéro affiché par candidat
+    bool listMode_ = false;   // rendu liste verticale (reformulation)
+    bool loading_ = false;    // génération en cours → spinner animé
+    Clock::time_point spinStart_{}; // origine de la rotation du spinner
 };
