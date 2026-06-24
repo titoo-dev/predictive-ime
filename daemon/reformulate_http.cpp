@@ -75,16 +75,31 @@ std::string trimmed(const std::string &s) {
   return s.substr(a, z - a + 1);
 }
 
-// Clé API : $GROQ_API_KEY sinon <cfgDir>/groq.key (fichier 600). Vide si absente.
+// Clé API (vide si absente). Ordre : $GROQ_API_KEY, puis le DATA dir
+// (~/.local/share/ime-predictord/groq.key — non versionné, comme user.log),
+// puis <cfgDir>/groq.key en dernier recours. IMPORTANT : le cfgDir est souvent
+// un symlink stow vers un dépôt git → on n'y met PAS le secret par défaut.
 std::string readKey(const std::string &cfgDir) {
   const char *env = getenv("GROQ_API_KEY");
   if (env && *env) return trimmed(env);
-  if (cfgDir.empty()) return {};
-  std::ifstream f(cfgDir + "/groq.key");
-  if (!f) return {};
-  std::stringstream ss;
-  ss << f.rdbuf();
-  return trimmed(ss.str());
+  std::vector<std::string> paths;
+  const char *xdgData = getenv("XDG_DATA_HOME");
+  const char *home = getenv("HOME");
+  if (xdgData && *xdgData)
+    paths.push_back(std::string(xdgData) + "/ime-predictord/groq.key");
+  else if (home)
+    paths.push_back(std::string(home) + "/.local/share/ime-predictord/groq.key");
+  if (!cfgDir.empty())
+    paths.push_back(cfgDir + "/groq.key"); // dernier recours (à gitignore)
+  for (const auto &p : paths) {
+    std::ifstream f(p);
+    if (!f) continue;
+    std::stringstream ss;
+    ss << f.rdbuf();
+    std::string k = trimmed(ss.str());
+    if (!k.empty()) return k;
+  }
+  return {};
 }
 
 size_t writeCb(char *ptr, size_t size, size_t nmemb, void *userdata) {
