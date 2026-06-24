@@ -419,17 +419,24 @@ void vetoDaemon(const std::string &typed, const std::string &applied) {
   ::close(fd);
 }
 
-// Reformulation : on envoie la phrase sélectionnée, le daemon GÉNÈRE (plusieurs
-// secondes) 3 variantes. Timeout long (≠ prédiction par-frappe) — c'est une
-// action explicite, l'utilisateur attend. (Bloquant pour l'instant ; async = TODO.)
-std::vector<std::string> reformulateDaemon(const std::string &sentence) {
-  std::vector<std::string> out;
+// Reformulation : on envoie le texte + le MODE + un NONCE (pour régénérer), le
+// daemon GÉNÈRE les variantes (Groq <1s, ou neural local quelques s). Timeout
+// long (≠ prédiction par-frappe) — action explicite, exécutée dans un thread.
+struct ReformResult {
+  std::vector<std::string> variants;
+  std::string source; // "groq" / "local" / "none" → badge du header
+};
+ReformResult reformulateDaemon(const std::string &sentence,
+                               const std::string &mode, uint32_t nonce) {
+  ReformResult out;
   int fd = connectDaemon(/*timeoutMs=*/12000);
   if (fd < 0)
     return out;
   json req;
   req["reformulate"] = sentence;
   req["n"] = 3;
+  req["mode"] = mode;
+  req["nonce"] = nonce;
   std::string line = req.dump() + "\n";
   if (::send(fd, line.data(), line.size(), MSG_NOSIGNAL) < 0) {
     ::close(fd);
@@ -447,7 +454,8 @@ std::vector<std::string> reformulateDaemon(const std::string &sentence) {
   try {
     json resp = json::parse(buf);
     for (auto &v : resp.value("variants", json::array()))
-      out.push_back(v.get<std::string>());
+      out.variants.push_back(v.get<std::string>());
+    out.source = resp.value("source", std::string{"none"});
   } catch (...) {
   }
   return out;
@@ -469,6 +477,14 @@ struct PredictState : public fcitx::InputContextProperty {
   bool vetoAuto = false;             // l'utilisateur a refusé : Espace garde le littéral
   bool reformulating = false;        // mode reformulation : cands = variantes de la sélection
   bool reformLoading = false;        // génération en cours (placeholder « ⟳ »)
+  std::string reformText;            // texte source (sélection / surrounding) — regen + revert
+  int reformMode = 0;                // index dans kReformModes (←/→ pour changer)
+  uint32_t reformNonce = 0;          // varie le seed → « régénérer » (Ctrl+Alt+R)
+  uint32_t reformGen = 0;            // n° de génération : ignore les résultats obsolètes
+  std::string reformSource;          // "groq"/"local"/"none" → badge du header
+  // Revert (Backspace juste après remplacement → restaure l'original). One-shot.
+  std::string reformRevertOrig;
+  uint32_t reformRevertCps = 0;      // points de code de la variante committée à effacer
 };
 
 class PredictCandidate : public fcitx::CandidateWord {
@@ -530,6 +546,16 @@ private:
   fcitx::Text emptyLabel_;
   int cursor_ = -1;
 };
+
+// Modes de reformulation : clé envoyée au daemon (cf reform_prompts.h) + libellé
+// affiché dans le header de la bulle. ←/→ cyclent dans cette liste.
+struct ReformMode { const char *key; const char *label; };
+static const ReformMode kReformModes[] = {
+    {"rephrase", "Reformuler"}, {"formal", "Formel"}, {"simple", "Simple"},
+    {"short", "Court"},         {"correct", "Corriger"}, {"translate", "Traduire"},
+};
+static const int kNumReformModes =
+    int(sizeof(kReformModes) / sizeof(kReformModes[0]));
 
 } // namespace
 
@@ -593,22 +619,39 @@ public:
         event.filterAndAccept();
         return;
       }
+      // RÉGÉNÉRER : re-presser Ctrl+Alt+R → nouvelles variantes (même mode).
+      if (states.test(fcitx::KeyState::Ctrl) &&
+          states.test(fcitx::KeyState::Alt) &&
+          (sym == FcitxKey_r || sym == FcitxKey_R)) {
+        state->reformNonce++;
+        runReformulation(ic, state);
+        event.filterAndAccept();
+        return;
+      }
       int n = (int)state->cands.size();
       if (!mod && cp >= '1' && cp <= '9' && int(cp - '1') < n) {
         commitReformulation(ic, state, int(cp - '1'));
         event.filterAndAccept();
         return;
       }
-      // bulle VERTICALE → ↓ = suivant, ↑ = précédent (Tab/→ et ⇧Tab/← gardés).
-      if (!mod && (sym == FcitxKey_Tab || sym == FcitxKey_Right ||
-                   sym == FcitxKey_Down) && n) {
+      // ←/→ : changer de MODE (régénère dans le nouveau mode).
+      if (!mod && (sym == FcitxKey_Right || sym == FcitxKey_Left)) {
+        int d = (sym == FcitxKey_Right) ? 1 : -1;
+        state->reformMode =
+            (state->reformMode + d + kNumReformModes) % kNumReformModes;
+        state->reformNonce = 0; // nouveau mode → repart du 1er tirage
+        runReformulation(ic, state);
+        event.filterAndAccept();
+        return;
+      }
+      // bulle VERTICALE → ↓/Tab = variante suivante, ↑/⇧Tab = précédente.
+      if (!mod && (sym == FcitxKey_Tab || sym == FcitxKey_Down) && n) {
         state->navIndex = (state->navIndex + 1) % n;
         setReformulationCandidates(ic, state);
         event.filterAndAccept();
         return;
       }
-      if (!mod && (sym == FcitxKey_ISO_Left_Tab || sym == FcitxKey_Left ||
-                   sym == FcitxKey_Up) && n) {
+      if (!mod && (sym == FcitxKey_ISO_Left_Tab || sym == FcitxKey_Up) && n) {
         state->navIndex = (state->navIndex - 1 + n) % n;
         setReformulationCandidates(ic, state);
         event.filterAndAccept();
@@ -630,6 +673,21 @@ public:
         (sym == FcitxKey_r || sym == FcitxKey_R)) {
       enterReformulation(ic, state); // si pas de sélection/variantes : no-op
       event.filterAndAccept();       // consomme le raccourci dans tous les cas
+      return;
+    }
+
+    // (0-bis) REVERT REFORMULATION : Backspace IMMÉDIATEMENT après avoir choisi
+    // une reformulation efface la variante committée et restaure le texte
+    // original. One-shot (ne dure qu'une touche), façon undo.
+    uint32_t reformRevCps = state->reformRevertCps;
+    state->reformRevertCps = 0;
+    if (sym == FcitxKey_BackSpace && !mod && state->buffer.empty() &&
+        reformRevCps > 0 &&
+        ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText) &&
+        ic->surroundingText().isValid()) {
+      ic->deleteSurroundingText(-int(reformRevCps), reformRevCps);
+      ic->commitString(state->reformRevertOrig);
+      event.filterAndAccept();
       return;
     }
 
@@ -1179,10 +1237,19 @@ private:
     if (state->reformLoading) {
       for (auto &v : state->cands)
         list->append(v, /*autoApply=*/false);
+      ic->inputPanel().setAuxUp(fcitx::Text()); // QML affiche « Reformulation… »
     } else {
       int i = 1;
       for (auto &v : state->cands)
         list->appendLabeled(v, std::to_string(i++)); // verbatim (phrases)
+      // Header de la bulle (auxUp, lu par qmlui) : mode courant + badge source.
+      std::string badge = state->reformSource == "groq"   ? "  ⚡ Groq"
+                          : state->reformSource == "local" ? "  ◆ local"
+                                                           : "";
+      std::string header =
+          std::string(kReformModes[state->reformMode].label) + badge +
+          "   · ←→ mode";
+      ic->inputPanel().setAuxUp(fcitx::Text(header));
     }
     list->setCursorIndex(state->navIndex); // variante surlignée
     ic->inputPanel().setCandidateList(std::move(list));
@@ -1214,37 +1281,50 @@ private:
               int(cap), int(valid), sel.size(), sentence.c_str());
     if (sentence.empty())
       return; // ni sélection ni surrounding text court → rien à reformuler
-    // Feedback IMMÉDIAT : la génération (~qqs s) NE doit PAS geler le clavier.
-    // On affiche un placeholder, puis on génère dans un THREAD et on remet le
-    // résultat sur le thread principal de fcitx via l'eventDispatcher.
     state->reformulating = true;
+    state->reformText = sentence;
+    state->reformMode = 0;   // démarre en mode « Reformuler »
+    state->reformNonce = 0;
+    state->reformSource.clear();
+    runReformulation(ic, state);
+  }
+
+  // Lance (ou relance) la génération pour le texte/mode/nonce courants. Feedback
+  // IMMÉDIAT : placeholder + spinner, génération dans un THREAD, résultat reposté
+  // sur le thread principal via l'eventDispatcher. Un compteur de génération
+  // (reformGen) ignore les résultats obsolètes quand on change vite de mode.
+  void runReformulation(fcitx::InputContext *ic, PredictState *state) {
     state->reformLoading = true;
     state->navigating = false;
     state->navIndex = 0;
     state->cands = {"⟳ Reformulation…"};
     setReformulationCandidates(ic, state);
 
+    uint32_t gen = ++state->reformGen;
     auto ref = ic->watch();
-    std::thread([this, ref, sentence]() mutable {
-      std::vector<std::string> variants = reformulateDaemon(sentence); // bloque DANS le thread
-      instance_->eventDispatcher().scheduleWithContext(
-          ref, [this, ref, variants]() {
-            fcitx::InputContext *ic = ref.get();
-            if (!ic)
-              return;
-            auto *st = ic->propertyFor(&factory_);
-            if (!st->reformulating)
-              return; // l'utilisateur a annulé entre-temps
-            st->reformLoading = false;
-            if (variants.empty()) {
-              exitReformulation(ic, st);
-              return;
-            }
-            st->cands = variants;
-            st->navIndex = 0;
-            st->navigating = true;
-            setReformulationCandidates(ic, st);
-          });
+    std::string text = state->reformText;
+    std::string mode = kReformModes[state->reformMode].key;
+    uint32_t nonce = state->reformNonce;
+    std::thread([this, ref, text, mode, nonce, gen]() mutable {
+      ReformResult r = reformulateDaemon(text, mode, nonce); // bloque DANS le thread
+      instance_->eventDispatcher().scheduleWithContext(ref, [this, ref, r, gen]() {
+        fcitx::InputContext *ic = ref.get();
+        if (!ic)
+          return;
+        auto *st = ic->propertyFor(&factory_);
+        if (!st->reformulating || st->reformGen != gen)
+          return; // annulé ou résultat obsolète (mode changé entre-temps)
+        st->reformLoading = false;
+        if (r.variants.empty()) {
+          exitReformulation(ic, st);
+          return;
+        }
+        st->cands = r.variants;
+        st->reformSource = r.source;
+        st->navIndex = 0;
+        st->navigating = true;
+        setReformulationCandidates(ic, st);
+      });
     }).detach();
   }
 
@@ -1252,6 +1332,10 @@ private:
     state->reformulating = false;
     state->reformLoading = false;
     state->navigating = false;
+    state->reformText.clear();
+    state->reformSource.clear();
+    // NB : on NE touche PAS à reformRevert* — le revert doit survivre au commit
+    // (il s'arme dans commitReformulation et se consomme au prochain Backspace).
     state->cands.clear();
     ic->inputPanel().reset();
     ic->updatePreedit();
@@ -1264,8 +1348,13 @@ private:
     // l'IME ne la lit pas via selectedText()). On NE fait PAS de
     // deleteSurroundingText : combiné à une sélection active, certains toolkits
     // double-suppriment (sélection effacée puis delete relatif au curseur).
-    if (idx >= 0 && idx < (int)state->cands.size())
-      ic->commitString(state->cands[idx]);
+    if (idx >= 0 && idx < (int)state->cands.size()) {
+      const std::string &variant = state->cands[idx];
+      ic->commitString(variant);
+      // arme le REVERT : Backspace juste après restaure le texte original.
+      state->reformRevertOrig = state->reformText;
+      state->reformRevertCps = (uint32_t)decodeUtf8(variant).size();
+    }
     exitReformulation(ic, state);
   }
 
