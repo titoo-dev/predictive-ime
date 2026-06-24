@@ -552,9 +552,13 @@ public:
                states.test(fcitx::KeyState::Super);
     uint32_t cp = fcitx::Key::keySymToUnicode(sym);
     if (::getenv("IME_DEBUG"))
-      fprintf(stderr, "[predict] sym=0x%x cp=0x%x buf='%s' nav=%d cands=%zu reform=%d\n",
-              sym, cp, state->buffer.c_str(), int(state->navigating),
-              state->cands.size(), int(state->reformulating));
+      fprintf(stderr,
+              "[predict] sym=0x%x cp=0x%x C=%d A=%d S=%d Su=%d buf='%s' nav=%d reform=%d\n",
+              sym, cp, int(states.test(fcitx::KeyState::Ctrl)),
+              int(states.test(fcitx::KeyState::Alt)),
+              int(states.test(fcitx::KeyState::Shift)),
+              int(states.test(fcitx::KeyState::Super)), state->buffer.c_str(),
+              int(state->navigating), int(state->reformulating));
 
     // (R) MODE REFORMULATION : la barre montre 3 variantes de la sélection ;
     // 1-3 ou Tab/flèches+Entrée REMPLACE la sélection, Échap annule. Toute autre
@@ -584,8 +588,11 @@ public:
     }
 
     // (R-trig) DÉCLENCHEUR : Ctrl+Alt+R sur une SÉLECTION → 3 reformulations.
+    // NB: sur AZERTY/Wayland, Ctrl+lettre remonte le keysym en MAJUSCULE
+    // (FcitxKey_R, pas FcitxKey_r) → on accepte les deux casses.
     if (states.test(fcitx::KeyState::Ctrl) &&
-        states.test(fcitx::KeyState::Alt) && sym == FcitxKey_r) {
+        states.test(fcitx::KeyState::Alt) &&
+        (sym == FcitxKey_r || sym == FcitxKey_R)) {
       enterReformulation(ic, state); // si pas de sélection/variantes : no-op
       return;                        // on consomme le raccourci dans tous les cas
     }
