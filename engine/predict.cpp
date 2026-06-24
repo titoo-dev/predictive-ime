@@ -599,13 +599,16 @@ public:
         event.filterAndAccept();
         return;
       }
-      if (!mod && (sym == FcitxKey_Tab || sym == FcitxKey_Right) && n) {
+      // bulle VERTICALE → ↓ = suivant, ↑ = précédent (Tab/→ et ⇧Tab/← gardés).
+      if (!mod && (sym == FcitxKey_Tab || sym == FcitxKey_Right ||
+                   sym == FcitxKey_Down) && n) {
         state->navIndex = (state->navIndex + 1) % n;
         setReformulationCandidates(ic, state);
         event.filterAndAccept();
         return;
       }
-      if (!mod && (sym == FcitxKey_ISO_Left_Tab || sym == FcitxKey_Left) && n) {
+      if (!mod && (sym == FcitxKey_ISO_Left_Tab || sym == FcitxKey_Left ||
+                   sym == FcitxKey_Up) && n) {
         state->navIndex = (state->navIndex - 1 + n) % n;
         setReformulationCandidates(ic, state);
         event.filterAndAccept();
@@ -1191,11 +1194,26 @@ private:
     bool cap = ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText);
     bool valid = cap && ic->surroundingText().isValid();
     std::string sel = valid ? ic->surroundingText().selectedText() : std::string{};
+    // Texte à reformuler :
+    //  - sélection rapportée (souris) → la sélection.
+    //  - PAS de sélection rapportée mais surrounding text court (ex : Ctrl+A que
+    //    l'app n'expose pas comme sélection à l'IME) → TOUT le surrounding text.
+    //    Le remplacement repose sur commitString (cf commitReformulation) qui
+    //    remplace la sélection active de l'app — active dans les deux cas.
+    std::string sentence;
+    if (!sel.empty()) {
+      sentence = sel;
+    } else if (cap && valid) {
+      std::string full = ic->surroundingText().text();
+      if (!full.empty() && decodeUtf8(full).size() <= 400) // champ court, pas un doc
+        sentence = full;
+    }
     if (::getenv("IME_DEBUG"))
-      fprintf(stderr, "[reform-enter] cap=%d valid=%d selLen=%zu sel='%.60s'\n",
-              int(cap), int(valid), sel.size(), sel.c_str());
-    if (!cap || !valid || sel.empty())
-      return; // pas de SurroundingText / rien de sélectionné dans l'app
+      fprintf(stderr,
+              "[reform-enter] cap=%d valid=%d selLen=%zu src='%.60s'\n",
+              int(cap), int(valid), sel.size(), sentence.c_str());
+    if (sentence.empty())
+      return; // ni sélection ni surrounding text court → rien à reformuler
     // Feedback IMMÉDIAT : la génération (~qqs s) NE doit PAS geler le clavier.
     // On affiche un placeholder, puis on génère dans un THREAD et on remet le
     // résultat sur le thread principal de fcitx via l'eventDispatcher.
@@ -1207,7 +1225,6 @@ private:
     setReformulationCandidates(ic, state);
 
     auto ref = ic->watch();
-    std::string sentence = sel;
     std::thread([this, ref, sentence]() mutable {
       std::vector<std::string> variants = reformulateDaemon(sentence); // bloque DANS le thread
       instance_->eventDispatcher().scheduleWithContext(
@@ -1242,8 +1259,13 @@ private:
   }
 
   void commitReformulation(fcitx::InputContext *ic, PredictState *state, int idx) {
+    // commitString REMPLACE la sélection active de l'app (commit-over-selection)
+    // — vrai pour la souris ET pour Ctrl+A (la sélection est active même si
+    // l'IME ne la lit pas via selectedText()). On NE fait PAS de
+    // deleteSurroundingText : combiné à une sélection active, certains toolkits
+    // double-suppriment (sélection effacée puis delete relatif au curseur).
     if (idx >= 0 && idx < (int)state->cands.size())
-      ic->commitString(state->cands[idx]); // remplace la sélection (commit-over-selection)
+      ic->commitString(state->cands[idx]);
     exitReformulation(ic, state);
   }
 
