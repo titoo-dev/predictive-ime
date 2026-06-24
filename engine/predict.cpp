@@ -580,25 +580,40 @@ public:
     // 1-3 ou Tab/flèches+Entrée REMPLACE la sélection, Échap annule. Toute autre
     // touche quitte le mode et retombe dans la saisie normale.
     if (state->reformulating) {
-      if (sym == FcitxKey_Escape) { exitReformulation(ic, state); return; }
-      if (state->reformLoading) return; // génération en cours → Échap pour annuler
+      // IMPORTANT : toute touche qu'on GÈRE doit être CONSOMMÉE
+      // (filterAndAccept), sinon fcitx la réinjecte dans l'appli — Tab tapait
+      // une tabulation PAR-DESSUS la sélection (« grand blanc qui écrase le
+      // texte »), les chiffres/Entrée fuyaient aussi.
+      if (sym == FcitxKey_Escape) {
+        exitReformulation(ic, state);
+        event.filterAndAccept();
+        return;
+      }
+      if (state->reformLoading) { // génération en cours → on avale tout (sauf Échap)
+        event.filterAndAccept();
+        return;
+      }
       int n = (int)state->cands.size();
       if (!mod && cp >= '1' && cp <= '9' && int(cp - '1') < n) {
         commitReformulation(ic, state, int(cp - '1'));
+        event.filterAndAccept();
         return;
       }
       if (!mod && (sym == FcitxKey_Tab || sym == FcitxKey_Right) && n) {
         state->navIndex = (state->navIndex + 1) % n;
         setReformulationCandidates(ic, state);
+        event.filterAndAccept();
         return;
       }
       if (!mod && (sym == FcitxKey_ISO_Left_Tab || sym == FcitxKey_Left) && n) {
         state->navIndex = (state->navIndex - 1 + n) % n;
         setReformulationCandidates(ic, state);
+        event.filterAndAccept();
         return;
       }
       if (!mod && (sym == FcitxKey_Return || sym == FcitxKey_KP_Enter)) {
         commitReformulation(ic, state, state->navIndex);
+        event.filterAndAccept();
         return;
       }
       exitReformulation(ic, state); // autre touche → on sort et on continue
@@ -611,7 +626,8 @@ public:
         states.test(fcitx::KeyState::Alt) &&
         (sym == FcitxKey_r || sym == FcitxKey_R)) {
       enterReformulation(ic, state); // si pas de sélection/variantes : no-op
-      return;                        // on consomme le raccourci dans tous les cas
+      event.filterAndAccept();       // consomme le raccourci dans tous les cas
+      return;
     }
 
     // (0) Fenêtre de REVERT : Backspace IMMÉDIATEMENT après une
