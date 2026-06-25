@@ -230,6 +230,16 @@ struct Config {
   // C'est le levier d'expérience : 5 par défaut. La GRILLE emoji (préfixe ':')
   // n'est PAS concernée (c'est une grille, pas la barre — elle garde ses ≤24).
   int barWords = 5;
+  // Restitution d'accent sur Espace, INDÉPENDANTE de autoApply : si le mot tapé
+  // n'est qu'une version désaccentuée d'un mot du modèle (mêmes lettres pliées,
+  // accents/ligatures en plus), appliquer la forme accentuée — on n'ajoute QUE
+  // des accents, jamais on ne change/complète/corrige le mot. Sûr même quand
+  // autoApply est false (faute d'accent ≠ choix de mot). false pour désactiver.
+  bool accentRestore = true;
+  // Homographe (la graphie NUE est AUSSI au modèle, ex. ou/où, mur/mûr, etre) :
+  // restituer seulement si la forme accentuée DOMINE le littéral par ce facteur.
+  // Baisser (ex. 2.0) = plus de restitutions ; monter = plus prudent.
+  double accentDom = 4.0;
   // Langue active : "auto" = détection par vote du contexte, "fr"/"en" =
   // langue CHOISIE (déterministe, aucune détection), "off" = aucun boost.
   std::string lang = "auto";
@@ -719,6 +729,8 @@ struct Model {
           fresh.multiWord = j.value("multiWord", fresh.multiWord);
           // barre de mots : au moins 1 suggestion (un 0/négatif viderait la barre).
           fresh.barWords = std::max(1, j.value("barWords", fresh.barWords));
+          fresh.accentRestore = j.value("accentRestore", fresh.accentRestore);
+          fresh.accentDom = j.value("accentDom", fresh.accentDom);
           fresh.lang = j.value("lang", fresh.lang);
           if (fresh.lang != "auto" && fresh.lang != "fr" &&
               fresh.lang != "en" && fresh.lang != "off") {
@@ -1295,6 +1307,28 @@ private:
       bool fuzzyOk = ftop.size() >= fp.size() && !fpHasPunct;
       if (dominant && (topIsPrefix || fuzzyOk))
         res.autocomplete = top;
+    }
+    // RESTITUTION D'ACCENT (indépendante de autoApply) : si le mot tapé n'est
+    // qu'une version DÉSACCENTUÉE d'un mot du modèle (même forme pliée, accents/
+    // ligatures en plus), appliquer la forme accentuée sur Espace — on n'ajoute
+    // QUE des accents, donc sûr même quand autoApply=false. Homographe (la
+    // graphie nue est AUSSI au modèle, ex. ou/où, mur/mûr) : restituer seulement
+    // si l'accentuée DOMINE le littéral par cfg.accentDom. On marque alors
+    // literalIsWord=false : le littéral nu n'est pas la bonne graphie, l'engine
+    // l'applique sur Espace (même chemin que l'autocomplétion emoji).
+    if (cfg.accentRestore) {
+      const std::string litLower = lowerKeep(prefix);
+      double litScore = -1.0; // score du littéral nu s'il figure parmi les candidats
+      for (auto &p : ranked)
+        if (lowerKeep(p.first) == litLower) { litScore = p.second; break; }
+      for (auto &p : ranked) {
+        if (foldStr(p.first) != fp) continue;     // mêmes lettres seulement (pas une complétion)
+        if (lowerKeep(p.first) == litLower) break; // top fold-égal = le littéral → graphie déjà bonne
+        if (litScore >= 0.0 && p.second < cfg.accentDom * litScore) break; // homographe pas dominant
+        res.autocomplete = p.first; // forme accentuée
+        res.literalIsWord = false;  // le littéral désaccentué n'est pas la bonne graphie
+        break;
+      }
     }
     // VETO : remplacement déjà refusé par un revert → plus jamais auto.
     if (!res.autocomplete.empty()) {

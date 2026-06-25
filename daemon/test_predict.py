@@ -21,6 +21,9 @@ WORDS = {
     "pc": 3000, "soleil": 3000, "solar": 3500,
     # élisions : proclitique nu (j') vs formes pleines (j'ai/j'aime) — pour B.
     "j'": 12000, "j'ai": 50000, "j'aime": 8000,
+    # restitution d'accent : homographe DOMINANT (être ≫ etre → restitue) et
+    # homographe NON dominant (mûr < accentDom×mur → garde le littéral).
+    "etre": 50, "mur": 1000, "mûr": 2000,
 }
 # 3e colonne de words.tsv : langue (boost selon la langue du contexte)
 LANGS = {"bonjour": "fr", "soleil": "fr", "solar": "en", "the": "en"}
@@ -345,6 +348,28 @@ try:
           "j'" in c and "j'ai" in c and "j'aime" in c and
           c.index("j'") > c.index("j'ai") and c.index("j'") > c.index("j'aime"),
           str(c))
+
+    # 7terdecies-bis) RESTITUTION D'ACCENT SUR ESPACE, INDÉPENDANTE de autoApply.
+    #   La config promet : `accentRestore` restaure les accents/ligatures même
+    #   quand autoApply=false — on n'AJOUTE que des accents (mêmes lettres), on
+    #   ne change/complète/corrige jamais le mot. Homographe (la graphie nue est
+    #   AUSSI au corpus) : restitue seulement si la forme accentuée DOMINE par
+    #   `accentDom`. Régression : avec autoApply=false l'autocomplete restait vide.
+    set_config({"autoApply": False, "accentRestore": True})
+    check("accent (autoApply off): hors-corpus restitué — 'developpement'→'développement'",
+          auto("developpement") == "développement", repr(auto("developpement")))
+    check("accent (autoApply off): homographe DOMINANT restitué — 'etre'→'être'",
+          auto("etre") == "être", repr(auto("etre")))
+    check("accent: forme accentuée PAS assez dominante → garde le littéral ('mur'↛'mûr')",
+          auto("mur") == "", repr(auto("mur")))
+    check("accent: mot DÉJÀ accentué jamais touché ('français'→'')",
+          auto("français") == "", repr(auto("français")))
+    check("accent: complétion (lettres en +) n'est PAS un accent-restore ('bonjou'↛auto)",
+          auto("bonjou") == "", repr(auto("bonjou")))
+    set_config({"autoApply": False, "accentRestore": False})
+    check("accent: accentRestore=false → désactivé ('developpement'→'')",
+          auto("developpement") == "", repr(auto("developpement")))
+    set_config({})  # restaure les defaults
 
     # 7quaterdecies) TRIGRAMMES APPRIS : le contexte 2-mots prime sur le bigramme.
     #   Même mot précédent ('vais') mais deux contextes différents → deux suites.
