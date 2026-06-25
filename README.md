@@ -4,6 +4,10 @@ Predictive French/English input method for [fcitx5](https://fcitx-im.org/).
 A small fcitx5 engine queries a local n-gram daemon for completion,
 autocorrection, next-word prediction and an emoji picker. Offline, no telemetry.
 
+![predictive-ime in action: next-word prediction, intra-word completion and the emoji picker](assets/demo.gif)
+
+> Typing `je vais au travail aujourd'`, accepting the `aujourd'hui` completion, then `:coeur` → ❤️. The candidate bar shows at most five ranked suggestions.
+
 The core runs on any stock fcitx5 (using its default candidate bar). The
 optional Qt Quick candidate bar (`qmlpanel`) needs a patched fcitx5 —
 see [docs/patched-fcitx5.md](docs/patched-fcitx5.md).
