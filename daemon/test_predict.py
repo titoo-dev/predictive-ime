@@ -58,7 +58,11 @@ with open(f"{tmp}/pcont.tsv", "w", encoding="utf-8") as f:
 # Index emoji (clé repliée -> emoji, poids), cf build_emoji.py.
 EMOJI = [("coeur", "❤️", 3), ("heart", "❤️", 3), ("etoile", "⭐", 3),
          ("star", "⭐", 3), ("sourire", "😊", 3), ("souris", "🐭", 3),
-         ("feu", "🔥", 3), ("fire", "🔥", 3)]
+         ("feu", "🔥", 3), ("fire", "🔥", 3),
+         # 7 emojis DISTINCTS au total → la grille ':' en renvoie >5. Sert à
+         # prouver que la grille emoji n'est PAS soumise au plafond de 5 mots
+         # de la barre de suggestion (cf. section « barre » plus bas).
+         ("eau", "💧", 3), ("water", "💧", 3), ("chat", "🐱", 3), ("cat", "🐱", 3)]
 with open(f"{tmp}/emoji.tsv", "w", encoding="utf-8") as f:
     for k, e, w in EMOJI:
         f.write(f"{k}\t{e}\t{w}\n")
@@ -148,6 +152,18 @@ try:
     check("trigramme: 'je ne' → 'sais' en tête", c and c[0] == "sais", str(c))
     c = cands("", ["ne"])
     check("bigramme: 'ne' → 'pas' en tête", c and c[0] == "pas", str(c))
+
+    # 5bis) LONGUEUR DE LA BARRE : la barre de mots n'affiche JAMAIS plus de 5
+    #       suggestions (UX : seul le top-5 le plus pertinent ; le modèle, trié
+    #       par score, garantit que ce sont bien les 5 plus pertinents). Vaut
+    #       pour le mot-suivant, l'amorce de phrase et la complétion intra-mot.
+    #       La grille emoji (préfixe ':') N'EST PAS concernée (testée plus bas).
+    c = cands("", ["ne"])  # bigramme + remplissage topUni → barre pleine
+    check("barre: mot-suivant plafonné à 5", len(c) <= 5, str(c))
+    c = cands("", [])      # amorce <s> + remplissage → barre pleine
+    check("barre: amorce de phrase plafonnée à 5", len(c) <= 5, str(c))
+    c = cands("", ["je", "ne"])  # trigramme + multi-mots → barre pleine
+    check("barre: contexte riche (+ multi-mots) plafonné à 5", len(c) <= 5, str(c))
 
     # 6) apprentissage utilisateur (priorité)
     req({"learn": {"prev": "je", "word": "code"}})
@@ -368,8 +384,8 @@ try:
     req({"learn": {"prev": "", "word": "⭐"}})
     c = cands(":")
     check("emoji: favoris — ':' liste ⭐ après usage", c and c[0] == "⭐", str(c))
-    check("emoji: grille — ':' remplit avec les populaires (tout le set)",
-          len(c) == 5, str(c))
+    check("emoji: grille NON plafonnée à 5 — ':' renvoie tout le set (7 distincts)",
+          len(c) == 7, str(c))
     c = cands(":s")
     check("emoji: favori remonte — ':s' → ⭐ (star) avant 😊", c and c[0] == "⭐",
           str(c))

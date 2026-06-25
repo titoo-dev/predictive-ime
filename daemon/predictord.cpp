@@ -224,6 +224,12 @@ struct Config {
   // j'aime = 144k) — il faut le diviser assez pour le faire passer dessous.
   double proclisisDemote = 25.0;
   bool multiWord = true;    // suggestion multi-mots dans le mot-suivant
+  // Longueur MAXIMALE de la barre de mots (UX) : on n'affiche que ce nombre de
+  // suggestions — le top-N le plus PERTINENT (le modèle, trié par score,
+  // remonte les meilleures en tête, donc tronquer = garder les N meilleures).
+  // C'est le levier d'expérience : 5 par défaut. La GRILLE emoji (préfixe ':')
+  // n'est PAS concernée (c'est une grille, pas la barre — elle garde ses ≤24).
+  int barWords = 5;
   // Langue active : "auto" = détection par vote du contexte, "fr"/"en" =
   // langue CHOISIE (déterministe, aucune détection), "off" = aucun boost.
   std::string lang = "auto";
@@ -711,6 +717,8 @@ struct Model {
           fresh.proclisisDemote =
               j.value("proclisisDemote", fresh.proclisisDemote);
           fresh.multiWord = j.value("multiWord", fresh.multiWord);
+          // barre de mots : au moins 1 suggestion (un 0/négatif viderait la barre).
+          fresh.barWords = std::max(1, j.value("barWords", fresh.barWords));
           fresh.lang = j.value("lang", fresh.lang);
           if (fresh.lang != "auto" && fresh.lang != "fr" &&
               fresh.lang != "en" && fresh.lang != "off") {
@@ -1662,7 +1670,7 @@ int main(int argc, char **argv) {
             req.value("context", std::vector<std::string>{});
         std::string prefix = req.value("prefix", std::string{});
         model.maybeReload(); // config/dict/snippets à chaud (mtime)
-        Result r = model.predict(ctx, prefix);
+        Result r = model.predict(ctx, prefix, model.cfg.barWords);
 #ifdef WITH_NEURAL
         // Neural EN TÊTE pour le mot-suivant (prefix vide) ; n-gram conservé pour
         // la complétion intra-mot + literalIsWord/autocomplete (auto-apply sûr).
@@ -1684,6 +1692,16 @@ int main(int argc, char **argv) {
           }
         }
 #endif
+        // Plafond DUR de la barre de mots : seul le top-N (cfg.barWords) le plus
+        // pertinent est montré. predict() le respecte déjà côté n-gram ; on le
+        // RÉ-applique ICI, après la fusion neuronale — qui empile neuralTopk +
+        // n-gram et peut dépasser N. La liste arrive déjà triée par pertinence
+        // (n-gram par score, neural en tête), donc tronquer = garder les N
+        // meilleures. La GRILLE emoji (préfixe ':') est EXEMPTÉE : c'est une
+        // grille, pas la barre — elle conserve ses ≤24 candidats.
+        bool emojiGrid = !prefix.empty() && prefix[0] == ':';
+        if (!emojiGrid && (int)r.candidates.size() > model.cfg.barWords)
+          r.candidates.resize(model.cfg.barWords);
         resp["candidates"] = r.candidates;
         resp["literalIsWord"] = r.literalIsWord;
         resp["autocomplete"] = r.autocomplete;
