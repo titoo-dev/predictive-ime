@@ -76,6 +76,7 @@ private:
     Anim appear_;             // 0→1 à l'apparition de la barre
     Anim hide_;               // →0 au fondu de fermeture
     Anim hl_;                 // position (flottante) du pill de surlignage
+    Anim fade_{1.0, 1.0, {}, 0}; // fondu du CONTENU au refresh passif (async)
     bool shown_ = false;
     bool hiding_ = false;
     int highlight_ = -1;

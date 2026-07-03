@@ -98,6 +98,7 @@ expect() {  # $1=libellé  $2=chaîne tapée  $3=résultat attendu
   while [ -n "$rest" ]; do
     case "$rest" in
       "<ESC>"*)   sleep 0.3; inj -k Escape;        sleep 0.3; rest="${rest#<ESC>}" ;;
+      "<RIGHT>"*) sleep 0.3; inj -k Right;         sleep 0.3; rest="${rest#<RIGHT>}" ;;
       "<BS>"*)    sleep 0.3; inj -k BackSpace;     sleep 0.3; rest="${rest#<BS>}" ;;
       "<SHIFT>"*) sleep 0.3; inj -M shift -m shift; sleep 0.3; rest="${rest#<SHIFT>}" ;;
       *) seg="${rest%%<*}"
@@ -139,6 +140,17 @@ expect "snippet ';mail'+espace"        ";mail ok "              "dev@e2e.test ok
 # mot en cours, et ne consomme pas la fenêtre de revert.
 expect "Shift seul ne casse pas le mot" "bonju<SHIFT>or "       "bonjour "
 expect "revert survit à un Shift"      "vias <SHIFT><BS>"       "vias"
+# restauration d'accents (fold-equal) : accents et élisions sur Espace,
+# et → accepte le texte fantôme (commit SANS espace).
+expect "restauration d'accents"        "francais "              "français "
+expect "restauration d'élision"        "c'etait "               "c'était "
+expect "→ accepte le fantôme"          "bonjou<RIGHT>"          "bonjour"
+# autoApply OFF : l'Espace garde le littéral, MAIS les accents se restaurent
+# quand même (accentRestore) et → accepte toujours le fantôme.
+printf '{"autoApply": false}\n' > "$WT/config/ime-predictord/config.json"
+expect "autoApply off: littéral gardé"  "bonjou "               "bonjou "
+expect "autoApply off: accents restaurés" "francais "           "français "
+expect "autoApply off: → accepte"      "bonjou<RIGHT>"          "bonjour"
 # escapeForward (défaut) : Échap committe le littéral PUIS atteint l'app —
 # zenity (cancel) se ferme sans rien imprimer → résultat vide attendu.
 printf '{"escapeForward": true}\n' > "$WT/config/ime-predictord/config.json"

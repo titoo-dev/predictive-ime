@@ -33,7 +33,8 @@ ime/
 
 ```
 -> {"context":["je"],"prefix":"v","wide":"Il fait beau. Je"}
-<- {"candidates":["veux","vais",...],"literalIsWord":false,"autocomplete":"veux"}
+<- {"candidates":["veux","vais",...],"literalIsWord":false,
+    "autocomplete":"veux","ghost":"veux","accentOnly":false}
 -> {"learn":{"prev":"je","word":"code"}}            <- {"ok":true}
 
 # deux phases (mot-suivant neural, E5) :
@@ -44,6 +45,12 @@ ime/
 `literalIsWord` dit si le préfixe tapé est déjà un mot réel — l'engine ne
 remplace alors le mot que sur sélection explicite (jamais d'autocorrection d'un
 mot valide). `autocomplete` est le mot que l'Espace applique (haute confiance).
+`ghost` est la complétion haute-confiance TOUJOURS calculée (mêmes garde-fous),
+même quand `autoApply` est off : l'engine l'affiche en texte fantôme et **→ la
+committe explicitement** (sans espace). `accentOnly` signale que `autocomplete`
+est une pure RESTAURATION D'ACCENTS (fold-equal : francais→français,
+oeuvre→œuvre, c'etait→c'était) — l'engine l'applique alors même si le tapé est
+un vrai mot du corpus (`literalIsWord`), car elle ne change jamais le mot.
 `wide` est le TEXTE BRUT avant le curseur (~240 caractères, phrases précédentes
 et ponctuation comprises, via SurroundingText) : seul le neural le lit — son
 avantage mesuré exige le contexte long ; le n-gram garde `context` (borné à la
@@ -121,7 +128,10 @@ P1(w)    = 0.7·Pcont(w) + 0.3·Pfreq(w)
   English / Auto / Aucune. CLI scriptable :
   `ime-preferences --set lang=fr --set ghostText=false`.
 - **`config.json`** — daemon : `lang` (`fr`/`en`/`auto`/`off`), `autoApply`,
-  `autoDom`, `autoMinLen`,
+  `autoDom`, `autoMinLen`, `accentRestore` (restauration d'accents/ligatures
+  fold-equal sur Espace, même avec `autoApply:false`), `accentDom` (seuil de
+  dominance quand la graphie brute est aussi au corpus ; défaut 4.0),
+  `barWords` (taille max de la barre, 1-8),
   `langBoost`, `multiWord` ; engine : `ghostText`, `frenchSpacing` (espace
   fine insécable U+202F avant `; : ! ?`), `autoCapitalize` (majuscule en
   début de phrase), `nextWordBar` (false = pas de barre spéculative après
@@ -175,9 +185,11 @@ P1(w)    = 0.7·Pcont(w) + 0.3·Pfreq(w)
   raccourcis à modificateur (Ctrl+Tab, Ctrl+Entrée…) committent le littéral
   puis **passent** à l'application. Un appui de modificateur seul (Shift…)
   ne touche à rien — ni au mot en cours, ni à la barre, ni au revert.
-- **Ghost text** : quand l'Espace va compléter, le reste du mot s'affiche déjà
-  dans le préedit, curseur entre le tapé et le fantôme (`bonjou‸r`) — jamais
-  pour une correction floue (la barre + liseré s'en chargent).
+- **Ghost text** : le reste de la complétion haute-confiance s'affiche dans le
+  préedit, curseur entre le tapé et le fantôme (`bonjou‸r`) — jamais pour une
+  correction floue (la barre + liseré s'en chargent). **→ l'accepte
+  explicitement** (commit sans espace), que `autoApply` soit actif ou non —
+  le mode prudent (`autoApply:false`) garde ainsi ses complétions.
 - **Espace** : complète/corrige (garde-fous ci-dessus) — le candidat qui sera
   appliqué porte un **liseré accent** dans la barre ; sans marquage, Espace
   garde le littéral. La **ponctuation** (`. , ; : ! ?`) corrige aussi
@@ -341,6 +353,23 @@ python3 ime/daemon/test_predict.py "$(nix build ./ime#predictord --no-link --pri
       chiffres publiés Gboard (cf section) : in-vocab **16,9/27,0 %** =
       niveau CIFG-LSTM déployé ; forcer la langue ≈ gratuit (−0,3 pt hit@3
       au pire, à contre-emploi).
+- [x] **Qualité complétion + UI/UX (2026-07-03) — Q1→Q5.** (1) `accentRestore`
+      + `accentDom` : restauration d'accents/ligatures FOLD-EQUAL sur Espace —
+      n'ajoute que les signes, jamais un autre mot, à travers les élisions
+      (c'etait→c'était), avec seuil de dominance quand la graphie brute est
+      aussi au corpus (francais→français ENFIN, ligatures œ/æ sans seuil) —
+      marche même avec `autoApply:false` (les clés de la config perso étaient
+      jusqu'ici… non implémentées). Nouveau champ réponse `accentOnly` :
+      l'engine applique malgré `literalIsWord`. (2) GHOST découplé de
+      autoApply : le champ `ghost` est toujours calculé ; **→ l'accepte
+      explicitement** (commit sans espace, façon Copilot/fish) — le mode
+      prudent garde ses complétions. (3) `barWords` (1-8, défaut 6) : la barre
+      ne montre que les N meilleurs. (4) UI : indices 1-6 discrets sur les
+      chips pendant la navigation (découvrabilité de la sélection directe),
+      fondu de contenu 80 ms quand la barre PASSIVE se rafraîchit (swap
+      asynchrone du neural — plus de « pop »). (5) `ime-preferences` : bascule
+      « Restauration d'accents ». Résout le TODO « auto-accent quand la forme
+      sans accent est au dico ».
 - [x] **Neural v2 (2026-07-03) — E1→E8.** (1) Contexte LARGE : l'engine envoie
       le texte brut avant le curseur (`wide`, ~240 car., phrases précédentes
       comprises) — le neural prédit sur SON régime gagnant, y compris en début

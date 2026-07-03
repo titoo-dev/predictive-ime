@@ -21,6 +21,9 @@ WORDS = {
     "pc": 3000, "soleil": 3000, "solar": 3500,
     # élisions : proclitique nu (j') vs formes pleines (j'ai/j'aime) — pour B.
     "j'": 12000, "j'ai": 50000, "j'aime": 8000,
+    # restauration d'accents : graphie brute AUSSI au corpus (dominance
+    # accentDom), homographe légitime (cote/côté), ligature (coeur/cœur).
+    "francais": 1500, "cote": 5000, "côté": 6000, "coeur": 9000, "cœur": 4000,
 }
 # 3e colonne de words.tsv : langue (boost selon la langue du contexte)
 LANGS = {"bonjour": "fr", "soleil": "fr", "solar": "en", "the": "en"}
@@ -386,6 +389,50 @@ try:
     c = cands("coeur")
     check("emoji: hint — 'coeur' (mot normal) propose ❤️ en fin de barre",
           "❤️" in c, str(c))
+
+    # 8bis) RESTAURATION D'ACCENTS (fold-equal) + ghost découplé + barWords
+    r = req({"prefix": "etre", "context": []})
+    check("accent: etre → être (accentOnly)",
+          r.get("autocomplete") == "être" and r.get("accentOnly") is True,
+          str(r))
+    r = req({"prefix": "francais", "context": []})
+    check("accent: francais → français malgré le corpus (dominance ≥ accentDom)",
+          r.get("autocomplete") == "français" and r.get("accentOnly") is True,
+          str(r))
+    r = req({"prefix": "cote", "context": []})
+    check("accent: cote intouché (homographe sous accentDom)",
+          r.get("autocomplete", "") in ("", "cote"), str(r))
+    r = req({"prefix": "coeur", "context": []})
+    check("accent: coeur → cœur (ligature, sans seuil de dominance)",
+          r.get("autocomplete") == "cœur" and r.get("accentOnly") is True,
+          str(r))
+
+    cfgpath = f"{cfgdir}/config.json"
+    def set_config(obj, bump):
+        with open(cfgpath, "w", encoding="utf-8") as f:
+            json.dump(obj, f)
+        t = time.time() + bump  # mtime distinct → rechargement à chaud garanti
+        os.utime(cfgpath, (t, t))
+
+    set_config({"autoApply": False}, 2)
+    r = req({"prefix": "bonjou", "context": []})
+    check("autoApply off: l'Espace garde le littéral (pas d'autocomplete)",
+          r.get("autocomplete", "") == "", str(r))
+    check("autoApply off: le GHOST reste calculé (→ l'accepte)",
+          r.get("ghost") == "bonjour", str(r))
+    r = req({"prefix": "etre", "context": []})
+    check("autoApply off: l'accent est restauré quand même (accentRestore)",
+          r.get("autocomplete") == "être" and r.get("accentOnly") is True,
+          str(r))
+    set_config({"autoApply": False, "accentRestore": False}, 4)
+    r = req({"prefix": "etre", "context": []})
+    check("autoApply off + accentRestore off: plus rien ne s'applique",
+          r.get("autocomplete", "") == "", str(r))
+
+    set_config({"barWords": 3}, 6)
+    c = cands("v")
+    check("barWords: la barre est tronquée aux 3 meilleurs", len(c) <= 3, str(c))
+    set_config({}, 8)  # retour aux défauts pour la suite
 
     # 9) ROBUSTESSE SIGPIPE : l'engine envoie "learn" en fire-and-forget (écrit
     #    puis ferme SANS lire la réponse). Sans SIG_IGN, le write du daemon sur

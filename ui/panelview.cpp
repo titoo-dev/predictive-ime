@@ -76,6 +76,9 @@ Item {
             x: 12
             spacing: 1
             anchors.verticalCenter: parent.verticalCenter
+            // fondu doux quand la barre PASSIVE se rafraîchit (refresh neural
+            // asynchrone) — la frappe (composition) reste instantanée
+            opacity: contentFade
             // grille emoji : 8 colonnes ; sinon une seule ligne
             columns: gridMode ? 8 : Math.max(1, rep.count)
             Repeater {
@@ -101,6 +104,20 @@ Item {
                         border.color: colors.accent
                         opacity: 0.9
                         visible: isAuto && hlPos < 0
+                    }
+                    // indice 1-6 discret pendant la NAVIGATION : ces chiffres
+                    // sélectionnent directement le candidat (découvrabilité)
+                    Text {
+                        visible: hlPos >= 0 && !gridMode && index < 6 && !emoji
+                        text: index + 1
+                        anchors.right: parent.right
+                        anchors.top: parent.top
+                        anchors.rightMargin: 3
+                        color: index === Math.round(hlPos)
+                               ? colors.onAccent : colors.onSurface
+                        opacity: 0.45
+                        font.pixelSize: 8
+                        font.family: "Maple Mono NF"
                     }
                     Text {
                         id: label
@@ -306,6 +323,7 @@ PanelView::PanelView() {
     ctx->setContextProperty("highlight", -1);
     ctx->setContextProperty("hlPos", -1.0);
     ctx->setContextProperty("appear", 1.0);
+    ctx->setContextProperty("contentFade", 1.0);
     ctx->setContextProperty("autoMark", QVariantList{});
     ctx->setContextProperty("emojiMark", QVariantList{});
     ctx->setContextProperty("composing", false);
@@ -348,6 +366,12 @@ void PanelView::update(const QStringList &candidates, int highlight,
         shown_ = true;
     }
     hiding_ = false; // un nouveau contenu annule un fondu de fermeture en cours
+    // Refresh de la barre PASSIVE (mot-suivant asynchrone : le neural remplace
+    // la liste n-gram déjà affichée) : petit fondu de contenu pour éviter le
+    // « pop » — jamais pendant la composition (la frappe doit rester crue).
+    if (shown_ && !composing && !cands_.isEmpty() && candidates != cands_ &&
+        appear_.done(now))
+        fade_ = {0.35, 1.0, now, animMs(80)};
     composing_ = composing;
     if (candidates != cands_ || highlight < 0 || hl_.to < 0) {
         // nouveau contenu (frappe) ou pas de surlignage de départ : pas de
@@ -391,13 +415,15 @@ void PanelView::hidden() {
     emojiMark_.clear();
     hl_ = {};
     hl_.to = -1.0;
+    fade_ = {1.0, 1.0, {}, 0};
 }
 
 bool PanelView::animating() const {
     auto now = Clock::now();
     if (hiding_)
         return !hide_.done(now);
-    return shown_ && (!appear_.done(now) || !hl_.done(now));
+    return shown_ &&
+           (!appear_.done(now) || !hl_.done(now) || !fade_.done(now));
 }
 
 QImage PanelView::render() {
@@ -417,6 +443,7 @@ QImage PanelView::render() {
     ctx->setContextProperty("hlPos", hl_.at(now));
     ctx->setContextProperty("appear",
                             hiding_ ? hide_.at(now) : appear_.at(now));
+    ctx->setContextProperty("contentFade", fade_.at(now));
     ctx->setContextProperty("autoMark", autoMark_);
     ctx->setContextProperty("emojiMark", emojiMark_);
     ctx->setContextProperty("composing", composing_);

@@ -206,6 +206,14 @@ struct Result {
   // d'apostrophe/trait d'union (sinon c'est une contraction qu'on ne mutile pas,
   // ex. "j'ai" qui ne doit jamais devenir "jail").
   std::string autocomplete;
+  // Complétion haute-confiance TOUJOURS calculée (mêmes garde-fous), même
+  // quand autoApply est off : l'engine l'affiche en texte fantôme et → la
+  // committe EXPLICITEMENT. L'Espace, lui, n'applique que `autocomplete`.
+  std::string ghost;
+  // autocomplete est une RESTAURATION D'ACCENTS pure (fold-equal au tapé :
+  // francais→français, oeuvre→œuvre, c'etait→c'était) : l'engine peut alors
+  // l'appliquer même si le tapé est un vrai mot du corpus (literalIsWord).
+  bool accentOnly = false;
 };
 
 // Réglages utilisateur — $XDG_CONFIG_HOME/ime-predictord/config.json,
@@ -214,6 +222,17 @@ struct Config {
   bool autoApply = true;    // l'Espace peut-il remplacer ?
   double autoDom = 2.0;     // dominance top/2e exigée pour auto-appliquer
   int autoMinLen = 3;       // longueur mini du préfixe pour auto-appliquer
+  // Restauration d'ACCENTS/ligatures sur Espace, même quand autoApply est
+  // false : n'ajoute QUE les signes qu'un mot exige (francais→français,
+  // oeuvre→œuvre, c'etait→c'était — repli fold-equal, jamais un autre mot).
+  bool accentRestore = true;
+  // Quand la graphie NON accentuée existe aussi dans le corpus (francais,
+  // etre…) : seuil de domination fréq(accentué)/fréq(brut) pour restaurer
+  // (faute d'accent probable vs vrai homographe). Ligatures œ/æ exemptées.
+  double accentDom = 4.0;
+  // Longueur MAX de la barre (mots) : le modèle trie par score, tronquer =
+  // garder les meilleurs. La grille emoji (':') n'est pas concernée.
+  int barWords = 6;
   double langBoost = 1.6;   // boost des mots de la langue active
   double agreeBoost = 2.0;  // boost d'accord nombre/genre (×si accord, ÷sinon)
   // Agressivité des mots APPRIS : multiplicateur sur la confiance (cf USER_MIN).
@@ -722,6 +741,10 @@ struct Model {
           fresh.autoApply = j.value("autoApply", fresh.autoApply);
           fresh.autoDom = j.value("autoDom", fresh.autoDom);
           fresh.autoMinLen = j.value("autoMinLen", fresh.autoMinLen);
+          fresh.accentRestore = j.value("accentRestore", fresh.accentRestore);
+          fresh.accentDom = j.value("accentDom", fresh.accentDom);
+          fresh.barWords = std::max(1, std::min(8, j.value("barWords",
+                                                           fresh.barWords)));
           fresh.langBoost = j.value("langBoost", fresh.langBoost);
           fresh.agreeBoost = j.value("agreeBoost", fresh.agreeBoost);
           fresh.learnedBoost = j.value("learnedBoost", fresh.learnedBoost);
@@ -1332,8 +1355,8 @@ private:
       if (push(p.first))
         res.scores.push_back(p.second); // parallèle à candidates (rerank E3)
 
-    // Auto-complétion sur Espace (haute confiance seulement — les candidats
-    // restent affichés, on bride uniquement le REMPLACEMENT automatique) :
+    // GHOST — complétion haute confiance, TOUJOURS calculée (les candidats
+    // restent affichés, on bride uniquement le remplacement automatique) :
     //  - préfixe assez long (un sigle de 2 lettres « az » ne devient pas
     //    « aziz ») ;
     //  - le top doit DOMINER le 2e candidat (ambigu → on garde le littéral,
@@ -1342,10 +1365,11 @@ private:
     //  - une correction FLOUE ne raccourcit jamais la frappe (« pcq » ne
     //    devient pas « pc ») et jamais à travers une apostrophe/trait d'union
     //    (on ne mutile pas une contraction, « j'ai » ≠ jail).
+    // L'Espace ne l'applique que si autoApply (cf plus bas) ; sinon elle
+    // reste un texte fantôme que → committe explicitement.
     if (!snippetExact.empty()) {
-      res.autocomplete = snippetExact; // déclencheur explicite → toujours
-    } else if (cfg.autoApply && !res.candidates.empty() &&
-               fp.size() >= size_t(cfg.autoMinLen)) {
+      res.ghost = snippetExact; // déclencheur explicite → toujours
+    } else if (!res.candidates.empty() && fp.size() >= size_t(cfg.autoMinLen)) {
       const std::string &top = res.candidates.front();
       const std::string ftop = foldStr(top);
       bool topIsPrefix = ftop.compare(0, fp.size(), fp) == 0;
@@ -1360,13 +1384,76 @@ private:
       bool fuzzyOk = ftop.size() >= fp.size() && !fpHasPunct &&
                      ftop.find(' ') == std::string::npos;
       if (dominant && (topIsPrefix || fuzzyOk))
-        res.autocomplete = top;
+        res.ghost = top;
+    }
+
+    // RESTAURATION D'ACCENTS : meilleure forme FOLD-EQUAL ≠ tapé — n'ajoute
+    // que des accents/ligatures, jamais un autre mot, y compris à travers les
+    // élisions (c'etait→c'était : même repli). Si la graphie brute existe
+    // AUSSI dans le corpus (francais, garcon…), la forme accentuée doit la
+    // dominer ×accentDom (faute d'accent probable vs vrai homographe) ; les
+    // ligatures œ/æ sont restaurées sans seuil (oe/ae n'est jamais voulu).
+    std::string accentWord;
+    if (fp.size() >= 2) {
+      const std::string typedLower = lowerKeep(prefix);
+      double typedFreq = 0.0;
+      auto tid = id_.find(typedLower);
+      if (tid != id_.end())
+        typedFreq = double(freq[tid->second]);
+      uint32_t best = 0xFFFFFFFFu;
+      double bestS = 0.0;
+      for (auto it = lo; it != hi && fold[*it] == fp; ++it) {
+        if (lowerKeep(words[*it]) == typedLower)
+          continue; // le tapé lui-même
+        double s = scoreOf(*it);
+        if (s > bestS) {
+          bestS = s;
+          best = *it;
+        }
+      }
+      if (best != 0xFFFFFFFFu) {
+        std::string k = lowerKeep(words[best]);
+        for (const auto &[lig, plain] :
+             {std::pair<const char *, const char *>{"œ", "oe"},
+              {"æ", "ae"}}) {
+          size_t p;
+          while ((p = k.find(lig)) != std::string::npos)
+            k.replace(p, strlen(lig), plain);
+        }
+        bool ligOnly = (k == typedLower);
+        bool dominant =
+            typedFreq <= 0.0 ||
+            double(freq[best]) >= cfg.accentDom * typedFreq;
+        if (ligOnly || dominant)
+          accentWord = words[best];
+      }
+    }
+
+    // L'Espace applique : la complétion complète (autoApply), sinon la seule
+    // restauration d'accents (accentRestore) — sinon rien, littéral gardé.
+    if (cfg.autoApply) {
+      // le garde apostrophe bloque les restaurations d'élision (c'était) dans
+      // le ghost — l'accent fold-equal, sûr par construction, le complète.
+      // Ghost == le littéral lui-même (graphie brute plus fréquente au corpus,
+      // ex. « coeur » vs « cœur ») : sans intérêt pour l'Espace → on retombe
+      // sur la restauration d'accents (la ligature doit gagner).
+      bool ghostIsLiteral =
+          !res.ghost.empty() && lowerKeep(res.ghost) == lowerKeep(prefix);
+      res.autocomplete =
+          (!res.ghost.empty() && !ghostIsLiteral) ? res.ghost : accentWord;
+      res.accentOnly = !res.autocomplete.empty() &&
+                       foldStr(res.autocomplete) == fp;
+    } else if (cfg.accentRestore && !accentWord.empty()) {
+      res.autocomplete = accentWord;
+      res.accentOnly = true;
     }
     // VETO : remplacement déjà refusé par un revert → plus jamais auto.
     if (!res.autocomplete.empty()) {
       auto vIt = veto_.find(fp);
-      if (vIt != veto_.end() && vIt->second.count(res.autocomplete))
+      if (vIt != veto_.end() && vIt->second.count(res.autocomplete)) {
         res.autocomplete.clear();
+        res.accentOnly = false;
+      }
     }
 
     // Suggestion emoji : le mot tapé est exactement un mot-clé emoji
@@ -1879,7 +1966,7 @@ int main(int argc, char **argv) {
               neuralCands.push_back({w, (double)c.prob});
           }
         }
-        Result r = model.predict(ctx, prefix, 6, neuralCands);
+        Result r = model.predict(ctx, prefix, model.cfg.barWords, neuralCands);
         // Rerank neuronal de la complétion (E3) — opportuniste : seulement si
         // le cache KV est déjà chaud pour ce contexte exact (le mot-suivant
         // vient de tourner dessus). Mélange géométrique log-linéaire.
@@ -1910,11 +1997,13 @@ int main(int argc, char **argv) {
           }
         }
 #else
-        Result r = model.predict(ctx, prefix);
+        Result r = model.predict(ctx, prefix, model.cfg.barWords);
 #endif
         resp["candidates"] = r.candidates;
         resp["literalIsWord"] = r.literalIsWord;
         resp["autocomplete"] = r.autocomplete;
+        resp["ghost"] = r.ghost;
+        resp["accentOnly"] = r.accentOnly;
       }
     } catch (const std::exception &e) {
       resp["candidates"] = json::array();
@@ -1986,7 +2075,7 @@ int main(int argc, char **argv) {
           }
         if (!dst)
           continue;
-        Result r = model.predict(d.ctx, "", 6, d.cands);
+        Result r = model.predict(d.ctx, "", model.cfg.barWords, d.cands);
         json resp;
         resp["candidates"] = r.candidates;
         resp["refresh"] = true;

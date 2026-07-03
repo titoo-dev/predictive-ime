@@ -326,6 +326,8 @@ struct DaemonReply {
   std::vector<std::string> candidates;
   bool literalIsWord = false;
   std::string autocomplete; // mot à appliquer sur Espace (haute confiance), ou ""
+  std::string ghost;        // complétion affichée en fantôme (→ l'accepte)
+  bool accentOnly = false;  // autocomplete = pure restauration d'accents
   bool pending = false;     // un refresh neural suivra sur la même connexion
 };
 
@@ -405,6 +407,9 @@ DaemonReply queryDaemon(const std::vector<std::string> &context,
       out.candidates.push_back(c.get<std::string>());
     out.literalIsWord = resp.value("literalIsWord", false);
     out.autocomplete = resp.value("autocomplete", std::string{});
+    // repli vieux daemon (pas de champ ghost) : le fantôme suit l'autocomplete
+    out.ghost = resp.value("ghost", out.autocomplete);
+    out.accentOnly = resp.value("accentOnly", false);
     out.pending = resp.value("pending", false);
   } catch (...) {
   }
@@ -453,6 +458,8 @@ struct PredictState : public fcitx::InputContextProperty {
   bool navigating = false;           // l'utilisateur a commencé à choisir (Tab)
   bool literalIsWord = false;        // le préfixe tapé est-il déjà un vrai mot ?
   std::string autocomplete;          // mot appliqué sur Espace (haute confiance)
+  std::string ghost;                 // complétion fantôme (→ l'accepte)
+  bool accentOnly = false;           // autocomplete = restauration d'accents pure
   // Fenêtre de REVERT d'une auto-application (Backspace juste après) :
   std::string lastAutoLit;           // le littéral qui a été remplacé
   std::string lastAutoWord;          // le mot qui avait été appliqué
@@ -670,6 +677,20 @@ public:
         event.filterAndAccept();
         return;
       }
+      // → ACCEPTE le texte fantôme (accept explicite, façon Copilot/fish) :
+      // committe la complétion SANS espace — la frappe continue naturellement.
+      // Seulement quand le fantôme est réellement AFFICHÉ (mêmes conditions
+      // que updateCompletion) ; sinon → committe le littéral et file à l'app
+      // (branche « toute autre touche » plus bas), comme avant.
+      if (!mod && sym == FcitxKey_Right && !state->navigating &&
+          engineCfg().ghostText && !state->literalIsWord &&
+          !state->vetoAuto &&
+          state->ghost.size() > state->buffer.size() &&
+          state->ghost.compare(0, state->buffer.size(), state->buffer) == 0) {
+        commitWord(ic, state, state->ghost, /*trailingSpace=*/false);
+        event.filterAndAccept();
+        return;
+      }
       if (!mod && sym == FcitxKey_space) {
         std::string lit = state->buffer;
         std::string chosen = chooseOnSpace(state);
@@ -832,6 +853,8 @@ public:
     state->vetoAuto = false;
     state->lastAutoCps = 0;
     state->lastAutoLit.clear();
+    state->ghost.clear();
+    state->accentOnly = false;
     state->nextWordGen++; // un refresh neural en vol devient périmé
     clearPanel(ic);
   }
@@ -1015,7 +1038,10 @@ private:
       return state->buffer;
     // auto-application haute confiance seulement (complétion de préfixe, ou
     // faute simple) ; sinon on garde le littéral — jamais "j'ai" → "jail".
-    if (!state->literalIsWord && !state->autocomplete.empty())
+    // Une RESTAURATION D'ACCENTS (fold-equal : francais→français) s'applique
+    // même si le tapé est un vrai mot du corpus — elle ne change jamais le mot.
+    if (!state->autocomplete.empty() &&
+        (!state->literalIsWord || state->accentOnly))
       return state->autocomplete;
     return state->buffer;
   }
@@ -1117,6 +1143,8 @@ private:
     state->cands = reply.candidates;
     state->literalIsWord = reply.literalIsWord;
     state->autocomplete = reply.autocomplete;
+    state->ghost = reply.ghost;
+    state->accentOnly = reply.accentOnly;
     if (state->cands.empty())
       state->cands.push_back(state->buffer); // repli : le brut
 
@@ -1127,19 +1155,22 @@ private:
     // Opt-out : autoApplyNeedsRevert=false.
     if (engineCfg().autoApplyNeedsRevert && !isTriggerBuffer(state->buffer) &&
         !(ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText) &&
-          ic->surroundingText().isValid()))
+          ic->surroundingText().isValid())) {
       state->autocomplete.clear();
+      state->accentOnly = false;
+      // le fantôme reste : → est un accept EXPLICITE, pas besoin de revert.
+    }
 
-    // GHOST TEXT : si l'Espace va compléter le mot, le reste s'affiche déjà
-    // dans le préedit, curseur entre le tapé et le fantôme ("bonjou‸r") —
-    // uniquement quand l'auto-complétion PROLONGE octet-à-octet la frappe
+    // GHOST TEXT : le reste de la complétion haute-confiance s'affiche dans
+    // le préedit, curseur entre le tapé et le fantôme ("bonjou‸r") — que
+    // l'Espace l'applique (autoApply) ou non : → l'accepte EXPLICITEMENT.
+    // Uniquement quand la complétion PROLONGE octet-à-octet la frappe
     // (jamais pour une correction floue : la barre + liseré s'en chargent).
     std::string ghost;
     if (engineCfg().ghostText && !state->literalIsWord && !state->vetoAuto &&
-        state->autocomplete.size() > state->buffer.size() &&
-        state->autocomplete.compare(0, state->buffer.size(), state->buffer) ==
-            0)
-      ghost = state->autocomplete.substr(state->buffer.size());
+        state->ghost.size() > state->buffer.size() &&
+        state->ghost.compare(0, state->buffer.size(), state->buffer) == 0)
+      ghost = state->ghost.substr(state->buffer.size());
 
     fcitx::Text preedit;
     preedit.append(state->buffer,
@@ -1161,6 +1192,8 @@ private:
   void showNextWord(fcitx::InputContext *ic, PredictState *state) {
     ic->inputPanel().reset();
     state->autocomplete.clear(); // pas de marquage « auto » en mot-suivant
+    state->ghost.clear();
+    state->accentOnly = false;
     state->literalIsWord = false;
     if (!engineCfg().nextWordBar) { // mode calme : pas de barre spéculative
       state->cands.clear();
@@ -1209,8 +1242,9 @@ private:
     // 10 labels de CommonCandidateList (qui FATAL-abort fcitx au-delà).
     auto list = std::make_unique<PredictCandidateList>();
     // le candidat que l'Espace appliquera est marqué (gras → liseré dans l'UI)
-    bool willAuto = !state->buffer.empty() && !state->literalIsWord &&
-                    !state->autocomplete.empty() && !state->vetoAuto;
+    bool willAuto = !state->buffer.empty() && !state->autocomplete.empty() &&
+                    !state->vetoAuto &&
+                    (!state->literalIsWord || state->accentOnly);
     for (auto &w : state->cands)
       list->append(applyCase(w, state->buffer),
                    willAuto && w == state->autocomplete);
