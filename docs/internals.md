@@ -442,6 +442,14 @@ couleur (17 px). Couleurs lues de
 thème), override via `~/.config/fcitx5/qmlpanel/colors.json`
 (`{surface,onSurface,accent,onAccent,outline}`).
 
+**Évitement du texte** : le compositeur place la popup au caret ; s'il la pose
+SUR la ligne en cours de frappe (bas d'écran, rect curseur dégénéré côté
+app...), l'addon le détecte via l'événement `text_input_rectangle` (position
+de la ligne de texte dans nos coordonnées de surface) et décale la barre dans
+un canvas transparent — collée au-dessus de la ligne si la place existe, sinon
+juste en dessous. Hystérésis jusqu'au démappage (pas d'oscillation
+compositeur ↔ resize). Le texte reste visible à travers le transparent.
+
 Activer : lancer fcitx5 patché avec `--ui qmlpanel` (sinon classicui reste
 l'UI). Test visuel headless : `./test-ui.sh` (PNG dans `/tmp/ime-ui/`).
 
