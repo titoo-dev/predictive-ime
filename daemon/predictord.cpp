@@ -27,6 +27,8 @@
 //   trigrams.tsv, trigrams.bo.tsv, pcont.tsv (format build_ngrams.py).
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <cmath>
 #include <csignal>
 #include <cstdint>
 #include <cstdio>
@@ -43,6 +45,9 @@
 
 #ifdef WITH_NEURAL
 #include "neural.h"
+#include <condition_variable>
+#include <mutex>
+#include <thread>
 #endif
 
 #include <cerrno>
@@ -192,6 +197,9 @@ const std::unordered_map<char, std::string> &azerty() {
 // ------------------------------------------------------------------ Model ----
 struct Result {
   std::vector<std::string> candidates;
+  // Scores parallèles à candidates (complétion seulement) : nécessaires au
+  // rerank neuronal opportuniste (E3). Vide sur les autres chemins.
+  std::vector<double> scores;
   bool literalIsWord = false;
   // Mot que l'Espace doit auto-appliquer (haute confiance). "" → garder le
   // littéral. On n'y met une correction FLOUE que si le préfixe ne contient pas
@@ -239,6 +247,26 @@ struct Config {
   // mot-suivant ; il ne sert plus que de fallback si le neural ne rend rien).
   // C'est l'option "remplacer le n-gram" : neural seul aux commandes.
   bool neuralOnly = false;
+  // Budget TEMPS de l'appel neuronal (prefill + expansions comprises) : passé
+  // ce délai on rend ce qu'on a (l'engine a son propre timeout côté socket —
+  // sans ce budget le daemon continuait à brûler du CPU pour une réponse que
+  // plus personne n'attendait).
+  int neuralBudgetMs = 180;
+  // Fusion des scores (E4) : multiplicateur des probabilités neuronales sur
+  // l'échelle du modèle n-gram. >1 → le neural mène (sa distribution est plus
+  // étalée que les bigrammes KN très sûrs type « ne→pas »).
+  double neuralBoost = 2.0;
+  // Rerank neuronal de la COMPLÉTION (E3) : opportuniste — seulement quand le
+  // cache KV est déjà chaud pour ce contexte (jamais de prefill sur le chemin
+  // chaud de la frappe). rerankWeight = poids λ du log-prob neuronal dans le
+  // mélange géométrique avec P_KN.
+  bool neuralRerank = true;
+  double rerankWeight = 0.4;
+  // Deux phases ASYNCHRONES (E5) : quand l'engine envoie "async":true, la
+  // réponse n-gram part TOUT DE SUITE (pending:true) et le neural tourne sur
+  // un thread de travail — une 2e ligne {"refresh":true} suit sur la même
+  // connexion. Plus aucun hitch après Espace.
+  bool asyncNeural = true;
 };
 
 struct Model {
@@ -273,7 +301,9 @@ struct Model {
   // Canal de faute (noisy channel) : P(frappe|mot) par type d'opération.
   static constexpr double CH_TRANSPOSE = 0.12; // inversion de 2 lettres
   static constexpr double CH_SUBST = 0.10;     // voisin AZERTY
+  static constexpr double CH_MISS = 0.09;      // lettre OUBLIÉE (omission)
   static constexpr double CH_EXTRA = 0.07;     // lettre en trop
+  static constexpr double CH_SPLIT = 0.10;     // espace oublié (« dela »)
   // (Les garde-fous d'auto-application — longueur mini, dominance — sont dans
   // Config : réglables à chaud via config.json.)
   // Un mot APPRIS hors vocabulaire doit avoir été vu >= 2 fois avant de passer
@@ -711,6 +741,11 @@ struct Model {
           fresh.neuralThreads = j.value("neuralThreads", fresh.neuralThreads);
           fresh.neuralTopk = j.value("neuralTopk", fresh.neuralTopk);
           fresh.neuralOnly = j.value("neuralOnly", fresh.neuralOnly);
+          fresh.neuralBudgetMs = j.value("neuralBudgetMs", fresh.neuralBudgetMs);
+          fresh.neuralBoost = j.value("neuralBoost", fresh.neuralBoost);
+          fresh.neuralRerank = j.value("neuralRerank", fresh.neuralRerank);
+          fresh.rerankWeight = j.value("rerankWeight", fresh.rerankWeight);
+          fresh.asyncNeural = j.value("asyncNeural", fresh.asyncNeural);
         } catch (const std::exception &e) {
           fprintf(stderr, "[predictord] config.json invalide: %s\n", e.what());
         }
@@ -1080,16 +1115,23 @@ struct Model {
   }
 
   // ----------------------------------------------------------- prédiction ---
+  // neuralCands : candidats (mot, probabilité softmax) du prédicteur neuronal,
+  // FUSIONNÉS au mot-suivant sur l'échelle des scores (E4) — vide sans neural.
   Result predict(const std::vector<std::string> &context,
-                 const std::string &prefix, int k = 6) {
+                 const std::string &prefix, int k = 6,
+                 const std::vector<std::pair<std::string, double>>
+                     &neuralCands = {}) {
     Result res;
     // mode emoji : la barre devient une GRILLE (3×8) → 24 candidats.
     if (!prefix.empty() && prefix[0] == ':')
       k = 24;
     std::unordered_set<std::string> seen;
     auto push = [&](const std::string &w) {
-      if ((int)res.candidates.size() < k && seen.insert(w).second)
+      if ((int)res.candidates.size() < k && seen.insert(w).second) {
         res.candidates.push_back(w);
+        return true;
+      }
+      return false;
     };
 
     if (!prefix.empty() && prefix[0] == ':')
@@ -1097,8 +1139,30 @@ struct Model {
     else if (!prefix.empty())
       completePrefix(context, prefix, k, push, res);
     else
-      predictNext(context, k, push, res);
+      predictNext(context, k, push, res, neuralCands);
     return res;
+  }
+
+  // Un mot que le daemon connaît déjà : vocabulaire du modèle (dict perso
+  // compris) ou appris. Sert à repérer les FRAGMENTS BPE du neural (« l » de
+  // « l'école ») qui méritent une expansion multi-token (E2).
+  bool isKnownWord(const std::string &w) const {
+    return caseWords.count(lowerKeep(w)) > 0 || userUni.count(w) > 0;
+  }
+
+  // Candidat neuronal suspect de n'être qu'un DÉBUT de mot : inconnu de tout
+  // lexique, ou lettre seule qui n'est pas un vrai mot français/anglais isolé
+  // (« l » « d » « j » traînent dans le vocab OpenSubtitles en artefacts de
+  // tokenisation — on ne s'y fie pas).
+  bool looksFragment(const std::string &w) const {
+    if (!isKnownWord(w))
+      return true;
+    if (w.size() > 2)
+      return false;
+    static const std::unordered_set<std::string> kSingles = {
+        "a", "à", "y", "ô", "i"}; // vrais mots d'une lettre (fr + « I » anglais)
+    std::string f = lowerKeep(w);
+    return decodeUtf8(f).size() == 1 && !kSingles.count(f);
   }
 
 private:
@@ -1239,12 +1303,34 @@ private:
     if (exact < size_t(k))
       fuzzyComplete(fp, scoreOf, offer);
 
+    // (3bis) ESPACE OUBLIÉ : le préfixe se coupe en deux vrais mots dont le
+    //        bigramme est OBSERVÉ (« dela » → « de la ») → l'expression est
+    //        offerte, jamais auto-appliquée (garde-fou espace plus bas).
+    //        Moitiés >= 2 lettres, jamais à travers apostrophe/trait d'union.
+    if (fp.size() >= 4 && fp.find_first_of("'-") == std::string::npos) {
+      for (size_t s = 2; s + 2 <= fp.size(); s++) {
+        const std::string f1 = fp.substr(0, s), f2 = fp.substr(s);
+        auto [l1, h1] = foldedPrefixRange(f1);
+        for (auto it1 = l1; it1 != h1 && fold[*it1] == f1; ++it1) {
+          auto a = biAdj.find(*it1);
+          if (a == biAdj.end())
+            continue;
+          auto [l2, h2] = foldedPrefixRange(f2);
+          for (auto it2 = l2; it2 != h2 && fold[*it2] == f2; ++it2)
+            if (const float *p = CtxScorer::find(&a->second, *it2))
+              offer(words[*it1] + " " + words[*it2],
+                    scoreOf(*it1) * double(*p) * CH_SPLIT);
+        }
+      }
+    }
+
     std::partial_sort(
         ranked.begin(),
         ranked.begin() + std::min<size_t>(k, ranked.size()), ranked.end(),
         [](auto &a, auto &b) { return a.second > b.second; });
     for (auto &p : ranked)
-      push(p.first);
+      if (push(p.first))
+        res.scores.push_back(p.second); // parallèle à candidates (rerank E3)
 
     // Auto-complétion sur Espace (haute confiance seulement — les candidats
     // restent affichés, on bride uniquement le REMPLACEMENT automatique) :
@@ -1268,7 +1354,11 @@ private:
       bool dominant =
           isForced || ranked.size() < 2 ||
           ranked[0].second >= cfg.autoDom * std::max(ranked[1].second, 1e-300);
-      bool fuzzyOk = ftop.size() >= fp.size() && !fpHasPunct;
+      // jamais d'auto-application d'une expression À ESPACE (« de la ») : la
+      // coupure espace-oublié se choisit explicitement (Tab), l'Espace garde
+      // le littéral.
+      bool fuzzyOk = ftop.size() >= fp.size() && !fpHasPunct &&
+                     ftop.find(' ') == std::string::npos;
       if (dominant && (topIsPrefix || fuzzyOk))
         res.autocomplete = top;
     }
@@ -1286,10 +1376,14 @@ private:
       auto e = emojiExact_.find(fp);
       if (e != emojiExact_.end()) {
         const std::string &emo = emojis_[e->second];
-        if ((int)res.candidates.size() >= k)
+        if ((int)res.candidates.size() >= k) {
           res.candidates.back() = emo;
-        else
+          if (!res.scores.empty())
+            res.scores.back() = 0.0; // jamais reranké au-dessus des mots
+        } else {
           res.candidates.push_back(emo);
+          res.scores.push_back(0.0);
+        }
       }
     }
   }
@@ -1335,6 +1429,15 @@ private:
         addv(v, CH_SUBST);
       }
     }
+    // Lettre OUBLIÉE : insérer chaque lettre à chaque position (« bonjur » →
+    // « bonjour »). ~26·L variantes de plus — chaque lookup reste en µs, et le
+    // fuzzy ne tourne déjà que quand les correspondances exactes sont maigres.
+    for (size_t i = 0; i <= L; i++)
+      for (char c = 'a'; c <= 'z'; c++) {
+        std::string v = fp;
+        v.insert(v.begin() + i, c);
+        addv(v, CH_MISS);
+      }
     for (const auto &[v, ch] : variants) {
       auto [lo, hi] = foldedPrefixRange(v);
       // top-3 par variante suffisent (on ne veut pas noyer les exacts)
@@ -1356,7 +1459,9 @@ private:
   // compte les bigrammes d'amorce). L'apprentissage utilisateur passe devant.
   template <class Push>
   void predictNext(const std::vector<std::string> &context, int k,
-                   Push &&push, Result &res) {
+                   Push &&push, Result &res,
+                   const std::vector<std::pair<std::string, double>>
+                       &neuralCands = {}) {
     std::vector<std::string> ctx = context;
     if (ctx.empty())
       ctx.push_back("<s>");
@@ -1439,10 +1544,35 @@ private:
     std::partial_sort(v.begin(), v.begin() + kk, v.end(),
                       [](auto &a, auto &b) { return a.second > b.second; });
 
-    // (3) FUSION appris + modèle : on ne passe aux chaînes que pour le PETIT
-    //     haut de liste (kk) plus les bigrammes appris (poignée) — le hot path
-    //     entier (itération des milliers de suiveurs) reste intact. Déduplique
-    //     par mot en gardant le meilleur score, puis retri global.
+    // (2.5) NEURAL (E4) : les candidats neuronaux passent par le MÊME pipeline
+    //     multiplicatif que tout le monde — langue stricte (exclusion), accord
+    //     grammatical, puis fusion par score avec le modèle et l'appris. Fini le
+    //     préfixage brut qui court-circuitait langFactor/agreeFactor/apprentissage.
+    std::vector<std::pair<std::string, double>> nsc;
+    for (const auto &[w, p] : neuralCands) {
+      double f = 1.0;
+      auto idit = id_.find(lowerKeep(w));
+      if (idit != id_.end())
+        f = langFactor(ctxL, idit->second) * agreeFactor(want, idit->second);
+      double s = p * cfg.neuralBoost * f;
+      if (s > 0.0)
+        nsc.push_back({w, s});
+    }
+
+    // neuralOnly = mot-suivant 100% neuronal (n-gram/appris écartés) — mais
+    // toujours filtré langue + accord, et trié par score.
+    if (cfg.neuralOnly && !nsc.empty()) {
+      std::sort(nsc.begin(), nsc.end(),
+                [](auto &a, auto &b) { return a.second > b.second; });
+      for (auto &p : nsc)
+        push(p.first);
+      return;
+    }
+
+    // (3) FUSION appris + modèle + neural : on ne passe aux chaînes que pour le
+    //     PETIT haut de liste (kk) plus les bigrammes appris (poignée) — le hot
+    //     path entier (itération des milliers de suiveurs) reste intact.
+    //     Déduplique par mot en gardant le meilleur score, puis retri global.
     std::vector<std::pair<std::string, double>> cand;
     std::unordered_map<std::string, size_t> at;
     auto add = [&](const std::string &w, double s) {
@@ -1455,6 +1585,8 @@ private:
     for (size_t i = 0; i < kk; i++)
       add(words[v[i].first], v[i].second);
     for (auto &p : learned)
+      add(p.first, p.second);
+    for (auto &p : nsc)
       add(p.first, p.second);
     size_t ck = std::min<size_t>(size_t(k) * 2, cand.size());
     std::partial_sort(cand.begin(), cand.begin() + ck, cand.end(),
@@ -1578,6 +1710,77 @@ int main(int argc, char **argv) {
   }
 #endif
 
+#ifdef WITH_NEURAL
+  // ---- Deux phases ASYNC (E5) : un thread de travail pour le neural. ----
+  // Le thread ne touche JAMAIS Model (appris/config/lexique mutent sur le
+  // thread principal) : il ne parle qu'à NeuralPredictor (verrouillé en
+  // interne). Un seul job en attente (le clavier n'a qu'un curseur) — un
+  // nouveau job remplace l'ancien. Résultats repostés au thread principal via
+  // un pipe de réveil, la FUSION (predict) reste donc mono-thread.
+  struct NeuralJob {
+    uint64_t client = 0;
+    std::string wide;
+    std::vector<std::string> ctx;
+    int topk = 6;
+    int budgetMs = 180;
+  };
+  struct NeuralDone {
+    uint64_t client;
+    std::vector<std::string> ctx;
+    std::vector<std::pair<std::string, double>> cands;
+  };
+  std::mutex njMu;
+  std::condition_variable njCv;
+  NeuralJob njPending;
+  bool njHas = false, njQuit = false;
+  std::vector<NeuralDone> njDone;
+  int wakePipe[2] = {-1, -1};
+  if (pipe(wakePipe) == 0) {
+    fcntl(wakePipe[0], F_SETFL, O_NONBLOCK);
+    fcntl(wakePipe[1], F_SETFL, O_NONBLOCK);
+  }
+  std::thread njWorker([&] {
+    for (;;) {
+      NeuralJob job;
+      {
+        std::unique_lock<std::mutex> lk(njMu);
+        njCv.wait(lk, [&] { return njHas || njQuit; });
+        if (njQuit)
+          return;
+        job = njPending;
+        njHas = false;
+      }
+      auto t0 = std::chrono::steady_clock::now();
+      auto nc = neural.nextWords(job.wide, job.topk, job.budgetMs);
+      std::vector<std::pair<std::string, double>> out;
+      for (const auto &c : nc) {
+        std::string w = c.word;
+        // Heuristique SANS lexique (le lexique vit sur l'autre thread) : une
+        // ou deux lettres, ou finale en apostrophe = fragment BPE probable
+        // (« l » de « l'école ») → expansion. Couvre les élisions observées.
+        bool fragmentish =
+            w.size() <= 2 || w.back() == '\'';
+        if (fragmentish) {
+          int remain =
+              job.budgetMs -
+              (int)std::chrono::duration_cast<std::chrono::milliseconds>(
+                  std::chrono::steady_clock::now() - t0)
+                  .count();
+          w = remain > 60 ? neural.expand(c, 3, remain) : std::string{};
+        }
+        if (!w.empty())
+          out.push_back({w, (double)c.prob});
+      }
+      {
+        std::lock_guard<std::mutex> lk(njMu);
+        njDone.push_back({job.client, job.ctx, std::move(out)});
+      }
+      ssize_t n = write(wakePipe[1], "x", 1);
+      (void)n;
+    }
+  });
+#endif
+
   std::string sockpath = argc > 2 ? argv[2] : "/tmp/ime-predictord.sock";
   unlink(sockpath.c_str());
   int srv = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0);
@@ -1592,7 +1795,10 @@ int main(int argc, char **argv) {
   fprintf(stderr, "[predictord] écoute sur %s\n", sockpath.c_str());
 
   // Traite UNE ligne de protocole, renvoie la réponse ('\n' terminée).
-  auto handleLine = [&](const std::string &line) -> std::string {
+  // clientSeq : identité stable du client (le refresh async lui est adressé).
+  auto handleLine = [&](const std::string &line,
+                        uint64_t clientSeq) -> std::string {
+    (void)clientSeq;
     json resp;
     try {
       json req = json::parse(line);
@@ -1620,27 +1826,91 @@ int main(int argc, char **argv) {
             req.value("context", std::vector<std::string>{});
         std::string prefix = req.value("prefix", std::string{});
         model.maybeReload(); // config/dict/snippets à chaud (mtime)
-        Result r = model.predict(ctx, prefix);
+        // Contexte LARGE (E1) : texte brut avant le curseur, phrases
+        // précédentes comprises — réservé au neural (le n-gram garde le
+        // contexte borné à la phrase). Repli : les mots du contexte joints.
+        std::string wide = req.value("wide", std::string{});
+        if (wide.empty())
+          for (const auto &w : ctx) {
+            if (!wide.empty())
+              wide += ' ';
+            wide += w;
+          }
 #ifdef WITH_NEURAL
-        // Neural EN TÊTE pour le mot-suivant (prefix vide) ; n-gram conservé pour
-        // la complétion intra-mot + literalIsWord/autocomplete (auto-apply sûr).
-        if (neural.ready() && (model.cfg.neural || neuralForced) &&
-            prefix.empty() && !ctx.empty()) {
-          std::vector<std::string> nc = neural.nextWords(ctx, model.cfg.neuralTopk);
-          if (!nc.empty()) {
-            if (model.cfg.neuralOnly) {
-              r.candidates = nc; // mot-suivant 100% neuronal (n-gram écarté)
-            } else {
-              std::vector<std::string> merged = nc;
-              for (auto &w : r.candidates) {
-                bool dup = false;
-                for (auto &m : merged) if (m == w) { dup = true; break; }
-                if (!dup) merged.push_back(w);
-              }
-              r.candidates.swap(merged);
+        // Mot-suivant neuronal (E1/E2/E4) : candidats scorés sur le contexte
+        // large, fragments BPE complétés (« l » → « l'école »), puis FUSION
+        // par score dans predict() (langue/accord/appris respectés).
+        bool neuralWants = neural.ready() &&
+                           (model.cfg.neural || neuralForced) &&
+                           prefix.empty() && !wide.empty();
+        // Deux phases (E5) : l'engine a demandé "async" → n-gram tout de
+        // suite (pending:true), neural sur le thread de travail, refresh sur
+        // la même connexion dès qu'il aboutit.
+        bool deferred = neuralWants && model.cfg.asyncNeural &&
+                        req.value("async", false) && wakePipe[1] >= 0;
+        if (deferred) {
+          {
+            std::lock_guard<std::mutex> lk(njMu);
+            njPending = {clientSeq, wide, ctx, model.cfg.neuralTopk,
+                         model.cfg.neuralBudgetMs};
+            njHas = true; // remplace un éventuel job périmé (latest-only)
+          }
+          njCv.notify_one();
+          resp["pending"] = true;
+        }
+        std::vector<std::pair<std::string, double>> neuralCands;
+        if (neuralWants && !deferred) {
+          auto t0 = std::chrono::steady_clock::now();
+          auto nc =
+              neural.nextWords(wide, model.cfg.neuralTopk, model.cfg.neuralBudgetMs);
+          for (const auto &c : nc) {
+            std::string w = c.word;
+            if (model.looksFragment(w)) {
+              int remain =
+                  model.cfg.neuralBudgetMs -
+                  (int)std::chrono::duration_cast<std::chrono::milliseconds>(
+                      std::chrono::steady_clock::now() - t0)
+                      .count();
+              // ~1 décde minimum ; sous ça on jette le fragment plutôt que
+              // d'offrir un demi-mot.
+              w = remain > 60 ? neural.expand(c, 3, remain) : std::string{};
             }
+            if (!w.empty())
+              neuralCands.push_back({w, (double)c.prob});
           }
         }
+        Result r = model.predict(ctx, prefix, 6, neuralCands);
+        // Rerank neuronal de la complétion (E3) — opportuniste : seulement si
+        // le cache KV est déjà chaud pour ce contexte exact (le mot-suivant
+        // vient de tourner dessus). Mélange géométrique log-linéaire.
+        if (neural.ready() && (model.cfg.neural || neuralForced) &&
+            model.cfg.neuralRerank && !prefix.empty() && prefix[0] != ':' &&
+            !wide.empty() && r.candidates.size() >= 2 &&
+            r.scores.size() == r.candidates.size()) {
+          std::vector<float> lp;
+          if (neural.scoreFirstTokens(wide, r.candidates, lp)) {
+            const double lam = model.cfg.rerankWeight;
+            std::vector<size_t> ord(r.candidates.size());
+            std::vector<double> blend(r.candidates.size());
+            for (size_t i = 0; i < ord.size(); i++) {
+              ord[i] = i;
+              blend[i] = (1.0 - lam) * std::log(std::max(r.scores[i], 1e-300)) +
+                         lam * (double)lp[i];
+            }
+            std::stable_sort(ord.begin(), ord.end(), [&](size_t a, size_t b) {
+              return blend[a] > blend[b];
+            });
+            std::vector<std::string> rc;
+            rc.reserve(ord.size());
+            for (size_t i : ord)
+              rc.push_back(r.candidates[i]);
+            r.candidates.swap(rc);
+            // autocomplete inchangé : la sémantique d'auto-application reste
+            // 100% n-gram (conservatrice) — le rerank ne réordonne que la barre.
+          }
+        }
+#else
+        Result r = model.predict(ctx, prefix);
 #endif
         resp["candidates"] = r.candidates;
         resp["literalIsWord"] = r.literalIsWord;
@@ -1665,13 +1935,22 @@ int main(int argc, char **argv) {
   // l'engine — synchrone sur le thread clavier de fcitx — attendait derrière.
   struct Client {
     int fd;
+    uint64_t seq; // identité stable (l'fd peut être réutilisé après close)
     std::string in, out;
   };
   std::vector<Client> clients;
   std::vector<pollfd> pfds;
+  uint64_t clientSeq = 0;
   for (;;) {
     pfds.clear();
     pfds.push_back({srv, POLLIN, 0});
+#ifdef WITH_NEURAL
+    // fd 1 du tableau : le pipe de réveil du worker neural (résultats prêts).
+    pfds.push_back({wakePipe[0], POLLIN, 0});
+    constexpr size_t kFixed = 2;
+#else
+    constexpr size_t kFixed = 1;
+#endif
     for (auto &cl : clients)
       pfds.push_back(
           {cl.fd, short(POLLIN | (cl.out.empty() ? 0 : POLLOUT)), 0});
@@ -1684,11 +1963,44 @@ int main(int argc, char **argv) {
         if (c < 0)
           break; // EAGAIN : plus personne en attente
         fcntl(c, F_SETFL, fcntl(c, F_GETFL) | O_NONBLOCK);
-        clients.push_back({c, {}, {}}); // servi au prochain tour de poll
+        clients.push_back({c, ++clientSeq, {}, {}}); // servi au prochain tour
       }
+#ifdef WITH_NEURAL
+    if (pfds[1].revents & POLLIN) {
+      char sink[64];
+      while (read(wakePipe[0], sink, sizeof(sink)) > 0)
+        ;
+      std::vector<NeuralDone> ready;
+      {
+        std::lock_guard<std::mutex> lk(njMu);
+        ready.swap(njDone);
+      }
+      // FUSION sur le thread principal (accès Model exclusif) puis refresh au
+      // client d'origine — s'il est parti entre-temps, on jette.
+      for (auto &d : ready) {
+        Client *dst = nullptr;
+        for (auto &cl : clients)
+          if (cl.seq == d.client && cl.fd >= 0) {
+            dst = &cl;
+            break;
+          }
+        if (!dst)
+          continue;
+        Result r = model.predict(d.ctx, "", 6, d.cands);
+        json resp;
+        resp["candidates"] = r.candidates;
+        resp["refresh"] = true;
+        try {
+          dst->out += resp.dump() + "\n";
+        } catch (...) {
+        }
+        // le flush partira au POLLOUT du prochain tour (out non vide).
+      }
+    }
+#endif
     for (size_t i = 0; i < nOld; i++) {
       Client &cl = clients[i];
-      short ev = pfds[i + 1].revents;
+      short ev = pfds[i + kFixed].revents;
       if (!ev)
         continue;
       bool eof = false, drop = false;
@@ -1715,7 +2027,7 @@ int main(int argc, char **argv) {
       while (!drop && (nl = cl.in.find('\n')) != std::string::npos) {
         std::string line = cl.in.substr(0, nl);
         cl.in.erase(0, nl + 1);
-        cl.out += handleLine(line);
+        cl.out += handleLine(line, cl.seq);
       }
       // flush non bloquant ; le reste partira sur POLLOUT. EPIPE = client
       // parti sans lire (learn fire-and-forget de l'engine) : on jette.

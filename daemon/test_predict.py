@@ -129,6 +129,16 @@ try:
     c = cands("bonjpur")
     check("typo adjacence AZERTY: bonjpur → bonjour", "bonjour" in c, str(c))
 
+    # 2bis) lettre OUBLIÉE + espace oublié (E8)
+    c = cands("bonjor")
+    check("typo omission: bonjor → bonjour", "bonjour" in c, str(c))
+    c = cands("travil")
+    check("typo omission: travil → travail", "travail" in c, str(c))
+    c = cands("nepas")
+    check("espace oublié: nepas → « ne pas »", "ne pas" in c, str(c))
+    a = auto("nepas")
+    check("espace oublié: jamais auto-appliqué", " " not in a, repr(a))
+
     # 3) complétion re-classée par le contexte
     base = cands("v")
     check("sans contexte: 'va' avant 'vais'",

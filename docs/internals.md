@@ -32,13 +32,25 @@ ime/
 ## Protocole socket (engine ↔ daemon)
 
 ```
--> {"context":["je"],"prefix":"v"}
+-> {"context":["je"],"prefix":"v","wide":"Il fait beau. Je"}
 <- {"candidates":["veux","vais",...],"literalIsWord":false,"autocomplete":"veux"}
 -> {"learn":{"prev":"je","word":"code"}}            <- {"ok":true}
+
+# deux phases (mot-suivant neural, E5) :
+-> {"context":["je"],"prefix":"","wide":"...","async":true}
+<- {"candidates":[n-gram...],"pending":true}        # immédiat
+<- {"candidates":[fusion neural...],"refresh":true} # dès que le neural aboutit
 ```
 `literalIsWord` dit si le préfixe tapé est déjà un mot réel — l'engine ne
 remplace alors le mot que sur sélection explicite (jamais d'autocorrection d'un
 mot valide). `autocomplete` est le mot que l'Espace applique (haute confiance).
+`wide` est le TEXTE BRUT avant le curseur (~240 caractères, phrases précédentes
+et ponctuation comprises, via SurroundingText) : seul le neural le lit — son
+avantage mesuré exige le contexte long ; le n-gram garde `context` (borné à la
+phrase). `async` demande les deux phases : n-gram tout de suite
+(`pending:true`), puis une 2e ligne `refresh:true` sur la même connexion
+(l'engine la lit depuis la boucle d'événements fcitx — zéro blocage clavier, un
+refresh périmé — frappe/commit entre-temps — est jeté).
 Socket par défaut `/tmp/ime-predictord.sock` (`IME_PREDICTORD_SOCK`).
 
 ## Le modèle (v3) — Kneser-Ney interpolé précalculé
@@ -63,8 +75,13 @@ P1(w)    = 0.7·Pcont(w) + 0.3·Pfreq(w)
   (replié accent-insensible : `francais`→français) — plus d'interpolation
   ad-hoc λ. Sans contexte : fréquence brute (bon prior en début de phrase).
 - **Autocorrection en noisy-channel** : `P(w|ctx)·P(frappe|w)`, canal pondéré
-  par type de faute (transposition 0.12 > voisin AZERTY 0.10 > lettre en trop
-  0.07), jamais à travers apostrophe/trait d'union (`j'ai` intouchable).
+  par type de faute (transposition 0.12 > voisin AZERTY 0.10 > lettre oubliée
+  0.09 > lettre en trop 0.07), jamais à travers apostrophe/trait d'union
+  (`j'ai` intouchable). **Espace oublié** : un préfixe qui se coupe en deux
+  vrais mots au bigramme observé propose l'expression (« dela » → « de la »,
+  0.10) — affichée seulement, jamais auto-appliquée. Mesuré (held-out 2023,
+  fautes synthétiques 4 types) : récupération top-1 75→88,5 %, top-3
+  80→95,2 %.
 - **Garde-fous d'auto-application** (l'Espace ne remplace que sûr de lui ; les
   candidats restent toujours affichés) : préfixe ≥ 3 lettres (`az` ne devient
   pas « aziz »), le top doit dominer le 2ᵉ ×2 (ambigu → littéral, Tab choisit),
@@ -324,6 +341,28 @@ python3 ime/daemon/test_predict.py "$(nix build ./ime#predictord --no-link --pri
       chiffres publiés Gboard (cf section) : in-vocab **16,9/27,0 %** =
       niveau CIFG-LSTM déployé ; forcer la langue ≈ gratuit (−0,3 pt hit@3
       au pire, à contre-emploi).
+- [x] **Neural v2 (2026-07-03) — E1→E8.** (1) Contexte LARGE : l'engine envoie
+      le texte brut avant le curseur (`wide`, ~240 car., phrases précédentes
+      comprises) — le neural prédit sur SON régime gagnant, y compris en début
+      de phrase. (2) Expansion multi-token bornée : les fragments BPE
+      (« l » → « l'école », élisions françaises) sont complétés jusqu'à la
+      frontière de mot (KV restauré ensuite). (3) Rerank neuronal de la
+      complétion, opportuniste : cache KV chaud pour ce contexte exact →
+      mélange log-linéaire `(1−λ)·log P_KN + λ·logprob` (λ=`rerankWeight`),
+      jamais de prefill sur le chemin chaud, `autocomplete` reste 100 % n-gram.
+      (4) FUSION par score : candidats neuronaux = probabilité softmax ×
+      `neuralBoost`, passés par langFactor/agreeFactor et fusionnés avec
+      modèle + appris (fini le préfixage brut qui court-circuitait langue
+      stricte, accord et apprentissage). (5) Deux phases ASYNC : n-gram
+      instantané + refresh neural poussé (worker thread daemon, event loop
+      fcitx côté engine, générations anti-périmé) — plus de hitch après
+      Espace. (6) `neuralBudgetMs` : budget temps dur de l'appel neuronal.
+      (7) Canal de faute : lettre oubliée + espace oublié (cf plus haut).
+      (8) GGUF *base* épinglé (nix-config vinland, fetchurl + hash).
+      Config daemon : `neuralBudgetMs` 180, `neuralBoost` 2.0, `neuralRerank`
+      true, `rerankWeight` 0.4, `asyncNeural` true ; engine :
+      `asyncNextWord` true. Smoke live (base 1.7B) : « allé à » → l'école ;
+      « film au » + `cin` → cinéma top-1 ; refresh async +280 ms.
 - [x] **Couche NEURONALE (libllama, GGUF) — implémentée 2026-06-23.**
       `daemon/neural.{h,cpp}` (NeuralPredictor : cache KV incrémental + top-k
       tokens initiaux de mot), intégrée dans `predictord` derrière `WITH_NEURAL`

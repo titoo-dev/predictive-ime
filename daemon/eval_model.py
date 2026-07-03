@@ -50,13 +50,15 @@ def synth_typo(w, salt):
     core = [i for i, ch in enumerate(w) if ch.isalpha()]
     if len(core) < 4:
         return None
-    kind = h % 3
+    kind = h % 4
     i = core[1 + h % (len(core) - 2)]  # jamais la 1re lettre (peu réaliste)
     if kind == 0 and i + 1 in core:  # transposition
         return w[:i] + w[i + 1] + w[i] + w[i + 2:]
     if kind == 1 and w[i] in AZERTY:  # substitution voisin AZERTY
         nb = AZERTY[w[i]]
         return w[:i] + nb[h % len(nb)] + w[i + 1:]
+    if kind == 2:  # lettre OUBLIÉE (omission — la faute de frappe la + courante)
+        return w[:i] + w[i + 1:]
     return w[:i] + w[i] + w[i:]  # doublement de lettre (= lettre en trop)
 
 
@@ -85,19 +87,24 @@ class Daemon:
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.sock.connect(self.sock_path)
         self.buf = b""
-        self.lat = []
+        self.lat = {"nextword": [], "completion": []}
 
-    def query(self, context, prefix):
+    def query(self, context, prefix, wide=None):
+        req = {"context": context, "prefix": prefix}
+        # Contexte LARGE (E1) : ce que l'engine envoie depuis le SurroundingText
+        # — le neural le lit, le n-gram l'ignore.
+        if wide:
+            req["wide"] = wide
         t0 = time.perf_counter()
-        self.sock.sendall(
-            (json.dumps({"context": context, "prefix": prefix}) + "\n").encode())
+        self.sock.sendall((json.dumps(req) + "\n").encode())
         while b"\n" not in self.buf:
             chunk = self.sock.recv(65536)
             if not chunk:
                 raise RuntimeError("daemon mort")
             self.buf += chunk
         line, self.buf = self.buf.split(b"\n", 1)
-        self.lat.append(time.perf_counter() - t0)
+        self.lat["nextword" if prefix == "" else "completion"].append(
+            time.perf_counter() - t0)
         return json.loads(line)
 
     def close(self):
@@ -115,10 +122,14 @@ def evaluate(daemon, sents, vocab):
     for si, toks in enumerate(sents):
         for i in range(1, len(toks)):
             ctx = toks[max(0, i - 2):i]
+            # contexte LARGE : tout le préfixe de la phrase (≤32 mots), comme
+            # le SurroundingText côté engine — c'est le régime où le neural
+            # a son avantage mesuré.
+            wide = " ".join(toks[max(0, i - 32):i])
             w = toks[i]
 
             # --- mot-suivant
-            r = daemon.query(ctx, "")
+            r = daemon.query(ctx, "", wide)
             c = r["candidates"]
             nw["n"] += 1
             iv = w in vocab
@@ -137,7 +148,7 @@ def evaluate(daemon, sents, vocab):
             comp["words"] += 1
             comp["chars"] += len(w)
             for L in range(1, len(w)):
-                r = daemon.query(ctx, w[:L])
+                r = daemon.query(ctx, w[:L], wide)
                 if L == 2 and w in r["candidates"][:3]:
                     comp["top3at2"] += 1
                 if (r.get("autocomplete") == w
@@ -149,7 +160,7 @@ def evaluate(daemon, sents, vocab):
             if (si + i) % 3 == 0:
                 typo = synth_typo(w, 0x5EED)
                 if typo and typo != w and typo not in vocab:
-                    r = daemon.query(ctx, typo)
+                    r = daemon.query(ctx, typo, wide)
                     c = r["candidates"]
                     fix["n"] += 1
                     fix["top1"] += w in c[:1]
@@ -212,11 +223,14 @@ def main():
                         d[k] += r[k]
         if len(args.sentences) > 1:
             report("TOTAL", *tot)
-        lat = sorted(daemon.lat)
-        print(f"\n  latence socket : p50 "
-              f"{1e6 * lat[len(lat) // 2]:.0f}µs   p99 "
-              f"{1e6 * lat[int(len(lat) * 0.99)]:.0f}µs   "
-              f"({len(lat)} requêtes)")
+        for kind, ls in daemon.lat.items():
+            if not ls:
+                continue
+            ls = sorted(ls)
+            print(f"\n  latence {kind:<10}: p50 "
+                  f"{1e3 * ls[len(ls) // 2]:.2f}ms   p99 "
+                  f"{1e3 * ls[int(len(ls) * 0.99)]:.2f}ms   "
+                  f"({len(ls)} requêtes)")
     finally:
         daemon.close()
 
