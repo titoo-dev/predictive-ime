@@ -372,10 +372,11 @@ python3 ime/daemon/test_predict.py "$(nix build ./ime#predictord --no-link --pri
       autoApply : le champ `ghost` est toujours calculé ; **→ l'accepte
       explicitement** (commit sans espace, façon Copilot/fish) — le mode
       prudent garde ses complétions. (3) `barWords` (1-8, défaut 6) : la barre
-      ne montre que les N meilleurs. (4) UI : indices 1-6 discrets sur les
-      chips pendant la navigation (découvrabilité de la sélection directe),
-      fondu de contenu 80 ms quand la barre PASSIVE se rafraîchit (swap
-      asynchrone du neural — plus de « pop »). (5) `ime-preferences` : bascule
+      ne montre que les N meilleurs. (4) UI : fondu de contenu 80 ms quand la
+      barre PASSIVE se rafraîchit (swap asynchrone du neural — plus de
+      « pop »). Les indices 1-6 sur les chips (essai) ont été retirés à
+      l'usage — les chiffres sélectionnent toujours en navigation, sans
+      marquage. (5) `ime-preferences` : bascule
       « Restauration d'accents ». Résout le TODO « auto-accent quand la forme
       sans accent est au dico ».
 - [x] **Neural v2 (2026-07-03) — E1→E8.** (1) Contexte LARGE : l'engine envoie

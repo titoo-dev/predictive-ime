@@ -105,20 +105,6 @@ Item {
                         opacity: 0.9
                         visible: isAuto && hlPos < 0
                     }
-                    // indice 1-6 discret pendant la NAVIGATION : ces chiffres
-                    // sélectionnent directement le candidat (découvrabilité)
-                    Text {
-                        visible: hlPos >= 0 && !gridMode && index < 6 && !emoji
-                        text: index + 1
-                        anchors.right: parent.right
-                        anchors.top: parent.top
-                        anchors.rightMargin: 3
-                        color: index === Math.round(hlPos)
-                               ? colors.onAccent : colors.onSurface
-                        opacity: 0.45
-                        font.pixelSize: 8
-                        font.family: "Maple Mono NF"
-                    }
                     Text {
                         id: label
                         anchors.centerIn: parent
