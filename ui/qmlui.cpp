@@ -240,6 +240,12 @@ private:
         if (!tiRect_.valid)
             return img;
         const int barH = img.height();
+        // GARDE-FOU : une « ligne de texte » plus haute que toute la barre
+        // n'en est pas une — c'est le rect de REPLI du compositeur (fenêtre
+        // entière, app sans rectangle de curseur). Aucun évitement fiable
+        // possible : rendu inchangé.
+        if (tiRect_.h > barH)
+            return img;
         const int rowH = std::max(tiRect_.h, 2); // rect dégénéré (h=0) = ligne
         const bool overlap = tiRect_.y < barH && tiRect_.y + rowH > 0;
         if (overlap)
@@ -310,6 +316,12 @@ private:
                                    int32_t h) {
         auto *self = static_cast<QmlPanel *>(data);
         self->tiRect_ = {x, y, w, h, true};
+        // Diagnostic « la barre ne suit pas le curseur » : si ce rect ne
+        // change JAMAIS pendant la frappe, c'est l'application qui ne met pas
+        // à jour son rectangle de curseur (text-input v3) — le compositeur
+        // n'a alors rien à suivre. `fcitx5 --verbose qmlpanel=5` pour voir.
+        QP_DEBUG() << "text_input_rectangle " << x << "," << y << " " << w
+                   << "x" << h;
     }
 
     void finishUnmap() {
