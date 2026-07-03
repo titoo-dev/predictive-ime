@@ -82,13 +82,21 @@ P1(w)    = 0.7·Pcont(w) + 0.3·Pfreq(w)
   (replié accent-insensible : `francais`→français) — plus d'interpolation
   ad-hoc λ. Sans contexte : fréquence brute (bon prior en début de phrase).
 - **Autocorrection en noisy-channel** : `P(w|ctx)·P(frappe|w)`, canal pondéré
-  par type de faute (transposition 0.12 > voisin AZERTY 0.10 > lettre oubliée
-  0.09 > lettre en trop 0.07), jamais à travers apostrophe/trait d'union
-  (`j'ai` intouchable). **Espace oublié** : un préfixe qui se coupe en deux
-  vrais mots au bigramme observé propose l'expression (« dela » → « de la »,
-  0.10) — affichée seulement, jamais auto-appliquée. Mesuré (held-out 2023,
-  fautes synthétiques 4 types) : récupération top-1 75→88,5 %, top-3
-  80→95,2 %.
+  par type de faute (transposition 0.12 > apostrophe oubliée 0.11 > voisin
+  AZERTY 0.10 > lettre oubliée 0.09 > lettre en trop 0.07 — 0.02 seulement en
+  TÊTE de mot : « dici » est une élision, pas un « d » parasite devant
+  « ici »), jamais à travers apostrophe/trait d'union (`j'ai` intouchable).
+  **Espace oublié** : un préfixe qui se coupe en deux vrais mots au bigramme
+  observé propose l'expression (« dela » → « de la », 0.10) — affichée
+  seulement, jamais auto-appliquée. **Apostrophe oubliée** : les élisions sont
+  indexées par repli SANS apostrophe (« jai » → j'ai, « dici » → d'ici,
+  « cetait » → c'était ; correspondance mot-entier = boost 0.5) et SYNTHÉTISÉES
+  au besoin (proclitique j/c/d/l/m/n/s/t/qu + ' + mot à initiale vocalique :
+  « temener » → t'emmener, absent du vocab) — composable avec les autres
+  canaux (élision + lettre oubliée), synthèse coupée quand le tapé a des
+  correspondances exactes (« les » ne fait pas surgir « l'esprit »). Mesuré
+  (held-out 2023, fautes synthétiques 4 types) : récupération top-1
+  75→88,5 %, top-3 80→95,2 %.
 - **Garde-fous d'auto-application** (l'Espace ne remplace que sûr de lui ; les
   candidats restent toujours affichés) : préfixe ≥ 3 lettres (`az` ne devient
   pas « aziz »), le top doit dominer le 2ᵉ ×2 (ambigu → littéral, Tab choisit),

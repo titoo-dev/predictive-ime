@@ -21,6 +21,11 @@ WORDS = {
     "pc": 3000, "soleil": 3000, "solar": 3500,
     # élisions : proclitique nu (j') vs formes pleines (j'ai/j'aime) — pour B.
     "j'": 12000, "j'ai": 50000, "j'aime": 8000,
+    # apostrophe oubliée (canal élision) : jai→j'ai, dici→d'ici, cest→c'est,
+    # temener→t'emmener (élision + lettre oubliée, canaux composés). « jai »
+    # est AUSSI un mot-poubelle du corpus (comme dans le vrai modèle) : la
+    # restauration doit passer outre literalIsWord (accentOnly).
+    "d'ici": 6000, "c'est": 60000, "t'emmener": 800, "jai": 300,
     # restauration d'accents : graphie brute AUSSI au corpus (dominance
     # accentDom), homographe légitime (cote/côté), ligature (coeur/cœur).
     "francais": 1500, "cote": 5000, "côté": 6000, "coeur": 9000, "cœur": 4000,
@@ -141,6 +146,23 @@ try:
     check("espace oublié: nepas → « ne pas »", "ne pas" in c, str(c))
     a = auto("nepas")
     check("espace oublié: jamais auto-appliqué", " " not in a, repr(a))
+
+    # 2ter) APOSTROPHE OUBLIÉE (canal élision, repli sans apostrophe)
+    c = cands("jai")
+    check("élision: jai → j'ai", "j'ai" in c, str(c))
+    r = req({"prefix": "jai", "context": []})
+    check("élision: jai → j'ai auto-appliqué (dominant)",
+          r.get("autocomplete") == "j'ai", str(r))
+    check("élision: restauration pure → accentOnly (malgré « jai » au vocab)",
+          r.get("accentOnly") is True and r.get("literalIsWord") is True,
+          str(r))
+    c = cands("dici")
+    check("élision: dici → d'ici", "d'ici" in c, str(c))
+    c = cands("cest")
+    check("élision: cest → c'est", "c'est" in c, str(c))
+    c = cands("temener")
+    check("élision composée: temener → t'emmener (apostrophe + lettre)",
+          "t'emmener" in c, str(c))
 
     # 3) complétion re-classée par le contexte
     base = cands("v")
@@ -424,6 +446,15 @@ try:
     check("autoApply off: l'accent est restauré quand même (accentRestore)",
           r.get("autocomplete") == "être" and r.get("accentOnly") is True,
           str(r))
+    # régression : un mot APPRIS (score plancher learnedFloor) ne doit pas
+    # tuer sa propre restauration (garde `credible` auto-comparée).
+    req({"learn": {"prev": "", "word": "être"}})
+    r = req({"prefix": "etre", "context": []})
+    check("autoApply off: l'accent survit à l'apprentissage du mot",
+          r.get("autocomplete") == "être" and r.get("accentOnly") is True,
+          str(r))
+    req({"forget": {"word": "être"}})
+
     set_config({"autoApply": False, "accentRestore": False}, 4)
     r = req({"prefix": "etre", "context": []})
     check("autoApply off + accentRestore off: plus rien ne s'applique",

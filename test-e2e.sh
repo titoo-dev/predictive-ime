@@ -140,6 +140,8 @@ expect "snippet ';mail'+espace"        ";mail ok "              "dev@e2e.test ok
 # mot en cours, et ne consomme pas la fenêtre de revert.
 expect "Shift seul ne casse pas le mot" "bonju<SHIFT>or "       "bonjour "
 expect "revert survit à un Shift"      "vias <SHIFT><BS>"       "vias"
+# apostrophe oubliée (canal élision) : « jai » → j'ai sur Espace.
+expect "élision: jai → j'ai"           "jai "                   "j'ai "
 # restauration d'accents (fold-equal) : accents et élisions sur Espace,
 # et → accepte le texte fantôme (commit SANS espace).
 expect "restauration d'accents"        "francais "              "français "

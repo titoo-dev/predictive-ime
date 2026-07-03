@@ -297,6 +297,10 @@ struct Model {
   std::unordered_map<std::string, Morph> morph_;
   std::vector<std::string> fold;  // forme repliée (minuscule sans accent)
   std::vector<uint32_t> byFold;   // indices triés par forme repliée
+  // Élisions/contractions indexées par repli SANS APOSTROPHE : « jai »→j'ai,
+  // « dici »→d'ici, « cetait »→c'était. Petit sous-ensemble (mots contenant
+  // une apostrophe), trié pour la recherche par préfixe.
+  std::vector<std::pair<std::string, uint32_t>> elisions_;
   std::unordered_set<std::string> caseWords; // mots en minuscule, accents gardés
   std::unordered_map<std::string, uint32_t> id_;
   double freqTot_ = 1.0; // Σ freq (P1, mélange unigramme)
@@ -319,10 +323,23 @@ struct Model {
   static constexpr double UNI_MIX = 0.7;
   // Canal de faute (noisy channel) : P(frappe|mot) par type d'opération.
   static constexpr double CH_TRANSPOSE = 0.12; // inversion de 2 lettres
+  static constexpr double CH_APOS = 0.11;      // apostrophe oubliée (« jai »)
+  // Élision dont le repli sans apostrophe est EXACTEMENT le tapé (« dici » ==
+  // d'ici entier) : bien plus probable qu'une faute générique — sans ce boost
+  // « ici » (très fréquent, canal lettre-en-trop) passait devant d'ici.
+  static constexpr double CH_APOS_EXACT = 0.5;
   static constexpr double CH_SUBST = 0.10;     // voisin AZERTY
   static constexpr double CH_MISS = 0.09;      // lettre OUBLIÉE (omission)
   static constexpr double CH_EXTRA = 0.07;     // lettre en trop
+  // Lettre en trop EN TÊTE de mot : rare comme faute de frappe — c'est bien
+  // plus souvent une élision sans apostrophe (« dici », « cetait ») qu'un
+  // « d » parasite devant « ici ».
+  static constexpr double CH_EXTRA_HEAD = 0.02;
   static constexpr double CH_SPLIT = 0.10;     // espace oublié (« dela »)
+  // Restauration d'accents : le candidat fold-equal doit peser au moins ça
+  // face au meilleur candidat global — un mot-poubelle du corpus (« cétait »,
+  // 259 occurrences) ne doit pas court-circuiter « c'était ».
+  static constexpr double ACCENT_MIN_VS_TOP = 0.25;
   // (Les garde-fous d'auto-application — longueur mini, dominance — sont dans
   // Config : réglables à chaud via config.json.)
   // Un mot APPRIS hors vocabulaire doit avoir été vu >= 2 fois avant de passer
@@ -546,6 +563,17 @@ struct Model {
       byFold[i] = i;
     std::sort(byFold.begin(), byFold.end(),
               [&](uint32_t a, uint32_t b) { return fold[a] < fold[b]; });
+    // index des élisions par repli SANS apostrophe (« jai » → j'ai)
+    elisions_.clear();
+    for (uint32_t i = 0; i < words.size(); i++) {
+      if (fold[i].find('\'') == std::string::npos)
+        continue;
+      std::string k = fold[i];
+      k.erase(std::remove(k.begin(), k.end(), '\''), k.end());
+      if (k.size() >= 2)
+        elisions_.push_back({std::move(k), i});
+    }
+    std::sort(elisions_.begin(), elisions_.end());
     pcont.resize(words.size(), 0.f);
     freqTot_ = 1.0;
     for (uint32_t fr : freq)
@@ -879,6 +907,62 @@ struct Model {
       out << keep;
     }
     return removed;
+  }
+
+  // Canal APOSTROPHE OUBLIÉE pour une clé sans apostrophe. Deux sources :
+  //  - les élisions du VOCABULAIRE, indexées par repli sans apostrophe
+  //    (« jai » → j'ai) — correspondance exacte du mot entier = boost
+  //    CH_APOS_EXACT (bien plus probable qu'une faute générique) ;
+  //  - la SYNTHÈSE productive proclitique+'+mot (« temmener » → t' + emmener
+  //    → t'emmener, absent du vocabulaire) — l'élision française est
+  //    productive, le vocab ne liste pas toutes les formes. Initiale
+  //    vocalique exigée (t'emmener ✓, t'porte ✗). `synth` l'active (on la
+  //    coupe quand le préfixe a déjà des correspondances exactes : taper
+  //    « les » ne doit pas faire surgir « l'esprit »).
+  template <class Score, class Offer>
+  void elisionOffers(const std::string &key, double ch, bool synth,
+                     Score &&score, Offer &&offer) {
+    auto [el, eh] = elisionPrefixRange(key);
+    for (auto it = el; it != eh; ++it)
+      offer(words[it->second],
+            score(it->second) *
+                (it->first == key ? ch * (CH_APOS_EXACT / CH_APOS) : ch));
+    if (!synth)
+      return;
+    size_t plen = 0;
+    if (key.size() >= 3 && std::strchr("jcdlmnst", key[0]))
+      plen = 1;
+    else if (key.size() >= 4 && key[0] == 'q' && key[1] == 'u')
+      plen = 2;
+    if (!plen || std::string("aeiouyh").find(key[plen]) == std::string::npos)
+      return;
+    const std::string rest = key.substr(plen);
+    auto [lo, hi] = foldedPrefixRange(rest);
+    std::vector<std::pair<uint32_t, double>> tops;
+    for (auto it = lo; it != hi; ++it)
+      tops.push_back({*it, score(*it)});
+    std::partial_sort(tops.begin(),
+                      tops.begin() + std::min<size_t>(3, tops.size()),
+                      tops.end(),
+                      [](auto &a, auto &b) { return a.second > b.second; });
+    for (size_t i = 0; i < std::min<size_t>(3, tops.size()); i++)
+      offer(key.substr(0, plen) + "'" + words[tops[i].first],
+            tops[i].second * ch);
+  }
+
+  // Borne [lo,hi) des ÉLISIONS dont le repli sans apostrophe commence par
+  // `fp` (« jai » → j'ai, « jav » → j'avais…).
+  std::pair<std::vector<std::pair<std::string, uint32_t>>::const_iterator,
+            std::vector<std::pair<std::string, uint32_t>>::const_iterator>
+  elisionPrefixRange(const std::string &fp) const {
+    auto lo = std::lower_bound(
+        elisions_.begin(), elisions_.end(), fp,
+        [](const auto &a, const std::string &p) { return a.first < p; });
+    auto hi = lo;
+    while (hi != elisions_.end() &&
+           hi->first.compare(0, fp.size(), fp) == 0)
+      ++hi;
+    return {lo, hi};
   }
 
   // Borne [lo,hi) des mots dont le repli commence par `fp`.
@@ -1322,6 +1406,13 @@ private:
     for (auto it = lo; it != hi; ++it, ++exact)
       offer(words[*it], scoreOf(*it));
 
+    // (2bis) APOSTROPHE OUBLIÉE : « jai »→j'ai, « dici »→d'ici, « cetait »→
+    //        c'était — élisions du vocab + synthèse proclitique (t'emmener).
+    //        Synthèse seulement sans correspondance exacte (pas de bruit
+    //        « l'esprit » en tapant « les »).
+    if (fp.size() >= 2 && fp.find('\'') == std::string::npos)
+      elisionOffers(fp, CH_APOS, /*synth=*/exact == 0, scoreOf, offer);
+
     // (3) autocorrection noisy-channel (edit-distance 1) si l'exact est maigre.
     if (exact < size_t(k))
       fuzzyComplete(fp, scoreOf, offer);
@@ -1424,7 +1515,18 @@ private:
         bool dominant =
             typedFreq <= 0.0 ||
             double(freq[best]) >= cfg.accentDom * typedFreq;
-        if (ligOnly || dominant)
+        // GARDE ANTI-POUBELLE : la forme accentuée doit peser face au meilleur
+        // candidat global — « cétait » (259 occurrences de bruit corpus) ne
+        // court-circuite pas « c'était » (canal élision, largement devant).
+        // Si le candidat accentué EST le top du classement, il est crédible
+        // par définition — sans ce court-circuit, un mot APPRIS (score
+        // plancher learnedFloor bien au-dessus de l'échelle modèle) se
+        // comparait à lui-même et tuait sa propre restauration (« français »
+        // appris une fois → « francais » ne se corrigeait plus).
+        bool credible =
+            ranked.empty() || words[best] == ranked[0].first ||
+            bestS >= ACCENT_MIN_VS_TOP * ranked[0].second;
+        if ((ligOnly || dominant) && credible)
           accentWord = words[best];
       }
     }
@@ -1441,8 +1543,16 @@ private:
           !res.ghost.empty() && lowerKeep(res.ghost) == lowerKeep(prefix);
       res.autocomplete =
           (!res.ghost.empty() && !ghostIsLiteral) ? res.ghost : accentWord;
+      // RESTAURATION pure = ne diffère du tapé que par accents et/ou
+      // APOSTROPHES (« jai » → j'ai : mêmes lettres). L'engine peut alors
+      // appliquer même si le tapé traîne dans le vocab comme bruit de corpus
+      // (« jai » y est) — une restauration ne change jamais le mot.
+      auto stripApos = [](std::string s) {
+        s.erase(std::remove(s.begin(), s.end(), '\''), s.end());
+        return s;
+      };
       res.accentOnly = !res.autocomplete.empty() &&
-                       foldStr(res.autocomplete) == fp;
+                       stripApos(foldStr(res.autocomplete)) == stripApos(fp);
     } else if (cfg.accentRestore && !accentWord.empty()) {
       res.autocomplete = accentWord;
       res.accentOnly = true;
@@ -1503,7 +1613,7 @@ private:
         continue;
       std::string v = fp;
       v.erase(i, 1);
-      addv(v, CH_EXTRA);
+      addv(v, i == 0 ? CH_EXTRA_HEAD : CH_EXTRA);
     }
     const auto &adj = azerty(); // substitutions par adjacence
     for (size_t i = 0; i < L; i++) {
@@ -1537,6 +1647,14 @@ private:
       size_t kk = std::min<size_t>(3, tops.size());
       for (size_t i = 0; i < kk; i++)
         offer(words[tops[i].first], tops[i].second * ch);
+      // ÉLISIONS composées : la variante corrigée peut aussi être une élision
+      // sans apostrophe — « temener » → (insert m) → « temmener » → t'emmener
+      // (synthèse t'+emmener). Deux fautes cumulées → canaux multipliés.
+      // Synthèse seulement si la variante GARDE la 1re lettre tapée : une
+      // substitution du proclitique lui-même fabriquait du bruit (« dici » →
+      // variante « sici » → « s'ici », qui n'existe pas).
+      if (v.find('\'') == std::string::npos)
+        elisionOffers(v, ch * CH_APOS, /*synth=*/v[0] == fp[0], score, offer);
     }
   }
 
