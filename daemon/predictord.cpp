@@ -1368,20 +1368,39 @@ private:
         push(emojis_[eid]); // …puis les populaires (remplit la grille)
       return; // pas d'autocomplete : Espace après ':' garde le littéral
     }
-    auto lo = std::lower_bound(
-        emojiKeys_.begin(), emojiKeys_.end(), q,
-        [](const EmojiKey &a, const std::string &p) { return a.key < p; });
     std::unordered_map<uint32_t, double> bestPer;
-    for (auto it = lo;
-         it != emojiKeys_.end() && it->key.compare(0, q.size(), q) == 0; ++it) {
-      double s = it->w + (it->key.size() == q.size() ? 2.0 : 0.0) -
-                 0.05 * double(it->key.size() - q.size());
-      auto u = userUni.find(emojis_[it->eid]);
-      if (u != userUni.end())
-        s += 10.0 + double(u->second);
-      auto [b, fresh] = bestPer.try_emplace(it->eid, s);
-      if (!fresh && s > b->second)
-        b->second = s;
+    auto scan = [&](const std::string &p, double mult) {
+      auto lo = std::lower_bound(
+          emojiKeys_.begin(), emojiKeys_.end(), p,
+          [](const EmojiKey &a, const std::string &pre) { return a.key < pre; });
+      for (auto it = lo;
+           it != emojiKeys_.end() && it->key.compare(0, p.size(), p) == 0;
+           ++it) {
+        double s = (it->w + (it->key.size() == p.size() ? 2.0 : 0.0) -
+                    0.05 * double(it->key.size() - p.size())) *
+                   mult;
+        auto u = userUni.find(emojis_[it->eid]);
+        if (u != userUni.end())
+          s += 10.0 + double(u->second);
+        auto [b, fresh] = bestPer.try_emplace(it->eid, s);
+        if (!fresh && s > b->second)
+          b->second = s;
+      }
+    };
+    scan(q, 1.0);
+    // Tolérance aux FAUTES : rien en préfixe exact et requête assez longue →
+    // on réessaie les transpositions (« ceour » → cœur) et les suppressions
+    // d'un caractère (« coeurr » → cœur), score pénalisé — même esprit que
+    // le canal noisy des mots, en beaucoup plus simple.
+    if (bestPer.empty() && q.size() >= 3) {
+      for (size_t i = 0; i + 1 < q.size(); i++) {
+        std::string t = q;
+        std::swap(t[i], t[i + 1]);
+        if (t != q)
+          scan(t, 0.5);
+      }
+      for (size_t i = 0; i < q.size(); i++)
+        scan(q.substr(0, i) + q.substr(i + 1), 0.5);
     }
     std::vector<std::pair<uint32_t, double>> v(bestPer.begin(), bestPer.end());
     size_t kk = std::min<size_t>(size_t(k), v.size());

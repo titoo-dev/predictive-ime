@@ -180,14 +180,20 @@ P1(w)    = 0.7·Pcont(w) + 0.3·Pfreq(w)
   (accents/ligatures : `:cœur` marche aussi), le nom canonique (tts) domine
   les mots-clés, les **favoris appris remontent** (`learn` à chaque emoji
   committé). `:` seul liste tes favoris puis une sélection courante.
+  **Tolérance aux fautes** : si le préfixe exact ne matche rien (requête ≥3),
+  transpositions et suppressions d'un caractère sont réessayées à score
+  pénalisé — `:ceour`→❤️, `:etoiel`→⭐, `:thumsb`→👍.
 - **Grille 3×8** : le mode emoji affiche jusqu'à 24 candidats en grille —
-  Tab/⇧Tab et ←/→ se déplacent de case en case, **↑/↓ sautent d'une ligne**
-  (wrap), 1-6 sélectionnent sur la première ligne, taper affine en live.
-  `:` seul = tes favoris puis les populaires (recently-used, façon Win+.).
-  Le browsing par catégorie est gratuit : `:animal`, `:fete`, `:main`…
-- Espace committe l'emoji du haut, Entrée le surligné. En complétion normale,
-  un mot qui est exactement un mot-clé (« coeur ») propose l'emoji en fin de
-  barre.
+  Tab/⇧Tab et **←/→ (entrée directe, sans Tab préalable)** se déplacent de
+  case en case, **↑/↓ sautent d'une ligne** (wrap), 1-6 sélectionnent sur la
+  première ligne, taper affine en live. `:` seul = tes favoris puis les
+  populaires (recently-used, façon Win+.). Le browsing par catégorie est
+  gratuit : `:animal`, `:fete`, `:main`…
+- Espace committe l'emoji du haut (avec espace), **Entrée le surligné — ou le
+  premier si on n'a pas encore navigué** (sans espace ; le `:` nu garde son
+  comportement littéral). Vaut aussi pour les snippets (`;mail` + Entrée →
+  expansion). En complétion normale, un mot qui est exactement un mot-clé
+  (« coeur ») propose l'emoji en fin de barre.
 
 ## Interactions
 

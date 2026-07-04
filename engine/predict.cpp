@@ -980,7 +980,10 @@ public:
         event.filterAndAccept();
         return;
       }
-      if (!mod && state->navigating &&
+      // ←/→ naviguent aussi ; en GRILLE emoji ils ENTRENT directement (pas
+      // besoin de Tab d'abord — sans ça ils committaient le littéral ':xyz'
+      // et la touche fuyait vers l'application).
+      if (!mod && (state->navigating || emojiGrid) &&
           (sym == FcitxKey_Left || sym == FcitxKey_Right)) {
         navigate(ic, state, sym == FcitxKey_Right ? +1 : -1);
         event.filterAndAccept();
@@ -1018,6 +1021,13 @@ public:
         if (state->navigating) {
           commitWord(ic, state, highlighted(state), /*space=*/false);
           event.filterAndAccept(); // suggestion prise → on avale Entrée
+        } else if (isTriggerBuffer(state->buffer) && state->buffer.size() > 1 &&
+                   !state->cands.empty()) {
+          // Picker emoji / snippet AVEC requête : Entrée prend le 1er candidat
+          // (comme l'Espace, mais sans espace final). Le déclencheur nu
+          // (':' seul) garde le comportement littéral — Entrée = retour-ligne.
+          commitWord(ic, state, state->cands[0], /*space=*/false);
+          event.filterAndAccept();
         } else {
           commitWord(ic, state, state->buffer, /*space=*/false);
           // littéral validé → on LAISSE passer Entrée (retour-ligne / envoi).

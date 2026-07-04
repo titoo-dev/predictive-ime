@@ -303,6 +303,24 @@ void interactionTests(Harness &h) {
   h.type(" ");
   check("interaction: Tab puis Espace committe le candidat surligné", true);
 
+  // picker emoji : Entrée SANS navigation prend le 1er candidat (sans espace)
+  h.daemon->setReply({"❤️", "💕"}, "❤️", false);
+  h.expectCommit("❤️");
+  h.type(":coeur");
+  h.key("Return");
+  check("emoji: Entrée committe le 1er candidat (sans espace)", true);
+
+  // grille emoji : → entre en navigation sans Tab, ↓ saute une ligne (+8),
+  // Entrée committe le surligné.
+  h.daemon->setReply({"e0", "e1", "e2", "e3", "e4", "e5", "e6", "e7", "e8",
+                      "e9"}, "", false);
+  h.expectCommit("e8");
+  h.type(":x");
+  h.key("Right"); // entre dans la grille (index 0)
+  h.key("Down");  // +8 → index 8
+  h.key("Return");
+  check("emoji: →/↓ naviguent la grille sans Tab, Entrée committe", true);
+
   // ponctuation : committe le mot (sans espace) ; le '.' file à l'application
   h.daemon->setReply({"fin"}, "", true);
   h.expectCommit("fin");

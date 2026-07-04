@@ -440,6 +440,12 @@ try:
           str(c))
     check("emoji: ':' seul → pas d'autocomplete (Espace garde le littéral)",
           auto(":") == "", repr(auto(":")))
+    # tolérance aux fautes : transposition et lettre en trop, seulement quand
+    # le préfixe exact ne matche rien.
+    c = cands(":ceour")
+    check("emoji typo: ':ceour' (transposition) → ❤️", "❤️" in c, str(c))
+    c = cands(":coeurr")
+    check("emoji typo: ':coeurr' (lettre en trop) → ❤️", "❤️" in c, str(c))
     req({"learn": {"prev": "", "word": "⭐"}})
     req({"learn": {"prev": "", "word": "⭐"}})
     c = cands(":")
