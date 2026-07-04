@@ -219,13 +219,16 @@ P1(w)    = 0.7·Pcont(w) + 0.3·Pfreq(w)
   tel quel, rien n'est appris — annuler ≠ valider) ou ferme la barre
   mot-suivant, puis la touche **file à l'application** (vim sort du mode
   insertion au premier Échap). `escapeForward: false` pour l'avaler.
-- **Ctrl+Shift+L** : BASCULE DE LANGUE fr ↔ en (auto/off → en). L'engine
-  réécrit la valeur de `lang` dans le TEXTE de `config.json` (formatage et
-  clés-commentaires préservés, écriture atomique via la cible réelle du lien
-  stow, mtime poussé d'une seconde si le rename retombe dans la même seconde
-  — le daemon recharge sur mtime à la granularité seconde), puis rafraîchit
-  la barre : les suggestions repartent dans la nouvelle langue, ce qui sert
-  de retour visuel.
+- **Ctrl+Shift+L** : PANNEAU DE LANGUE — chips compactes
+  [Français|English|Auto|Libre], le choix courant surligné (liste
+  `kLangChoices`, extensible : ajouter une langue = une ligne). ←/→/Tab (ou
+  re-Ctrl+Shift+L) déplacent, **1-4** ou Entrée/Espace appliquent, Échap
+  annule, toute autre touche sort du mode. L'application réécrit la valeur
+  de `lang` dans le TEXTE de `config.json` (formatage et clés-commentaires
+  préservés, écriture atomique via la cible réelle du lien stow, mtime
+  poussé d'une seconde si le rename retombe dans la même seconde — le
+  daemon recharge sur mtime à la granularité seconde), puis la barre
+  repart dans la nouvelle langue (retour visuel).
 
 ## Résultats mesurés (i5-1335U, CPU-only)
 
@@ -466,6 +469,15 @@ python3 ime/daemon/test_predict.py "$(nix build ./ime#predictord --no-link --pri
       cache ; le défaut reste donc doux. Tests : +3 cas daemon (récence
       complétion/mot-suivant, piège : `forget` nécessaire — la section 7
       apprend « je→vais » et l'appris re-passe devant).
+- [x] **Panneau de langue (2026-07-04).** Ctrl+Shift+L n'est plus une bascule
+      aveugle : il ouvre un panneau compact dans la barre (chips
+      [Français|English|Auto|Libre], choix courant surligné — mode chips
+      standard de qmlui : candidats SANS label → pas de bulle liste).
+      Navigation ←/→/Tab/re-Ctrl+Shift+L, application 1-4/Entrée/Espace,
+      Échap annule. Liste `kLangChoices` extensible (une langue = une ligne,
+      une fois le support modèle/daemon en place). `toggleLang()` scindé en
+      `readLang()`/`writeLang(v)` (même écriture textuelle atomique). Tests :
+      5 cas engine (chips, chiffre, fermeture, Échap, →+Entrée).
 - [ ] (Polish) auto-accent quand la forme sans accent est au dico (ex. `garcon`
       reste `garcon` car présent dans le corpus) — limite de qualité du corpus.
 

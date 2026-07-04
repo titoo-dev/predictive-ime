@@ -52,9 +52,11 @@ Settings live in `~/.config/ime-predictord/` (hot-reloaded): `config.json`,
 
 **Language.** `lang` in `config.json` picks the suggestion language: `fr` / `en`
 (deterministic, the other language is strictly excluded), `auto` (context
-vote), `off`. **Ctrl+Shift+L** toggles fr ↔ en on the fly (the engine rewrites
-`lang` in place — formatting preserved — and the daemon hot-reloads it; the
-suggestion bar restarts in the new language as immediate feedback). English
+vote), `off`. **Ctrl+Shift+L** opens a compact language switcher in the
+candidate bar — [Français|English|Auto|Libre] chips with the current choice
+highlighted; arrows/Tab navigate, `1-4`/Enter/Space apply, Escape cancels.
+The engine rewrites `lang` in place (formatting preserved), the daemon
+hot-reloads it, and the bar restarts in the new language. English
 contractions (`don't`, `i'm`, `you're`…) are first-class vocabulary: completed
 from `don`, restored from `dont`/`im`/`cant`, and `i`/`i'…` are always
 capitalised to `I`/`I'…`.

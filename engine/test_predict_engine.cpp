@@ -396,8 +396,9 @@ void englishTests(Harness &h) {
   h.type(" ");
   check("anglais: I'm committé avec majuscule", true);
 
-  // bascule de langue Ctrl+Shift+L : réécrit la valeur de "lang" dans
-  // config.json (fr → en → fr), formatage préservé.
+  // panneau de langue Ctrl+Shift+L : chips [Français|English|Auto|Libre],
+  // chiffre/Entrée applique (réécrit "lang" dans config.json, formatage
+  // préservé), Échap annule.
   auto readCfg = [] {
     std::ifstream f(g_tmpDir + "/cfg/ime-predictord/config.json");
     return std::string((std::istreambuf_iterator<char>(f)),
@@ -405,11 +406,24 @@ void englishTests(Harness &h) {
   };
   h.setConfig({{"lang", "fr"}});
   h.key("Control+Shift+L");
-  check("bascule: Ctrl+Shift+L écrit lang=en",
+  auto chips = h.candidates();
+  check("langue: le panneau montre les chips",
+        chips.size() == 4 && chips[0] == "Français" && chips[1] == "English",
+        chips.empty() ? "vide" : chips[0] + "," + chips[1]);
+  h.key("2"); // English
+  check("langue: '2' applique lang=en",
         readCfg().find("\"lang\":\"en\"") != std::string::npos, readCfg());
+  check("langue: le panneau est fermé après le choix", h.candidates().empty() ||
+        h.candidates()[0] != "Français");
   h.key("Control+Shift+L");
-  check("bascule: second Ctrl+Shift+L revient à lang=fr",
-        readCfg().find("\"lang\":\"fr\"") != std::string::npos, readCfg());
+  h.key("Escape");
+  check("langue: Échap n'écrit rien (reste en)",
+        readCfg().find("\"lang\":\"en\"") != std::string::npos, readCfg());
+  h.key("Control+Shift+L"); // s'ouvre sur English (langue courante)
+  h.key("Right");           // → Auto
+  h.key("Return");
+  check("langue: →/Entrée applique le choix surligné (auto)",
+        readCfg().find("\"lang\":\"auto\"") != std::string::npos, readCfg());
   h.setConfig(json::object()); // restaure les défauts
 }
 

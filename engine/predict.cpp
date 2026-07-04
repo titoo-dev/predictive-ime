@@ -137,48 +137,61 @@ const EngineCfg &engineCfg() {
   return cfg;
 }
 
-// Bascule la langue des suggestions (fr ↔ en ; auto/off → en) en réécrivant
-// la VALEUR de "lang" dans le TEXTE de config.json — formatage et
-// clés-commentaires préservés (pas de re-sérialisation). On écrit sur la
-// CIBLE réelle (realpath : le fichier peut être un lien stow vers les
-// dotfiles), de façon atomique (tmp + rename). Le daemon recharge sur mtime
-// (granularité seconde) : si le rename retombe dans la même seconde, on
-// pousse le mtime d'une seconde pour que la bascule soit toujours vue.
-// Retourne la nouvelle langue, ou "" si échec.
-std::string toggleLang() {
+// Lecture/écriture de la VALEUR de "lang" dans le TEXTE de config.json —
+// formatage et clés-commentaires préservés (pas de re-sérialisation). On
+// écrit sur la CIBLE réelle (realpath : le fichier peut être un lien stow
+// vers les dotfiles), de façon atomique (tmp + rename). Le daemon recharge
+// sur mtime (granularité seconde) : si le rename retombe dans la même
+// seconde, on pousse le mtime d'une seconde pour que la bascule soit vue.
+// Localise la valeur de "lang" dans `text` → [q1+1, q2) ; false si absente.
+bool langValueSpan(const std::string &text, size_t &q1, size_t &q2) {
+  size_t k = text.find("\"lang\"");
+  if (k == std::string::npos)
+    return false;
+  size_t colon = text.find(':', k + 6);
+  q1 = colon == std::string::npos ? colon : text.find('"', colon + 1);
+  q2 = q1 == std::string::npos ? q1 : text.find('"', q1 + 1);
+  return q2 != std::string::npos;
+}
+
+std::string readLang() {
+  std::ifstream in(configPath());
+  if (!in)
+    return "";
+  std::string text((std::istreambuf_iterator<char>(in)),
+                   std::istreambuf_iterator<char>());
+  size_t q1, q2;
+  return langValueSpan(text, q1, q2) ? text.substr(q1 + 1, q2 - q1 - 1)
+                                     : std::string{};
+}
+
+bool writeLang(const std::string &next) {
   char *rp = ::realpath(configPath().c_str(), nullptr);
   if (!rp)
-    return "";
+    return false;
   const std::string path = rp;
   ::free(rp);
   struct stat before {};
   ::stat(path.c_str(), &before);
   std::ifstream in(path);
   if (!in)
-    return "";
+    return false;
   std::string text((std::istreambuf_iterator<char>(in)),
                    std::istreambuf_iterator<char>());
   in.close();
-  size_t k = text.find("\"lang\"");
-  if (k == std::string::npos)
-    return "";
-  size_t colon = text.find(':', k + 6);
-  size_t q1 = colon == std::string::npos ? colon : text.find('"', colon + 1);
-  size_t q2 = q1 == std::string::npos ? q1 : text.find('"', q1 + 1);
-  if (q2 == std::string::npos)
-    return "";
-  const std::string next =
-      text.substr(q1 + 1, q2 - q1 - 1) == "en" ? "fr" : "en";
+  size_t q1, q2;
+  if (!langValueSpan(text, q1, q2))
+    return false;
   text.replace(q1 + 1, q2 - q1 - 1, next);
   const std::string tmp = path + ".tmp";
   std::ofstream out(tmp, std::ios::trunc);
   if (!out)
-    return "";
+    return false;
   out << text;
   out.close();
   if (!out || ::rename(tmp.c_str(), path.c_str()) != 0) {
     ::unlink(tmp.c_str());
-    return "";
+    return false;
   }
   struct stat after {};
   if (::stat(path.c_str(), &after) == 0 &&
@@ -186,7 +199,7 @@ std::string toggleLang() {
     struct timespec ts[2] = {{0, UTIME_OMIT}, {before.st_mtime + 1, 0}};
     ::utimensat(AT_FDCWD, path.c_str(), ts, 0);
   }
-  return next;
+  return true;
 }
 
 // ----------------------------------------------------------------- UTF-8 ----
@@ -572,6 +585,8 @@ struct PredictState : public fcitx::InputContextProperty {
   std::string lastAutoWord;          // le mot qui avait été appliqué
   uint32_t lastAutoCps = 0;          // points de code committés à effacer
   bool vetoAuto = false;             // l'utilisateur a refusé : Espace garde le littéral
+  bool langMenu = false;             // panneau de langue ouvert (Ctrl+Shift+L)
+  int langIndex = 0;                 // choix surligné dans kLangChoices
   bool reformulating = false;        // mode reformulation : cands = variantes de la sélection
   bool reformLoading = false;        // génération en cours (placeholder « ⟳ »)
   std::string reformText;            // texte source (sélection / surrounding) — regen + revert
@@ -647,6 +662,17 @@ private:
   int cursor_ = -1;
 };
 
+// Panneau de LANGUE (Ctrl+Shift+L) : valeur écrite dans config.json + libellé
+// des chips. Extensible : ajouter une langue = une ligne ici (une fois le
+// support daemon/modèle en place).
+struct LangChoice { const char *value; const char *label; };
+static const LangChoice kLangChoices[] = {
+    {"fr", "Français"}, {"en", "English"},
+    {"auto", "Auto"},   {"off", "Libre"},
+};
+static const int kNumLangChoices =
+    int(sizeof(kLangChoices) / sizeof(kLangChoices[0]));
+
 // Modes de reformulation : clé envoyée au daemon (cf reform_prompts.h) + libellé
 // affiché dans le header de la bulle. ←/→ cyclent dans cette liste.
 struct ReformMode { const char *key; const char *label; };
@@ -703,6 +729,46 @@ public:
               int(states.test(fcitx::KeyState::Shift)),
               int(states.test(fcitx::KeyState::Super)), state->buffer.c_str(),
               int(state->navigating), int(state->reformulating));
+
+    // (L) PANNEAU DE LANGUE : chips [Français|English|Auto|Libre], le choix
+    // courant surligné. Toute touche gérée est CONSOMMÉE (cf mode
+    // reformulation : sinon fcitx la réinjecte dans l'appli).
+    if (state->langMenu) {
+      if (sym == FcitxKey_Escape) {
+        exitLangMenu(ic, state);
+        event.filterAndAccept();
+        return;
+      }
+      if (!mod && cp >= '1' && cp <= '9' && int(cp - '1') < kNumLangChoices) {
+        applyLangChoice(ic, state, int(cp - '1'));
+        event.filterAndAccept();
+        return;
+      }
+      // ←/→/Tab (et Ctrl+Shift+L à nouveau) : déplacer le surlignage.
+      bool again = (sym == FcitxKey_l || sym == FcitxKey_L) &&
+                   states.test(fcitx::KeyState::Ctrl) &&
+                   states.test(fcitx::KeyState::Shift);
+      if ((!mod && (sym == FcitxKey_Right || sym == FcitxKey_Tab)) || again) {
+        state->langIndex = (state->langIndex + 1) % kNumLangChoices;
+        setLangMenuCandidates(ic, state);
+        event.filterAndAccept();
+        return;
+      }
+      if (!mod && (sym == FcitxKey_Left || sym == FcitxKey_ISO_Left_Tab)) {
+        state->langIndex =
+            (state->langIndex - 1 + kNumLangChoices) % kNumLangChoices;
+        setLangMenuCandidates(ic, state);
+        event.filterAndAccept();
+        return;
+      }
+      if (!mod && (sym == FcitxKey_Return || sym == FcitxKey_KP_Enter ||
+                   sym == FcitxKey_space)) {
+        applyLangChoice(ic, state, state->langIndex);
+        event.filterAndAccept();
+        return;
+      }
+      exitLangMenu(ic, state); // autre touche → on sort et on continue
+    }
 
     // (R) MODE REFORMULATION : la barre montre 3 variantes de la sélection ;
     // 1-3 ou Tab/flèches+Entrée REMPLACE la sélection, Échap annule. Toute autre
@@ -793,20 +859,12 @@ public:
       return;
     }
 
-    // (0-) Ctrl+Shift+L : BASCULE DE LANGUE fr ↔ en. Écrit `lang` dans
-    //      config.json (rechargé à chaud par le daemon) puis rafraîchit la
-    //      barre — les suggestions repartent dans la nouvelle langue, ce qui
-    //      sert de retour visuel immédiat.
+    // (0-) Ctrl+Shift+L : ouvre le PANNEAU DE LANGUE (chips compactes, choix
+    //      courant surligné — cf bloc (L) plus haut pour la navigation).
     if ((sym == FcitxKey_l || sym == FcitxKey_L) &&
         states.test(fcitx::KeyState::Ctrl) &&
         states.test(fcitx::KeyState::Shift)) {
-      if (!toggleLang().empty()) {
-        state->navigating = false;
-        if (state->buffer.empty())
-          showNextWord(ic, state);
-        else
-          updateCompletion(ic, state);
-      }
+      enterLangMenu(ic, state);
       event.filterAndAccept();
       return;
     }
@@ -1486,6 +1544,51 @@ private:
     setCandidates(ic, state);
     ic->updatePreedit();
     ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
+  }
+
+  // --- Panneau de LANGUE (Ctrl+Shift+L) : chips horizontales compactes, le
+  //     choix courant surligné. 1-9/←→/Tab naviguent, Entrée/Espace applique
+  //     (écrit `lang` dans config.json, rechargé à chaud), Échap annule. ---
+  void setLangMenuCandidates(fcitx::InputContext *ic, PredictState *state) {
+    auto list = std::make_unique<PredictCandidateList>();
+    for (int i = 0; i < kNumLangChoices; i++)
+      list->append(kLangChoices[i].label, /*autoApply=*/false);
+    list->setCursorIndex(state->langIndex);
+    ic->inputPanel().reset();
+    ic->inputPanel().setAuxUp(fcitx::Text("Langue"));
+    ic->inputPanel().setCandidateList(std::move(list));
+    ic->updatePreedit();
+    ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
+  }
+
+  void enterLangMenu(fcitx::InputContext *ic, PredictState *state) {
+    const std::string cur = readLang();
+    state->langIndex = 0;
+    for (int i = 0; i < kNumLangChoices; i++)
+      if (cur == kLangChoices[i].value)
+        state->langIndex = i;
+    state->langMenu = true;
+    state->navigating = false;
+    setLangMenuCandidates(ic, state);
+  }
+
+  void exitLangMenu(fcitx::InputContext *ic, PredictState *state) {
+    state->langMenu = false;
+    ic->inputPanel().reset();
+    ic->updatePreedit();
+    ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
+    // reprendre là où on en était : complétion du mot en cours, ou barre
+    // mot-suivant (dans la langue active — c'est le retour visuel du choix).
+    if (!state->buffer.empty())
+      updateCompletion(ic, state);
+    else
+      showNextWord(ic, state);
+  }
+
+  void applyLangChoice(fcitx::InputContext *ic, PredictState *state, int idx) {
+    if (idx >= 0 && idx < kNumLangChoices)
+      writeLang(kLangChoices[idx].value); // échec silencieux : le panneau se ferme
+    exitLangMenu(ic, state);
   }
 
   // --- Reformulation : sélection → 3 variantes LLM, le choix remplace ---
