@@ -199,8 +199,17 @@ P1(w)    = 0.7·Pcont(w) + 0.3·Pfreq(w)
 
 - **Flux** : sélection (souris ou Ctrl+A) → `Ctrl+Alt+R` → bulle verticale de
   variantes LLM (1-9/↑↓/Entrée remplace, Backspace juste après = revert,
-  Échap annule). ←/→ changent de MODE (`reformuler/formel/simple/court/
-  corriger/traduire`), re-Ctrl+Alt+R régénère (nonce).
+  Échap annule). ←/→ **ou les lettres `r/f/s/c/t`** changent de MODE
+  (`reformuler/formel/simple/court/corriger/traduire` — `c` = corriger, court
+  reste aux flèches), re-Ctrl+Alt+R régénère (nonce). Le **dernier mode**
+  utilisé est mémorisé pour le prochain Ctrl+Alt+R (session). Sans sélection
+  ni champ court : panneau « Rien à reformuler » (feedback, pas de no-op).
+  Sans sélection RAPPORTÉE mais champ court (≤400 cp) : le champ entier est
+  reformulé et le commit **remplace le champ** (delete explicite — commitString
+  seul insérerait en plus). `reformCount` (config engine, 1-6, défaut 3) fixe
+  le nombre de variantes demandées. La langue est épinglée par **cfg.lang**
+  (`fr`/`en` ; `auto` = heuristique `reformIsFrench`, partagée
+  reform_prompts.h).
 - **Source : Groq UNIQUEMENT** (`reformModel`, `reformBaseUrl`,
   `reformTimeoutMs` 8 s ; clé : `$GROQ_API_KEY` ou
   `~/.local/share/ime-predictord/groq.key` — jamais dans le dépôt stow).

@@ -84,6 +84,9 @@ struct EngineCfg {
   // connexion, lue depuis la boucle d'événements fcitx — zéro blocage).
   // Sans neural côté daemon la réponse n'est jamais "pending" → aucun effet.
   bool asyncNextWord = true;
+  // Nombre de variantes de reformulation demandées (borné 1-6 : sélection
+  // aux chiffres 1-6 et bulle compacte).
+  int reformCount = 3;
   // Programmes (sous-chaînes de ic->program(), ex. "ghostty") où la barre
   // SPÉCULATIVE mot-suivant est supprimée : dans un terminal elle n'a pas de
   // preedit pour s'ancrer au curseur et « traîne » derrière lui. La complétion
@@ -126,6 +129,8 @@ const EngineCfg &engineCfg() {
         fresh.nextWordTimeoutMs =
             j.value("nextWordTimeoutMs", fresh.nextWordTimeoutMs);
         fresh.asyncNextWord = j.value("asyncNextWord", fresh.asyncNextWord);
+        fresh.reformCount = std::min(
+            6, std::max(1, j.value("reformCount", fresh.reformCount)));
         for (const auto &e :
              j.value("nextWordBarExclude", nlohmann::json::array()))
           if (e.is_string())
@@ -563,6 +568,7 @@ struct ReformResult {
 // appelé depuis le thread appelant pour chaque ligne partielle.
 ReformResult reformulateDaemon(
     const std::string &sentence, const std::string &mode, uint32_t nonce,
+    int nWant,
     const std::function<void(std::vector<std::string>)> &onPartial = nullptr) {
   ReformResult out;
   int fd = connectDaemon(/*timeoutMs=*/12000);
@@ -570,7 +576,7 @@ ReformResult reformulateDaemon(
     return out;
   json req;
   req["reformulate"] = sentence;
-  req["n"] = 3;
+  req["n"] = nWant;
   req["mode"] = mode;
   req["nonce"] = nonce;
   std::string line = req.dump() + "\n";
@@ -632,6 +638,8 @@ struct PredictState : public fcitx::InputContextProperty {
   bool reformLoading = false;        // génération en cours (placeholder « ⟳ »)
   std::string reformNotice;          // panneau d'échec (no_key/auth/network/…)
   std::string reformText;            // texte source (sélection / surrounding) — regen + revert
+  bool reformFromSelection = false;  // false = repli « champ entier » : le
+                                     // commit doit SUPPRIMER le champ lui-même
   int reformMode = 0;                // index dans kReformModes (←/→ pour changer)
   uint32_t reformNonce = 0;          // varie le seed → « régénérer » (Ctrl+Alt+R)
   uint32_t reformGen = 0;            // n° de génération : ignore les résultats obsolètes
@@ -831,9 +839,10 @@ public:
       // fall-through : la touche est traitée normalement ci-dessous
     }
 
-    // (R) MODE REFORMULATION : la barre montre 3 variantes de la sélection ;
-    // 1-3 ou Tab/flèches+Entrée REMPLACE la sélection, Échap annule. Toute autre
-    // touche quitte le mode et retombe dans la saisie normale.
+    // (R) MODE REFORMULATION : la barre montre les variantes de la sélection ;
+    // 1-9 ou Tab/flèches+Entrée REMPLACE la sélection, ←/→ ou r/f/s/c/t change
+    // de mode, Échap annule. Toute autre touche quitte le mode et retombe
+    // dans la saisie normale.
     if (state->reformulating) {
       // IMPORTANT : toute touche qu'on GÈRE doit être CONSOMMÉE
       // (filterAndAccept), sinon fcitx la réinjecte dans l'appli — Tab tapait
@@ -862,6 +871,29 @@ public:
         commitReformulation(ic, state, int(cp - '1'));
         event.filterAndAccept();
         return;
+      }
+      // Raccourcis DIRECTS de mode : r/f/s/c/t sautent au mode (Reformuler/
+      // Formel/Simple/Corriger/Traduire ; « Court » reste accessible aux
+      // ←/→ — 'c' est pris par Corriger). Même mode → no-op (avalé).
+      if (!mod && cp) {
+        uint32_t lc = cp | 0x20; // tolère la majuscule
+        const char *k = lc == 'r'   ? "rephrase"
+                        : lc == 'f' ? "formal"
+                        : lc == 's' ? "simple"
+                        : lc == 'c' ? "correct"
+                        : lc == 't' ? "translate"
+                                    : nullptr;
+        if (k) {
+          for (int m = 0; m < kNumReformModes; m++)
+            if (std::string(kReformModes[m].key) == k && m != state->reformMode) {
+              state->reformMode = m;
+              state->reformNonce = 0; // nouveau mode → repart du 1er tirage
+              runReformulation(ic, state);
+              break;
+            }
+          event.filterAndAccept();
+          return;
+        }
       }
       // ←/→ : changer de MODE (régénère dans le nouveau mode).
       if (!mod && (sym == FcitxKey_Right || sym == FcitxKey_Left)) {
@@ -1738,6 +1770,8 @@ private:
       msg = "Clé API Groq requise — Entrée : configurer · Échap";
     else if (state->reformNotice == "auth")
       msg = "Clé API refusée — Entrée : reconfigurer · Échap";
+    else if (state->reformNotice == "no_text")
+      msg = "Rien à reformuler — sélectionnez du texte";
     else
       msg = "⚠ Reformulation indisponible (réseau/API)";
     state->cands = {msg};
@@ -1770,7 +1804,7 @@ private:
                                                            : "";
       std::string header =
           std::string(kReformModes[state->reformMode].label) + badge +
-          "   · ←→ mode";
+          "   · ←→/rfsct mode";
       ic->inputPanel().setAuxUp(fcitx::Text(header));
     }
     list->setCursorIndex(state->navIndex); // variante surlignée
@@ -1801,11 +1835,17 @@ private:
       fprintf(stderr,
               "[reform-enter] cap=%d valid=%d selLen=%zu src='%.60s'\n",
               int(cap), int(valid), sel.size(), sentence.c_str());
-    if (sentence.empty())
-      return; // ni sélection ni surrounding text court → rien à reformuler
+    if (sentence.empty()) {
+      // FEEDBACK au lieu d'un no-op silencieux : panneau compact fermé par
+      // n'importe quelle touche (patron R-notice).
+      state->reformulating = true;
+      showReformNotice(ic, state, "no_text");
+      return;
+    }
     state->reformulating = true;
     state->reformText = sentence;
-    state->reformMode = 0;   // démarre en mode « Reformuler »
+    state->reformFromSelection = !sel.empty();
+    state->reformMode = lastReformMode_; // dernier mode utilisé mémorisé
     state->reformNonce = 0;
     state->reformSource.clear();
     runReformulation(ic, state);
@@ -1823,11 +1863,13 @@ private:
     setReformulationCandidates(ic, state);
 
     uint32_t gen = ++state->reformGen;
+    lastReformMode_ = state->reformMode; // mémorise pour le prochain Ctrl+Alt+R
     auto ref = ic->watch();
     std::string text = state->reformText;
     std::string mode = kReformModes[state->reformMode].key;
     uint32_t nonce = state->reformNonce;
-    std::thread([this, ref, text, mode, nonce, gen]() mutable {
+    int n = engineCfg().reformCount;
+    std::thread([this, ref, text, mode, nonce, n, gen]() mutable {
       // STREAMING : chaque ligne partielle remplace le spinner par les
       // variantes déjà prêtes — navigables tout de suite, la liste se
       // complète au fil des lignes. La position de navigation est préservée.
@@ -1853,7 +1895,7 @@ private:
             });
       };
       ReformResult r =
-          reformulateDaemon(text, mode, nonce, onPartial); // bloque DANS le thread
+          reformulateDaemon(text, mode, nonce, n, onPartial); // bloque DANS le thread
       instance_->eventDispatcher().scheduleWithContext(ref, [this, ref, r, gen]() {
         fcitx::InputContext *ic = ref.get();
         if (!ic)
@@ -1901,13 +1943,26 @@ private:
   }
 
   void commitReformulation(fcitx::InputContext *ic, PredictState *state, int idx) {
-    // commitString REMPLACE la sélection active de l'app (commit-over-selection)
-    // — vrai pour la souris ET pour Ctrl+A (la sélection est active même si
-    // l'IME ne la lit pas via selectedText()). On NE fait PAS de
-    // deleteSurroundingText : combiné à une sélection active, certains toolkits
-    // double-suppriment (sélection effacée puis delete relatif au curseur).
+    // Sélection RAPPORTÉE : commitString suffit (commit-over-selection) — pas
+    // de deleteSurroundingText, certains toolkits double-supprimeraient
+    // (sélection effacée puis delete relatif au curseur).
+    // Repli « champ entier » (AUCUNE sélection rapportée) : commitString seul
+    // INSÉRERAIT la variante en plus du texte — on supprime d'abord TOUT le
+    // champ. Si l'app avait en fait un Ctrl+A non rapporté, la plage
+    // supprimée == la sélection : le résultat reste correct.
     if (idx >= 0 && idx < (int)state->cands.size()) {
       const std::string &variant = state->cands[idx];
+      if (!state->reformFromSelection &&
+          ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText) &&
+          ic->surroundingText().isValid()) {
+        auto &st = ic->surroundingText();
+        auto cps = decodeUtf8(st.text());
+        size_t cur = std::min(size_t(st.cursor()), cps.size());
+        if (!cps.empty()) {
+          ic->deleteSurroundingText(-int(cur), cps.size());
+          st.setText("", 0, 0); // copie locale (cf deleteSurroundingBefore)
+        }
+      }
       ic->commitString(variant);
       // arme le REVERT : Backspace juste après restaure le texte original.
       state->reformRevertOrig = state->reformText;
@@ -1932,6 +1987,9 @@ private:
   }
 
   fcitx::Instance *instance_;
+  // Dernier mode de reformulation utilisé — le prochain Ctrl+Alt+R repart de
+  // là (partagé entre les contextes : préférence de session, pas de champ).
+  int lastReformMode_ = 0;
   // Refresh asynchrone (E5) — au plus UNE connexion en attente.
   std::unique_ptr<fcitx::EventSourceIO> refreshWatch_;
   int refreshFd_ = -1;
