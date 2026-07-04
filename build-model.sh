@@ -27,8 +27,8 @@ done
 SOURCES="\
 https://raw.githubusercontent.com/hermitdave/FrequencyWords/master/content/2018/fr/fr_50k.txt|sha256-+B98VwtkM3ZNqZqjD037CNgcWSYwE3e3Ca8joTsflZY=|fr_50k.txt
 https://raw.githubusercontent.com/hermitdave/FrequencyWords/master/content/2018/en/en_50k.txt|sha256-U1H/QFsRJu9VV5HdTZeYpI4+mlAan8SBqdqVd1LPtFg=|en_50k.txt
-https://downloads.wortschatz-leipzig.de/corpora/fra_news_2024_300K.tar.gz|sha256-ZumUYu++H+txwCOet5X8QF3iIM3vF0lx2HEEdw9sQQM=|fra_news.tar.gz
-https://downloads.wortschatz-leipzig.de/corpora/eng_news_2024_300K.tar.gz|sha256-NVsRu08GnxeQBElZOM45uhZF6xuG4sPSf/5OA6AR4VQ=|eng_news.tar.gz
+https://downloads.wortschatz-leipzig.de/corpora/fra_news_2024_1M.tar.gz|sha256-kH7tKXq3tfvg6ocQUISJkVj2YIkOh/EhsqJOuYU6ZGc=|fra_news.tar.gz
+https://downloads.wortschatz-leipzig.de/corpora/eng_news_2024_1M.tar.gz|sha256-jx1NB7l3H4p/whmtWH1Tguq/UAnvVj8bxMEqRnqOOpc=|eng_news.tar.gz
 https://object.pouta.csc.fi/OPUS-Tatoeba/v2023-04-12/mono/fr.txt.gz|sha256-eaRS30u3OCaYItrYR+pdtEuOtdNi2Nnve2YwXzgJi10=|tatoeba-fr.txt.gz
 https://object.pouta.csc.fi/OPUS-Tatoeba/v2023-04-12/mono/en.txt.gz|sha256-oyxVAM12uUeYWXZPt4U3pLm1P6uPo73A/ATdcPKL8ps=|tatoeba-en.txt.gz
 https://raw.githubusercontent.com/unicode-org/cldr-json/48.2.0/cldr-json/cldr-annotations-full/annotations/fr/annotations.json|sha256-M9oFL3R4J5GYnmIm1ghxyEZ5ngd6Wn+06H7Pp8o4VzM=|cldr-fr.json

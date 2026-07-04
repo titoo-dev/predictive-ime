@@ -67,6 +67,13 @@ and gender with the governing determiner found in the surrounding sentence
 toolkit's *surrounding text*; apps that don't expose it degrade to the words the
 IME itself committed.
 
+**Recency cache.** Words already present in the text before the cursor (the
+document you are writing, seen through the toolkit's *surrounding text*) are
+boosted — human text repeats itself (proper nouns, topic vocabulary), so a word
+you already used is likely to come back. `recencyBoost` in `config.json`
+(default `1.6`) tunes the strength; `1.0` disables it. The word immediately
+before the cursor is never boosted (no `the the`).
+
 **Learned words.** Words you commit are learned and ranked **on the model's own
 scale** (no overriding floor): a trusted learned word is treated as having an
 effective frequency of at least a baseline, multiplied by its usage confidence —

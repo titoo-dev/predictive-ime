@@ -124,6 +124,11 @@ P1(w)    = 0.7·Pcont(w) + 0.3·Pfreq(w)
   contre-emploi — c'est de la prévisibilité gratuite.
 - **Multi-mots** : si la continuation du meilleur candidat est très sûre
   (P ≥ 0,35), l'expression entière est proposée (« sais pas »).
+- **Cache de récence** (façon cache-LM Gboard) : les mots déjà présents dans
+  le texte avant le curseur (`wide`, ~240 car. via SurroundingText) sont
+  boostés (`recencyBoost`, ≤1.0 = off) dans le même pipeline multiplicatif
+  que langue/accord — le texte humain se répète (noms propres, vocabulaire
+  du sujet). Le dernier mot du contexte est exclu (pas de « le le »).
 - **Apostrophe typographique** `’` normalisée en `'` partout (repli + n-grammes).
 
 ## Personnalisation (`~/.config/ime-predictord/`, rechargé à chaud)
@@ -140,7 +145,8 @@ P1(w)    = 0.7·Pcont(w) + 0.3·Pfreq(w)
   fold-equal sur Espace, même avec `autoApply:false`), `accentDom` (seuil de
   dominance quand la graphie brute est aussi au corpus ; défaut 4.0),
   `barWords` (taille max de la barre, 1-8),
-  `langBoost`, `multiWord` ; engine : `ghostText`, `frenchSpacing` (espace
+  `langBoost`, `recencyBoost` (boost des mots déjà dans le document ;
+  ≤1.0 = off), `multiWord` ; engine : `ghostText`, `frenchSpacing` (espace
   fine insécable U+202F avant `; : ! ?`), `autoCapitalize` (majuscule en
   début de phrase), `nextWordBar` (false = pas de barre spéculative après
   Espace — mode calme), `autoApplyNeedsRevert` (défaut true : l'Espace ne
@@ -157,7 +163,7 @@ P1(w)    = 0.7·Pcont(w) + 0.3·Pfreq(w)
 ### Datasets (épinglés par hash → build pur)
 
 - **words.tsv (~84 000 mots)** — OpenSubtitles 2018 (hermitdave) fr_50k+en_50k.
-- **n-grammes** : Leipzig **news 2024 300K** phrases/langue (CC BY) + **Tatoeba
+- **n-grammes** : Leipzig **news 2024 1M** phrases/langue (CC BY) + **Tatoeba
   conversationnel** (release OPUS datée v2023-04-12, immuable ; CC BY 2.0 FR) —
   le registre dialogue est bien plus proche de la frappe réelle que la presse.
   → ~950k bigrammes + ~1,2M trigrammes stockés (seuil ≥2), modèle 66 Mo,
@@ -440,6 +446,26 @@ python3 ime/daemon/test_predict.py "$(nix build ./ime#predictord --no-link --pri
       sans condition de langue (aucun mot FR n'est `i` ni `i'…`). (3)
       **Ctrl+Shift+L** : bascule fr ↔ en à chaud (cf Interactions). Tests :
       +4 cas engine (I'm affiché/committé, bascule aller-retour).
+- [x] **Corpus ×3 + cache de récence + autotune (2026-07-04).** (1) Leipzig
+      news 2024 passe de 300K à **1M phrases/langue** (URL + hash, rien
+      d'autre) : modèle 74→157 Mo, 2,1M bigrammes / 3,2M trigrammes, RSS
+      daemon ~200 Mo, latence p50 0,08-0,12 ms (p99 < 3 ms). Held-out 2023 :
+      hit@3 FR 24,5→**26,1** (+1,6), EN 25,8→**26,7** (+0,9), auto-KSR FR
+      27,1→28,3, autocorrection +0,5-1 pt — le levier classique des n-grammes.
+      (2) CACHE DE RÉCENCE (façon cache-LM Gboard) : les mots déjà présents
+      dans `wide` (le document en cours) sont boostés (`recencyBoost`) dans le
+      même pipeline multiplicatif que langue/accord, dernier mot du contexte
+      exclu. Branché sur TOUS les chemins (complétion scoreOf, appris uni/bi/
+      tri, suiveurs tri/bi/topUni, fusion neurale, chemins sync/async/non-
+      neural). (3) AUTOTUNE : sweep langBoost {1.6, 2.0} × recencyBoost {1.0,
+      1.3, 1.6, 2.2} sur les 3 held-out (16 évals). Verdict : langBoost 2.0 =
+      bruit (±0,1) → 1.6 conservé ; recencyBoost ~neutre à 1.3, négatif > 2 —
+      défaut **1.3**. LIMITE assumée : le held-out est fait de PHRASES
+      INDÉPENDANTES mélangées — il ne peut pas mesurer la répétition de
+      document (noms propres, vocabulaire du sujet), le vrai bénéfice du
+      cache ; le défaut reste donc doux. Tests : +3 cas daemon (récence
+      complétion/mot-suivant, piège : `forget` nécessaire — la section 7
+      apprend « je→vais » et l'appris re-passe devant).
 - [ ] (Polish) auto-accent quand la forme sans accent est au dico (ex. `garcon`
       reste `garcon` car présent dans le corpus) — limite de qualité du corpus.
 

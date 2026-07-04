@@ -21,18 +21,18 @@
       };
 
       # Corpus de phrases pour les n-grammes (mot-suivant + complétion) :
-      #  - Leipzig news 2024, 300k phrases/langue (registre écrit, CC BY) ;
+      #  - Leipzig news 2024, 1M phrases/langue (registre écrit, CC BY) ;
       #  - Tatoeba via OPUS (release DATÉE v2023-04-12 → immuable, contrairement
       #    aux exports hebdomadaires de tatoeba.org ; CC BY 2.0 FR) — registre
       #    CONVERSATIONNEL, bien plus proche de la frappe quotidienne que la
       #    presse. Archives stables → hashables.
       fraNews = pkgs.fetchurl {
-        url = "https://downloads.wortschatz-leipzig.de/corpora/fra_news_2024_300K.tar.gz";
-        hash = "sha256-ZumUYu++H+txwCOet5X8QF3iIM3vF0lx2HEEdw9sQQM=";
+        url = "https://downloads.wortschatz-leipzig.de/corpora/fra_news_2024_1M.tar.gz";
+        hash = "sha256-kH7tKXq3tfvg6ocQUISJkVj2YIkOh/EhsqJOuYU6ZGc=";
       };
       engNews = pkgs.fetchurl {
-        url = "https://downloads.wortschatz-leipzig.de/corpora/eng_news_2024_300K.tar.gz";
-        hash = "sha256-NVsRu08GnxeQBElZOM45uhZF6xuG4sPSf/5OA6AR4VQ=";
+        url = "https://downloads.wortschatz-leipzig.de/corpora/eng_news_2024_1M.tar.gz";
+        hash = "sha256-jx1NB7l3H4p/whmtWH1Tguq/UAnvVj8bxMEqRnqOOpc=";
       };
       tatoebaFr = pkgs.fetchurl {
         url = "https://object.pouta.csc.fi/OPUS-Tatoeba/v2023-04-12/mono/fr.txt.gz";
@@ -116,7 +116,7 @@
         python3 ${./scripts/build_morph.py} ${lefff} $out/words.tsv > $out/morph.tsv
         echo "morph.tsv: $(wc -l < $out/morph.tsv) formes" >&2
 
-        # 2) n-grammes Kneser-Ney — news (300K/langue) + Tatoeba conversationnel
+        # 2) n-grammes Kneser-Ney — news (1M/langue) + Tatoeba conversationnel
         #    (l'EN Tatoeba est plafonné pour rester équilibré avec le FR).
         mkdir corpus
         tar xzf ${fraNews} -C corpus

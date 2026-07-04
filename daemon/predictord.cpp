@@ -227,6 +227,14 @@ struct Config {
   // Restauration d'ACCENTS/ligatures sur Espace, même quand autoApply est
   double langBoost = 1.6;   // boost des mots de la langue active
   double agreeBoost = 2.0;  // boost d'accord nombre/genre (×si accord, ÷sinon)
+  // CACHE DE RÉCENCE : boost des mots déjà présents dans le texte avant le
+  // curseur (contexte LARGE `wide` — le document en cours). Le texte humain
+  // se répète : un mot déjà employé (nom propre, vocabulaire du sujet) a une
+  // forte probabilité de revenir. ≤1.0 = désactivé. Défaut calibré par sweep
+  // (2026-07-04) : ~neutre sur le held-out PHRASES INDÉPENDANTES (qui ne
+  // peut pas voir la répétition de document, le vrai bénéfice) et négatif
+  // au-dessus de 2 — on reste doux ; monter si vos textes sont répétitifs.
+  double recencyBoost = 1.3;
   // Agressivité des mots APPRIS : multiplicateur sur la confiance (cf USER_MIN).
   // Le score appris reste sur l'ÉCHELLE du modèle (plus de plancher 1e18) — ce
   // knob permet de remonter/descendre globalement les suggestions apprises.
@@ -793,6 +801,7 @@ struct Model {
                                                            fresh.barWords)));
           fresh.langBoost = j.value("langBoost", fresh.langBoost);
           fresh.agreeBoost = j.value("agreeBoost", fresh.agreeBoost);
+          fresh.recencyBoost = j.value("recencyBoost", fresh.recencyBoost);
           fresh.learnedBoost = j.value("learnedBoost", fresh.learnedBoost);
           fresh.learnedFloor = j.value("learnedFloor", fresh.learnedFloor);
           fresh.proclisisDemote =
@@ -1050,6 +1059,48 @@ struct Model {
   bool langExcludedWord(const std::string &w, uint8_t ctxL) const {
     auto it = id_.find(lowerKeep(w));
     return it != id_.end() && langFactor(ctxL, it->second) == 0.0;
+  }
+
+  // --- CACHE DE RÉCENCE (façon cache-LM Gboard) --------------------------
+  // Les mots déjà présents dans le texte avant le curseur (`wide`, ~240 car.
+  // via SurroundingText) ont une forte probabilité de revenir — noms propres,
+  // vocabulaire du sujet en cours. setRecency() est appelé AVANT chaque
+  // predict() (thread principal uniquement) ; recFactor() multiplie le score
+  // dans le même pipeline que langue/accord. Le DERNIER mot du contexte est
+  // exclu : on ne pousse pas la répétition immédiate (« le le »).
+  std::unordered_set<uint32_t> recent_;
+  void setRecency(const std::string &wide,
+                  const std::vector<std::string> &ctx) {
+    recent_.clear();
+    if (cfg.recencyBoost <= 1.0 || wide.empty())
+      return;
+    const std::string low = lowerKeep(wide);
+    std::string cur;
+    auto flush = [&] {
+      if (cur.size() >= 2) { // 1 lettre = bruit
+        auto it = id_.find(cur);
+        if (it != id_.end())
+          recent_.insert(it->second);
+      }
+      cur.clear();
+    };
+    for (unsigned char c : low) {
+      // lettre ASCII, octet UTF-8 (accents), apostrophe ou trait d'union =
+      // caractère de mot (même découpe que TOK côté build) ; le reste sépare.
+      if ((c >= 'a' && c <= 'z') || c >= 0x80 || c == '\'' || c == '-')
+        cur.push_back(char(c));
+      else
+        flush();
+    }
+    flush();
+    if (!ctx.empty()) {
+      auto it = id_.find(lowerKeep(ctx.back()));
+      if (it != id_.end())
+        recent_.erase(it->second);
+    }
+  }
+  double recFactor(uint32_t wid) const {
+    return recent_.count(wid) ? cfg.recencyBoost : 1.0;
   }
 
   // Forme = proclitique d'élision NU (proclitique + apostrophe, rien après) :
@@ -1366,7 +1417,7 @@ private:
     const Agree want = agreementOf(context); // contrainte d'accord du SN
     auto scoreOf = [&](uint32_t wid) -> double {
       double s = hasCtx ? ctxScore(wid) : (double(freq[wid]) + 1.0) / freqTot_;
-      s *= langFactor(ctxL, wid) * agreeFactor(want, wid);
+      s *= langFactor(ctxL, wid) * agreeFactor(want, wid) * recFactor(wid);
       // B : rétrograder un proclitique d'élision NU quand on a tapé pile ce
       //     proclitique — « j' » propose j'ai/j'aime avant le « j' » nu.
       if (fold[wid] == fp && isBareProcliticFold(fold[wid]))
@@ -1419,7 +1470,8 @@ private:
       double prior = (effFreq + 1.0) / freqTot_;
       double s = hasCtx ? ctxScore.backoff() * prior : prior;
       if (idit != id_.end())
-        s *= langFactor(ctxL, idit->second) * agreeFactor(want, idit->second);
+        s *= langFactor(ctxL, idit->second) * agreeFactor(want, idit->second) *
+             recFactor(idit->second);
       offer(kv.first, s);
     }
 
@@ -1742,7 +1794,7 @@ private:
           double s = std::max(ms, USER_TRI_FLOOR) * learnedConf(p.second);
           if (idit != id_.end())
             s *= langFactor(ctxL, idit->second) *
-                 agreeFactor(want, idit->second);
+                 agreeFactor(want, idit->second) * recFactor(idit->second);
           if (s > 0.0)
             learned.push_back({p.first, s});
         }
@@ -1757,7 +1809,8 @@ private:
         double ms = idit != id_.end() ? ctxScore(idit->second) : 0.0;
         double s = std::max(ms, USER_BI_FLOOR) * learnedConf(p.second);
         if (idit != id_.end())
-          s *= langFactor(ctxL, idit->second) * agreeFactor(want, idit->second);
+          s *= langFactor(ctxL, idit->second) * agreeFactor(want, idit->second) *
+               recFactor(idit->second);
         if (s > 0.0)
           learned.push_back({p.first, s});
       }
@@ -1771,19 +1824,21 @@ private:
     if (ctxScore.tri)
       for (auto &pr : *ctxScore.tri)
         v.push_back({pr.first, pr.second * langFactor(ctxL, pr.first) *
-                                   agreeFactor(want, pr.first)});
+                                   agreeFactor(want, pr.first) *
+                                   recFactor(pr.first)});
     if (ctxScore.bi)
       for (auto &pr : *ctxScore.bi)
         if (!CtxScorer::find(ctxScore.tri, pr.first)) // déjà via trigramme
           v.push_back({pr.first, (ctxScore.hasUV ? ctxScore.g3 : 1.0) *
                                      pr.second * langFactor(ctxL, pr.first) *
-                                     agreeFactor(want, pr.first)});
+                                     agreeFactor(want, pr.first) *
+                                     recFactor(pr.first)});
     if (v.size() < size_t(k)) // contexte inconnu → pool des meilleurs P1
       for (uint32_t w : topUni_)
         if (!CtxScorer::find(ctxScore.tri, w) &&
             !CtxScorer::find(ctxScore.bi, w))
-          v.push_back(
-              {w, ctxScore(w) * langFactor(ctxL, w) * agreeFactor(want, w)});
+          v.push_back({w, ctxScore(w) * langFactor(ctxL, w) *
+                              agreeFactor(want, w) * recFactor(w)});
     // Exclusion stricte de langue : jeter les suiveurs au facteur 0 (langue
     // opposée quand lang=fr/en) plutôt que de les laisser au fond du tri.
     v.erase(std::remove_if(v.begin(), v.end(),
@@ -1802,7 +1857,8 @@ private:
       double f = 1.0;
       auto idit = id_.find(lowerKeep(w));
       if (idit != id_.end())
-        f = langFactor(ctxL, idit->second) * agreeFactor(want, idit->second);
+        f = langFactor(ctxL, idit->second) * agreeFactor(want, idit->second) *
+            recFactor(idit->second);
       double s = p * cfg.neuralBoost * f;
       if (s > 0.0)
         nsc.push_back({w, s});
@@ -1975,6 +2031,7 @@ int main(int argc, char **argv) {
   };
   struct NeuralDone {
     uint64_t client;
+    std::string wide; // re-sert au cache de récence lors de la fusion
     std::vector<std::string> ctx;
     std::vector<std::pair<std::string, double>> cands;
   };
@@ -2022,7 +2079,7 @@ int main(int argc, char **argv) {
       }
       {
         std::lock_guard<std::mutex> lk(njMu);
-        njDone.push_back({job.client, job.ctx, std::move(out)});
+        njDone.push_back({job.client, job.wide, job.ctx, std::move(out)});
       }
       ssize_t n = write(wakePipe[1], "x", 1);
       (void)n;
@@ -2154,6 +2211,7 @@ int main(int argc, char **argv) {
               neuralCands.push_back({w, (double)c.prob});
           }
         }
+        model.setRecency(wide, ctx);
         Result r = model.predict(ctx, prefix, model.cfg.barWords, neuralCands);
         // Rerank neuronal de la complétion (E3) — opportuniste : seulement si
         // le cache KV est déjà chaud pour ce contexte exact (le mot-suivant
@@ -2185,6 +2243,7 @@ int main(int argc, char **argv) {
           }
         }
 #else
+        model.setRecency(wide, ctx);
         Result r = model.predict(ctx, prefix, model.cfg.barWords);
 #endif
         // Plafond DUR de la barre de mots : seul le top-N (cfg.barWords) le plus
@@ -2273,6 +2332,7 @@ int main(int argc, char **argv) {
           }
         if (!dst)
           continue;
+        model.setRecency(d.wide, d.ctx);
         Result r = model.predict(d.ctx, "", model.cfg.barWords, d.cands);
         json resp;
         resp["candidates"] = r.candidates;

@@ -506,6 +506,22 @@ try:
     check("barWords: la barre est tronquée aux 3 meilleurs", len(c) <= 3, str(c))
     set_config({}, 8)  # retour aux défauts pour la suite
 
+    # 8bis) CACHE DE RÉCENCE : un mot déjà présent dans le texte avant le
+    #       curseur (`wide`) est boosté (recencyBoost, défaut 1.6). Contexte
+    #       VIDE ou neutre pour ne pas mélanger avec le boost de langue.
+    c = cands("sol")
+    check("récence: sans wide, solar (3500) devant soleil (3000)",
+          c.index("solar") < c.index("soleil"), str(c))
+    c = req({"prefix": "sol", "context": [],
+             "wide": "le soleil brille"})["candidates"]
+    check("récence: 'soleil' dans wide → passe devant solar",
+          c.index("soleil") < c.index("solar"), str(c))
+    req({"forget": {"word": "vais"}})  # appris plus haut (7) — repartir du modèle
+    c = req({"prefix": "", "context": ["je"],
+             "wide": "tu veux quoi je"})["candidates"]
+    check("récence: mot-suivant, 'veux' (0.30) dans wide → devant vais (0.35)",
+          c.index("veux") < c.index("vais"), str(c))
+
     # 9) ROBUSTESSE SIGPIPE : l'engine envoie "learn" en fire-and-forget (écrit
     #    puis ferme SANS lire la réponse). Sans SIG_IGN, le write du daemon sur
     #    le socket fermé lèverait SIGPIPE et TUERAIT le daemon — les prédictions
