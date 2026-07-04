@@ -88,9 +88,7 @@ struct EngineCfg {
   std::vector<std::string> nextWordBarExclude;
 };
 
-const EngineCfg &engineCfg() {
-  static EngineCfg cfg;
-  static time_t stamp = -1;
+const std::string &configPath() {
   static const std::string path = [] {
     const char *x = ::getenv("XDG_CONFIG_HOME");
     const char *h = ::getenv("HOME");
@@ -98,6 +96,13 @@ const EngineCfg &engineCfg() {
               : std::string(h ? h : "/tmp") + "/.config") +
            "/ime-predictord/config.json";
   }();
+  return path;
+}
+
+const EngineCfg &engineCfg() {
+  static EngineCfg cfg;
+  static time_t stamp = -1;
+  const std::string &path = configPath();
   struct stat st {};
   time_t t = ::stat(path.c_str(), &st) == 0 ? st.st_mtime : 0;
   if (t != stamp) {
@@ -128,6 +133,58 @@ const EngineCfg &engineCfg() {
     cfg = fresh;
   }
   return cfg;
+}
+
+// Bascule la langue des suggestions (fr ↔ en ; auto/off → en) en réécrivant
+// la VALEUR de "lang" dans le TEXTE de config.json — formatage et
+// clés-commentaires préservés (pas de re-sérialisation). On écrit sur la
+// CIBLE réelle (realpath : le fichier peut être un lien stow vers les
+// dotfiles), de façon atomique (tmp + rename). Le daemon recharge sur mtime
+// (granularité seconde) : si le rename retombe dans la même seconde, on
+// pousse le mtime d'une seconde pour que la bascule soit toujours vue.
+// Retourne la nouvelle langue, ou "" si échec.
+std::string toggleLang() {
+  char *rp = ::realpath(configPath().c_str(), nullptr);
+  if (!rp)
+    return "";
+  const std::string path = rp;
+  ::free(rp);
+  struct stat before {};
+  ::stat(path.c_str(), &before);
+  std::ifstream in(path);
+  if (!in)
+    return "";
+  std::string text((std::istreambuf_iterator<char>(in)),
+                   std::istreambuf_iterator<char>());
+  in.close();
+  size_t k = text.find("\"lang\"");
+  if (k == std::string::npos)
+    return "";
+  size_t colon = text.find(':', k + 6);
+  size_t q1 = colon == std::string::npos ? colon : text.find('"', colon + 1);
+  size_t q2 = q1 == std::string::npos ? q1 : text.find('"', q1 + 1);
+  if (q2 == std::string::npos)
+    return "";
+  const std::string next =
+      text.substr(q1 + 1, q2 - q1 - 1) == "en" ? "fr" : "en";
+  text.replace(q1 + 1, q2 - q1 - 1, next);
+  const std::string tmp = path + ".tmp";
+  std::ofstream out(tmp, std::ios::trunc);
+  if (!out)
+    return "";
+  out << text;
+  out.close();
+  if (!out || ::rename(tmp.c_str(), path.c_str()) != 0) {
+    ::unlink(tmp.c_str());
+    return "";
+  }
+  struct stat after {};
+  if (::stat(path.c_str(), &after) == 0 &&
+      after.st_mtime <= before.st_mtime) {
+    struct timespec ts[2] = {{0, UTIME_OMIT}, {before.st_mtime + 1, 0}};
+    ::utimensat(AT_FDCWD, path.c_str(), ts, 0);
+  }
+  return next;
 }
 
 // ----------------------------------------------------------------- UTF-8 ----
@@ -250,7 +307,13 @@ std::string capFirst(const std::string &w) {
 
 // Reporte la casse du `buffer` tapé sur un candidat (minuscule du modèle).
 // "Bonjou" → "Bonjour" ; "FRAN" → "FRANÇAIS" ; "le" → inchangé.
-std::string applyCase(const std::string &cand, const std::string &buffer) {
+// Anglais : « i » seul et les contractions « i'… » (i'm, i'll, i've, i'd)
+// prennent TOUJOURS la majuscule — aucun mot français n'est « i » ni ne
+// commence par « i' », la règle est donc sûre sans condition de langue.
+std::string applyCase(const std::string &cand_, const std::string &buffer) {
+  std::string cand = cand_;
+  if (cand == "i" || cand.rfind("i'", 0) == 0)
+    cand[0] = 'I';
   auto bcps = decodeUtf8(buffer);
   bool firstUpper = false, allUpper = true;
   int letters = 0;
@@ -559,6 +622,24 @@ public:
       fprintf(stderr, "[predict] sym=0x%x cp=0x%x buf='%s' nav=%d cands=%zu\n",
               sym, cp, state->buffer.c_str(), int(state->navigating),
               state->cands.size());
+
+    // (0-) Ctrl+Shift+L : BASCULE DE LANGUE fr ↔ en. Écrit `lang` dans
+    //      config.json (rechargé à chaud par le daemon) puis rafraîchit la
+    //      barre — les suggestions repartent dans la nouvelle langue, ce qui
+    //      sert de retour visuel immédiat.
+    if ((sym == FcitxKey_l || sym == FcitxKey_L) &&
+        states.test(fcitx::KeyState::Ctrl) &&
+        states.test(fcitx::KeyState::Shift)) {
+      if (!toggleLang().empty()) {
+        state->navigating = false;
+        if (state->buffer.empty())
+          showNextWord(ic, state);
+        else
+          updateCompletion(ic, state);
+      }
+      event.filterAndAccept();
+      return;
+    }
 
     // (0) Fenêtre de REVERT : Backspace IMMÉDIATEMENT après une
     // auto-application efface le mot appliqué, restaure le littéral tapé et

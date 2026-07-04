@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -378,6 +379,40 @@ void multiWordTests(Harness &h) {
   check("multi-mots: 'sais pas' committé en entier", true);
 }
 
+void englishTests(Harness &h) {
+  h.reset();
+  h.setCaps(fcitx::CapabilityFlags{fcitx::CapabilityFlag::Preedit,
+                                   fcitx::CapabilityFlag::SurroundingText});
+  h.setSurrounding("", 0);
+
+  // casse anglaise : le candidat « i'm » s'affiche ET se committe « I'm »
+  h.daemon->setReply({"i'm"}, "", false);
+  h.type("im");
+  check("anglais: candidat i'm affiché I'm",
+        !h.candidates().empty() && h.candidates()[0] == "I'm",
+        h.candidates().empty() ? "vide" : h.candidates()[0]);
+  h.expectCommit("I'm ");
+  h.key("Tab");
+  h.type(" ");
+  check("anglais: I'm committé avec majuscule", true);
+
+  // bascule de langue Ctrl+Shift+L : réécrit la valeur de "lang" dans
+  // config.json (fr → en → fr), formatage préservé.
+  auto readCfg = [] {
+    std::ifstream f(g_tmpDir + "/cfg/ime-predictord/config.json");
+    return std::string((std::istreambuf_iterator<char>(f)),
+                       std::istreambuf_iterator<char>());
+  };
+  h.setConfig({{"lang", "fr"}});
+  h.key("Control+Shift+L");
+  check("bascule: Ctrl+Shift+L écrit lang=en",
+        readCfg().find("\"lang\":\"en\"") != std::string::npos, readCfg());
+  h.key("Control+Shift+L");
+  check("bascule: second Ctrl+Shift+L revient à lang=fr",
+        readCfg().find("\"lang\":\"fr\"") != std::string::npos, readCfg());
+  h.setConfig(json::object()); // restaure les défauts
+}
+
 void surroundingContextTests(Harness &h) {
   h.reset();
   h.setCaps(fcitx::CapabilityFlags{fcitx::CapabilityFlag::Preedit,
@@ -509,6 +544,7 @@ int main() {
     optInTests(h);
     revertTests(h);
     multiWordTests(h);
+    englishTests(h);
     surroundingContextTests(h);
     nextWordBarTests(h);
     ghosttyTests(h);

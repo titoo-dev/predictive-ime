@@ -213,6 +213,13 @@ P1(w)    = 0.7·Pcont(w) + 0.3·Pfreq(w)
   tel quel, rien n'est appris — annuler ≠ valider) ou ferme la barre
   mot-suivant, puis la touche **file à l'application** (vim sort du mode
   insertion au premier Échap). `escapeForward: false` pour l'avaler.
+- **Ctrl+Shift+L** : BASCULE DE LANGUE fr ↔ en (auto/off → en). L'engine
+  réécrit la valeur de `lang` dans le TEXTE de `config.json` (formatage et
+  clés-commentaires préservés, écriture atomique via la cible réelle du lien
+  stow, mtime poussé d'une seconde si le rename retombe dans la même seconde
+  — le daemon recharge sur mtime à la granularité seconde), puis rafraîchit
+  la barre : les suggestions repartent dans la nouvelle langue, ce qui sert
+  de retour visuel.
 
 ## Résultats mesurés (i5-1335U, CPU-only)
 
@@ -416,6 +423,23 @@ python3 ime/daemon/test_predict.py "$(nix build ./ime#predictord --no-link --pri
       (instant n-gram + refresh neuronal poussé) sinon le 4B (~120-200 ms) est
       coupé côté engine ; GGUF *base* (vs instruct) ; pin du modèle + bascule du
       module ; éval hit@k neural vs n-gram ; test live.
+- [x] **Parité anglaise + bascule de langue (2026-07-04).** (1) CONTRACTIONS
+      EN au modèle : `extract_elisions.py` généralisé — en plus des élisions
+      FR, il extrait du corpus les contractions anglaises (`don't`, `i'm`,
+      `it's`, `you're`… — 2,3 % des tokens conversationnels), fréquences
+      redistribuées depuis les tokens-ancre scindés de en50k (`'s` 14M,
+      `'t` 9,6M…), étiquetées `en`. Avant : hors-vocab → intapables ET chaque
+      occurrence cassait ses n-grammes. Après : `don` → don't (complétion),
+      `dont`/`im`/`cant` → don't/i'm/can't top-1 (canal apostrophe existant,
+      zéro changement daemon), n-grammes traversants (« i don't » → you/have/
+      know), 810 bigrammes + 2916 trigrammes via don't. Held-out Tatoeba
+      conversationnel : hit@6 31,9→33,0, hit@3 25,2→25,9, in-vocab 93,4→94,8 %
+      (métrique pourtant durcie : les contractions comptent désormais comme
+      cibles) ; presse 2023 et FR strictement inchangés. (2) CASSE ANGLAISE :
+      `applyCase` capitalise toujours « i » et « i'… » (I, I'm, I'll) — sûr
+      sans condition de langue (aucun mot FR n'est `i` ni `i'…`). (3)
+      **Ctrl+Shift+L** : bascule fr ↔ en à chaud (cf Interactions). Tests :
+      +4 cas engine (I'm affiché/committé, bascule aller-retour).
 - [ ] (Polish) auto-accent quand la forme sans accent est au dico (ex. `garcon`
       reste `garcon` car présent dans le corpus) — limite de qualité du corpus.
 
