@@ -262,6 +262,11 @@ NeuralPredictor::nextWords(const std::string &text, int k, int deadlineMs) {
 std::vector<std::string> NeuralPredictor::reformulate(const std::string &sentence, int n,
                                                       const std::string &mode, uint32_t nonce) {
   if (!ctx_ || sentence.empty()) return {};
+  // Le worker async (nextWords/expand) partage ce ctx_ et sa KV : sans ce
+  // verrou, générer une reformulation pendant qu'un mot-suivant décode = course
+  // sur ctx_/prev_/logitsValid_. Contrat de la classe : toute méthode publique
+  // prend mu_ (cf neural.h). reformulate n'appelle aucune autre → pas d'interblocage.
+  std::lock_guard<std::mutex> lk(mu_);
   if (n < 1) n = 3;
   const llama_vocab *vo = (const llama_vocab *)vocab_;
   llama_context *c = (llama_context *)ctx_;
@@ -285,6 +290,7 @@ std::vector<std::string> NeuralPredictor::reformulate(const std::string &sentenc
   // génération : KV propre (et on invalide le cache incrémental de nextWords)
   llama_memory_clear(mem, true);
   prev_.clear();
+  logitsValid_ = false;
 
   std::vector<llama_token> toks = tokenize_(vo, prompt, /*bos=*/true, /*special=*/true);
   if (toks.empty()) return {};
@@ -344,6 +350,7 @@ std::vector<std::string> NeuralPredictor::reformulate(const std::string &sentenc
   // la génération a pollué le KV → reset pour les prochains nextWords
   llama_memory_clear(mem, true);
   prev_.clear();
+  logitsValid_ = false;
 
   // retire un éventuel bloc de raisonnement <think>...</think>
   size_t te = out.rfind("</think>");
