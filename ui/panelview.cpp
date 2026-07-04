@@ -603,5 +603,19 @@ QImage PanelView::render() {
     ctx->setContextProperty("spin", spin);
     QCoreApplication::processEvents(); // laisse bindings + resize se résoudre
     QImage img = view_->grabWindow();
+    // PREMIER rendu après un changement de taille du contenu (barre → grille
+    // emoji) : la fenêtre (SizeViewToRootObject) n'a pas encore suivi la
+    // nouvelle taille implicite du root — celle-ci n'est résolue que par le
+    // polish déclenché PAR le grab. Résultat : grille clipée à la hauteur de
+    // la barre, et si aucune animation ne court, aucune frame suivante ne
+    // corrige (bug visible à la 1re ouverture du picker emoji). Si la taille
+    // implicite diffère de la fenêtre : resize + re-grab, une fois.
+    QSize want(int(std::ceil(root_->implicitWidth())),
+               int(std::ceil(root_->implicitHeight())));
+    if (want.width() > 0 && want.height() > 0 && want != view_->size()) {
+        view_->resize(want);
+        QCoreApplication::processEvents();
+        img = view_->grabWindow();
+    }
     return img.convertToFormat(QImage::Format_ARGB32_Premultiplied);
 }

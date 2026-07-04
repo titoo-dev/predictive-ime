@@ -115,7 +115,13 @@ for _ in 1 2 3 4 5 6; do inj -k BackSpace; sleep 0.1; done
 inj -d 60 -- "je "; sleep 3.5; shot 4-nextword.png
 
 # 5) emoji : GRILLE 3×8 + navigation 2D (Tab entre, ↓ saute une LIGNE)
-inj -d 60 -- ":coeur"; sleep 3.5; shot 5-emoji.png
+# RÉGRESSION 1er rendu : la TOUTE PREMIÈRE frame de la grille (bascule
+# barre→grille, aucune animation en vol → une seule frame) doit déjà être à
+# la taille grille. Avant le fix (resize + re-grab dans PanelView::render),
+# elle restait CLIPÉE à la hauteur de la barre mot-suivant (2e rangée coupée)
+# jusqu'à la frappe suivante — à inspecter : rangées entières visibles.
+inj -d 60 -- ":"; sleep 1.5; shot 5a-emoji-first-frame.png
+inj -d 60 -- "coeur"; sleep 2.5; shot 5-emoji.png
 inj -k Tab; sleep 3.0; shot 5b-emoji-nav.png
 inj -k Down; sleep 3.0; shot 5c-emoji-row2.png
 differ 5b-emoji-nav.png 5c-emoji-row2.png
