@@ -259,8 +259,9 @@ NeuralPredictor::nextWords(const std::string &text, int k, int deadlineMs) {
   return out;
 }
 
-std::vector<std::string> NeuralPredictor::reformulate(const std::string &sentence, int n,
-                                                      const std::string &mode, uint32_t nonce) {
+std::vector<std::string> NeuralPredictor::reformulate(
+    const std::string &sentence, int n, const std::string &mode, uint32_t nonce,
+    const std::function<void(const std::vector<std::string> &)> &onVariant) {
   if (!ctx_ || sentence.empty()) return {};
   // Le worker async (nextWords/expand) partage ce ctx_ et sa KV : sans ce
   // verrou, générer une reformulation pendant qu'un mot-suivant décode = course
@@ -321,10 +322,47 @@ std::vector<std::string> NeuralPredictor::reformulate(const std::string &sentenc
     if (!nlv.empty()) nlTok = nlv.back();
   }
 
-  std::string out;
+  // casse-insensible (pour dédup + drop == source) : minuscule ASCII + trim
+  auto norm = [](const std::string &x) {
+    std::string r;
+    r.reserve(x.size());
+    for (char ch : x)
+      if (!std::isspace((unsigned char)ch))
+        r += (char)std::tolower((unsigned char)ch);
+    return r;
+  };
+  const std::string srcN = norm(sentence);
+
+  // Parsing INCRÉMENTAL, ligne par ligne (STREAMING) : chaque ligne complète
+  // est nettoyée (numérotation/guillemets de tête), dédupliquée et — si elle
+  // est acceptée — annoncée via onVariant avec la liste courante. La 1re
+  // variante part vers l'UI pendant que le modèle génère encore les suivantes.
+  std::vector<std::string> variants, seen;
+  auto acceptLine = [&](const std::string &line) {
+    if ((int)variants.size() >= n) return;
+    // un éventuel marqueur de raisonnement résiduel n'est pas une variante
+    if (line.find("<think>") != std::string::npos ||
+        line.find("</think>") != std::string::npos)
+      return;
+    size_t a = line.find_first_not_of(" \t\r\"'-*•0123456789.)(");
+    if (a == std::string::npos) return;
+    size_t z = line.find_last_not_of(" \t\r\"");
+    std::string v = line.substr(a, z - a + 1);
+    if (v.empty() || !valid_utf8(v)) return;
+    std::string vN = norm(v);
+    if (vN == srcN) return; // identique à la phrase d'origine → inutile
+    for (auto &s : seen)
+      if (s == vN) return;
+    seen.push_back(vN);
+    variants.push_back(v);
+    if (onVariant)
+      onVariant(variants);
+  };
+
+  std::string lineBuf;
   const int maxTok = 256;
   int newlines = 0, gen = 0;
-  for (int i = 0; i < maxTok; ++i) {
+  for (int i = 0; i < maxTok && (int)variants.size() < n; ++i) {
     float *lg = llama_get_logits_ith(c, -1);
     if (!lg) break;
     llama_token best = sampleTok(lg, n_vocab_, temp, topP, topK, rng);
@@ -336,57 +374,29 @@ std::vector<std::string> NeuralPredictor::reformulate(const std::string &sentenc
       best = nlTok;
     }
     std::string p = piece_(vo, best);
-    out += p;
     ++gen;
-    for (char ch : p) if (ch == '\n') ++newlines;
+    for (char ch : p) {
+      if (ch == '\n') {
+        ++newlines;
+        acceptLine(lineBuf);
+        lineBuf.clear();
+      } else {
+        lineBuf.push_back(ch);
+      }
+    }
     if (newlines > want) break; // assez de lignes générées
     llama_batch bb = llama_batch_get_one(&best, 1);
     if (llama_decode(c, bb) != 0) break;
   }
+  acceptLine(lineBuf); // dernière ligne sans \n final
   if (getenv("IME_DEBUG"))
     fprintf(stderr,
-            "[reformulate] lang=%s temp=%.2f topP=%.2f gen=%d tok, nl=%d, raw=\"%.300s\"\n",
-            fr ? "fr" : "en", temp, topP, gen, newlines, out.c_str());
+            "[reformulate] lang=%s temp=%.2f topP=%.2f gen=%d tok, nl=%d, %zu variantes\n",
+            fr ? "fr" : "en", temp, topP, gen, newlines, variants.size());
   // la génération a pollué le KV → reset pour les prochains nextWords
   llama_memory_clear(mem, true);
   prev_.clear();
   logitsValid_ = false;
-
-  // retire un éventuel bloc de raisonnement <think>...</think>
-  size_t te = out.rfind("</think>");
-  if (te != std::string::npos) out = out.substr(te + 8);
-
-  // casse-insensible (pour dédup + drop == source) : minuscule ASCII + trim
-  auto norm = [](const std::string &x) {
-    std::string r;
-    r.reserve(x.size());
-    for (char ch : x)
-      if (!std::isspace((unsigned char)ch))
-        r += (char)std::tolower((unsigned char)ch);
-    return r;
-  };
-  std::string srcN = norm(sentence);
-
-  // une variante par ligne : trim numérotation/ponctuation de tête, drop les
-  // doublons (casse-insensible) et la variante identique à la source.
-  std::vector<std::string> variants;
-  std::vector<std::string> seen;
-  std::stringstream ss(out);
-  std::string line;
-  while (std::getline(ss, line) && (int)variants.size() < n) {
-    size_t a = line.find_first_not_of(" \t\r\"'-*•0123456789.)(");
-    if (a == std::string::npos) continue;
-    size_t z = line.find_last_not_of(" \t\r\"");
-    std::string v = line.substr(a, z - a + 1);
-    if (v.empty() || !valid_utf8(v)) continue;
-    std::string vN = norm(v);
-    if (vN == srcN) continue; // identique à la phrase d'origine → inutile
-    bool dup = false;
-    for (auto &s : seen) if (s == vN) { dup = true; break; }
-    if (dup) continue;
-    seen.push_back(vN);
-    variants.push_back(v);
-  }
   return variants;
 }
 

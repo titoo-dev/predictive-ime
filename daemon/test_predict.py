@@ -87,7 +87,8 @@ with open(f"{cfgdir}/dict.txt", "w", encoding="utf-8") as f:
     f.write("# dico perso\nzzcustom 7000\n")
 
 env = dict(os.environ, XDG_DATA_HOME=f"{tmp}/xdg",
-           XDG_CONFIG_HOME=f"{tmp}/cfg")
+           XDG_CONFIG_HOME=f"{tmp}/cfg",
+           GROQ_API_KEY="clef-de-test")  # cf section reformulation (mock HTTP)
 proc = subprocess.Popen([BIN, f"{tmp}/words.tsv", sock], env=env)
 for _ in range(100):
     if os.path.exists(sock):
@@ -527,6 +528,75 @@ try:
              "wide": "tu veux quoi je"})["candidates"]
     check("récence: mot-suivant, 'veux' (0.30) dans wide → devant vais (0.35)",
           c.index("veux") < c.index("vais"), str(c))
+
+    # 8ter) REFORMULATION — worker différé (A1), cache LRU (A3), non-blocage.
+    #       Mock HTTP OpenAI-compatible local ; la clé vient de l'env
+    #       (GROQ_API_KEY, cf lancement du daemon).
+    import http.server
+    import threading
+    hits = []
+    slow = [False]
+
+    class Mock(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            hits.append(1)
+            if slow[0]:
+                time.sleep(1.2)
+            body = json.dumps({"choices": [{"message": {"content":
+                "Variante numéro un.\nVariante numéro deux.\n"
+                "Variante numéro trois.\nVariante numéro quatre."}}]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    httpd = http.server.HTTPServer(("127.0.0.1", 0), Mock)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    set_config({"reformBaseUrl": f"http://127.0.0.1:{httpd.server_port}",
+                "reformTimeoutMs": 3000}, 10)
+    r = req({"reformulate": "bonjour tout le monde", "n": 2,
+             "mode": "rephrase", "nonce": 0})
+    check("reformulate: 2 variantes via worker (réponse différée)",
+          len(r.get("variants", [])) == 2 and r.get("source") == "groq",
+          str(r))
+    r2 = req({"reformulate": "bonjour tout le monde", "n": 2,
+              "mode": "rephrase", "nonce": 0})
+    check("reformulate: cache LRU — même demande servie sans nouvel appel HTTP",
+          r2.get("variants") == r.get("variants") and len(hits) == 1,
+          f"hits={len(hits)}")
+    r3 = req({"reformulate": "bonjour tout le monde", "n": 2,
+              "mode": "rephrase", "nonce": 1})
+    check("reformulate: nonce différent → régénère",
+          len(hits) == 2 and len(r3.get("variants", [])) == 2,
+          f"hits={len(hits)}")
+    # NON-BLOCAGE (le cœur de A1) : pendant une reformulation LENTE (mock
+    # 1,2 s), la complétion répond en millisecondes sur une autre connexion.
+    slow[0] = True
+    got = {}
+
+    def bg():
+        got["r"] = req({"reformulate": "une autre phrase pour le test",
+                        "n": 2, "mode": "rephrase", "nonce": 0})
+
+    t = threading.Thread(target=bg)
+    t.start()
+    time.sleep(0.15)  # la demande est partie, le worker dort dans le mock
+    t0 = time.monotonic()
+    c = cands("bonjou")
+    dt = time.monotonic() - t0
+    check("reformulate: le poll loop ne gèle pas (complétion < 300 ms pendant "
+          "une reformulation lente)", "bonjour" in c and dt < 0.3,
+          f"dt={dt:.3f}s {c}")
+    t.join()
+    check("reformulate: la reformulation lente aboutit quand même",
+          len(got["r"].get("variants", [])) == 2, str(got.get("r")))
+    httpd.shutdown()
+    set_config({}, 12)
 
     # 9) ROBUSTESSE SIGPIPE : l'engine envoie "learn" en fire-and-forget (écrit
     #    puis ferme SANS lire la réponse). Sans SIG_IGN, le write du daemon sur

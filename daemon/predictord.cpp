@@ -43,11 +43,15 @@
 #include <unordered_set>
 #include <vector>
 
-#ifdef WITH_NEURAL
-#include "neural.h"
+// threading : requis même sans neural (worker de reformulation, lignes
+// différées du poll loop).
 #include <condition_variable>
+#include <deque>
 #include <mutex>
 #include <thread>
+
+#ifdef WITH_NEURAL
+#include "neural.h"
 #endif
 
 #include "reformulate_http.h" // reformulation via API externe (Groq), repli local
@@ -291,7 +295,9 @@ struct Config {
   std::string reformProvider = "auto";
   std::string reformModel = "llama-3.3-70b-versatile";
   std::string reformBaseUrl = "https://api.groq.com/openai/v1/chat/completions";
-  int reformTimeoutMs = 20000;
+  // Groq répond en < 2 s : 8 s couvrent les mauvais jours SANS immobiliser le
+  // worker 20 s quand le réseau est coupé (l'engine abandonne à 12 s).
+  int reformTimeoutMs = 8000;
   // Budget TEMPS de l'appel neuronal (prefill + expansions comprises) : passé
   // ce délai on rend ce qu'on a (l'engine a son propre timeout côté socket —
   // sans ce budget le daemon continuait à brûler du CPU pour une réponse que
@@ -2034,13 +2040,127 @@ int main(int argc, char **argv) {
   }
 #endif
 
+  // ---- LIGNES DIFFÉRÉES : les workers (reformulation, refresh neural)
+  // déposent ici des réponses toutes prêtes ; le pipe réveille poll() et le
+  // thread principal les recopie dans le out-buffer du client visé (flush au
+  // POLLOUT). Un client parti entre-temps = ligne jetée. ----
+  struct DeferredLine {
+    uint64_t client;
+    std::string line;
+  };
+  std::mutex dMu;
+  std::vector<DeferredLine> dReady;
+  int wakePipe[2] = {-1, -1};
+  if (pipe(wakePipe) == 0) {
+    fcntl(wakePipe[0], F_SETFL, O_NONBLOCK);
+    fcntl(wakePipe[1], F_SETFL, O_NONBLOCK);
+  }
+  auto postLine = [&](uint64_t client, std::string line) {
+    {
+      std::lock_guard<std::mutex> lk(dMu);
+      dReady.push_back({client, std::move(line)});
+    }
+    ssize_t n = write(wakePipe[1], "x", 1);
+    (void)n;
+  };
+
+  // ---- REFORMULATION sur worker (A1) : l'appel Groq (secondes de réseau) ou
+  // la génération locale ne doivent JAMAIS bloquer le poll loop — pendant une
+  // reformulation, la complétion continue pour toutes les applis. File FIFO ;
+  // un nouveau job du MÊME client remplace celui encore en file (cycling de
+  // modes = seule la dernière demande compte). Le worker ne touche jamais
+  // Model : il reçoit un instantané de la config dans le job.
+  // CACHE LRU (A3), partagé thread principal/worker sous rjMu : redemander un
+  // (texte, mode, nonce, n) déjà généré répond immédiatement, sans worker —
+  // revenir sur un mode déjà visité est instantané et gratuit.
+  struct ReformJob {
+    uint64_t client = 0;
+    std::string sentence, mode, provider, baseUrl, model, cfgDir;
+    int n = 3, timeoutMs = 8000;
+    uint32_t nonce = 0;
+  };
+  struct ReformHit {
+    std::string key;
+    std::vector<std::string> variants;
+    std::string source;
+  };
+  std::mutex rjMu; // garde la file ET le cache
+  std::condition_variable rjCv;
+  std::deque<ReformJob> rjQueue;
+  std::deque<ReformHit> reformCache;
+  auto reformKey = [](const std::string &s, const std::string &mode,
+                      uint32_t nonce, int n) {
+    return s + '\x1f' + mode + '\x1f' + std::to_string(nonce) + '\x1f' +
+           std::to_string(n);
+  };
+  std::thread rjWorker([&] {
+    for (;;) {
+      ReformJob job;
+      {
+        std::unique_lock<std::mutex> lk(rjMu);
+        rjCv.wait(lk, [&] { return !rjQueue.empty(); });
+        job = std::move(rjQueue.front());
+        rjQueue.pop_front();
+      }
+      std::vector<std::string> variants;
+      std::string source = "none";
+      if (job.provider != "local") {
+        variants = reformulateHttp(job.sentence, job.n, job.baseUrl, job.model,
+                                   job.cfgDir, job.timeoutMs, job.mode,
+                                   job.nonce);
+        if (!variants.empty())
+          source = "groq";
+      }
+#ifdef WITH_NEURAL
+      // Repli LOCAL hors-ligne, en STREAMING (A2) : chaque variante part vers
+      // le client dès que sa ligne est complète (partial:true) — la 1re
+      // s'affiche pendant que le modèle génère encore les suivantes. La
+      // réponse FINALE (sans partial) clôt l'échange.
+      if (variants.empty() && neural.ready()) {
+        variants = neural.reformulate(
+            job.sentence, job.n, job.mode, job.nonce,
+            [&](const std::vector<std::string> &sofar) {
+              json p;
+              p["variants"] = sofar;
+              p["partial"] = true;
+              try {
+                postLine(job.client, p.dump() + "\n");
+              } catch (...) {
+              }
+            });
+        if (!variants.empty())
+          source = "local";
+      }
+#endif
+      json resp;
+      resp["variants"] = variants;
+      resp["source"] = source;
+      std::string out;
+      try {
+        out = resp.dump() + "\n";
+      } catch (...) {
+        out = "{\"variants\":[]}\n";
+      }
+      postLine(job.client, std::move(out));
+      if (!variants.empty()) { // jamais les échecs (réseau coupé ≠ définitif)
+        std::lock_guard<std::mutex> lk(rjMu);
+        reformCache.push_front(
+            {reformKey(job.sentence, job.mode, job.nonce, job.n), variants,
+             source});
+        if (reformCache.size() > 8)
+          reformCache.pop_back();
+      }
+    }
+  });
+  rjWorker.detach(); // vit avec le process (le daemon s'arrête par signal)
+
 #ifdef WITH_NEURAL
   // ---- Deux phases ASYNC (E5) : un thread de travail pour le neural. ----
   // Le thread ne touche JAMAIS Model (appris/config/lexique mutent sur le
   // thread principal) : il ne parle qu'à NeuralPredictor (verrouillé en
   // interne). Un seul job en attente (le clavier n'a qu'un curseur) — un
   // nouveau job remplace l'ancien. Résultats repostés au thread principal via
-  // un pipe de réveil, la FUSION (predict) reste donc mono-thread.
+  // le pipe de réveil partagé, la FUSION (predict) reste donc mono-thread.
   struct NeuralJob {
     uint64_t client = 0;
     std::string wide;
@@ -2059,11 +2179,6 @@ int main(int argc, char **argv) {
   NeuralJob njPending;
   bool njHas = false, njQuit = false;
   std::vector<NeuralDone> njDone;
-  int wakePipe[2] = {-1, -1};
-  if (pipe(wakePipe) == 0) {
-    fcntl(wakePipe[0], F_SETFL, O_NONBLOCK);
-    fcntl(wakePipe[1], F_SETFL, O_NONBLOCK);
-  }
   std::thread njWorker([&] {
     for (;;) {
       NeuralJob job;
@@ -2147,31 +2262,52 @@ int main(int argc, char **argv) {
       } else if (req.contains("stats")) {
         resp = model.stats();
       } else if (req.contains("reformulate")) {
-        // Reformulation à la demande (sélection → variantes). Source = API
-        // externe (Groq) si configurée + clé dispo, SINON le neural local.
+        // Reformulation à la demande (sélection → variantes), traitée sur le
+        // WORKER : Groq (secondes de réseau) ou génération locale ne bloquent
+        // jamais le poll loop — la complétion continue pendant ce temps. La
+        // réponse part en DIFFÉRÉ sur la même connexion (postLine), précédée
+        // de lignes partial:true en streaming local. Cache LRU : un (texte,
+        // mode, nonce, n) déjà généré répond immédiatement (cycling de modes).
         std::string sentence = req.value("reformulate", std::string{});
         int n = req.value("n", 3);
         std::string mode = req.value("mode", std::string{"rephrase"});
         uint32_t nonce = (uint32_t)req.value("nonce", 0);
-        std::vector<std::string> variants;
-        std::string source = "none";
-        // 1) externe (qualité + vitesse) sauf si l'utilisateur force "local".
-        if (model.cfg.reformProvider != "local") {
-          variants = reformulateHttp(sentence, n, model.cfg.reformBaseUrl,
-                                     model.cfg.reformModel, model.cfgDir_,
-                                     model.cfg.reformTimeoutMs, mode, nonce);
-          if (!variants.empty()) source = "groq";
+        model.maybeReload(); // provider/baseUrl/timeout à chaud
+        {
+          std::lock_guard<std::mutex> lk(rjMu);
+          const std::string key = reformKey(sentence, mode, nonce, n);
+          for (auto it = reformCache.begin(); it != reformCache.end(); ++it)
+            if (it->key == key) {
+              resp["variants"] = it->variants;
+              resp["source"] = it->source;
+              ReformHit hit = *it; // move-to-front (LRU)
+              reformCache.erase(it);
+              reformCache.push_front(std::move(hit));
+              try {
+                return resp.dump() + "\n";
+              } catch (...) {
+                return std::string("{\"variants\":[]}\n");
+              }
+            }
+          ReformJob job;
+          job.client = clientSeq;
+          job.sentence = sentence;
+          job.mode = mode;
+          job.n = n;
+          job.nonce = nonce;
+          job.provider = model.cfg.reformProvider;
+          job.baseUrl = model.cfg.reformBaseUrl;
+          job.model = model.cfg.reformModel;
+          job.cfgDir = model.cfgDir_;
+          job.timeoutMs = model.cfg.reformTimeoutMs;
+          // un job du même client encore en file est périmé (mode changé
+          // avant même que le worker ne l'ait pris) : on le remplace.
+          for (auto it = rjQueue.begin(); it != rjQueue.end();)
+            it = (it->client == clientSeq) ? rjQueue.erase(it) : it + 1;
+          rjQueue.push_back(std::move(job));
         }
-#ifdef WITH_NEURAL
-        // 2) repli LOCAL hors-ligne si l'externe n'a rien rendu (pas de clé,
-        //    réseau coupé, erreur HTTP…).
-        if (variants.empty() && neural.ready()) {
-          variants = neural.reformulate(sentence, n, mode, nonce);
-          if (!variants.empty()) source = "local";
-        }
-#endif
-        resp["variants"] = variants;
-        resp["source"] = source; // pour le badge de la bulle (engine → UI)
+        rjCv.notify_one();
+        return std::string{}; // réponse différée (postLine du worker)
       } else {
         std::vector<std::string> ctx =
             req.value("context", std::vector<std::string>{});
@@ -2309,13 +2445,9 @@ int main(int argc, char **argv) {
   for (;;) {
     pfds.clear();
     pfds.push_back({srv, POLLIN, 0});
-#ifdef WITH_NEURAL
-    // fd 1 du tableau : le pipe de réveil du worker neural (résultats prêts).
+    // fd 1 du tableau : le pipe de réveil des workers (reformulation, neural).
     pfds.push_back({wakePipe[0], POLLIN, 0});
     constexpr size_t kFixed = 2;
-#else
-    constexpr size_t kFixed = 1;
-#endif
     for (auto &cl : clients)
       pfds.push_back(
           {cl.fd, short(POLLIN | (cl.out.empty() ? 0 : POLLOUT)), 0});
@@ -2330,11 +2462,25 @@ int main(int argc, char **argv) {
         fcntl(c, F_SETFL, fcntl(c, F_GETFL) | O_NONBLOCK);
         clients.push_back({c, ++clientSeq, {}, {}}); // servi au prochain tour
       }
-#ifdef WITH_NEURAL
     if (pfds[1].revents & POLLIN) {
       char sink[64];
       while (read(wakePipe[0], sink, sizeof(sink)) > 0)
         ;
+      // Lignes différées (reformulation — A1/A2) : recopiées telles quelles
+      // dans le out-buffer du client visé (flush au POLLOUT du même tour ou
+      // du suivant). Client parti = ligne jetée.
+      std::vector<DeferredLine> lines;
+      {
+        std::lock_guard<std::mutex> lk(dMu);
+        lines.swap(dReady);
+      }
+      for (auto &dl : lines)
+        for (auto &cl : clients)
+          if (cl.seq == dl.client && cl.fd >= 0) {
+            cl.out += dl.line;
+            break;
+          }
+#ifdef WITH_NEURAL
       std::vector<NeuralDone> ready;
       {
         std::lock_guard<std::mutex> lk(njMu);
@@ -2362,8 +2508,8 @@ int main(int argc, char **argv) {
         }
         // le flush partira au POLLOUT du prochain tour (out non vide).
       }
-    }
 #endif
+    }
     for (size_t i = 0; i < nOld; i++) {
       Client &cl = clients[i];
       short ev = pfds[i + kFixed].revents;

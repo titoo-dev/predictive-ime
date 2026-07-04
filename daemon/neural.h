@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -63,12 +64,19 @@ public:
                         std::vector<float> &logprobs);
 
   // Up to n rephrasings of `sentence` (instruct generation, on-demand — seconds,
-  // NOT per-keystroke). Uses the Qwen3 chat template + greedy generation, parses
+  // NOT per-keystroke). Uses the Qwen3 chat template + sampled generation, parses
   // one variant per line. Returns [] if not ready. Resets the nextWords KV cache.
   // mode : rephrase|formal|simple|short|correct|translate (cf reform_prompts.h).
   // nonce : varie le seed pour « régénérer » (nouvelles variantes même phrase).
-  std::vector<std::string> reformulate(const std::string &sentence, int n,
-                                       const std::string &mode, uint32_t nonce);
+  // onVariant (optionnel) : appelé À CHAQUE variante acceptée avec la liste
+  // courante (STREAMING — la 1re variante s'affiche sans attendre les autres).
+  // Appelé depuis le thread appelant, sous mu_ : le callback ne doit PAS
+  // rappeler NeuralPredictor.
+  std::vector<std::string>
+  reformulate(const std::string &sentence, int n, const std::string &mode,
+              uint32_t nonce,
+              const std::function<void(const std::vector<std::string> &)>
+                  &onVariant = nullptr);
 
 private:
   // One llama_context, two callers (main loop sync/rerank + async worker):

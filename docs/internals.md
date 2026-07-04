@@ -195,6 +195,30 @@ P1(w)    = 0.7·Pcont(w) + 0.3·Pfreq(w)
   expansion). En complétion normale, un mot qui est exactement un mot-clé
   (« coeur ») propose l'emoji en fin de barre.
 
+## Reformulation (Ctrl+Alt+R sur une sélection)
+
+- **Flux** : sélection (souris ou Ctrl+A) → `Ctrl+Alt+R` → bulle verticale de
+  variantes LLM (1-9/↑↓/Entrée remplace, Backspace juste après = revert,
+  Échap annule). ←/→ changent de MODE (`reformuler/formel/simple/court/
+  corriger/traduire`), re-Ctrl+Alt+R régénère (nonce).
+- **Sources** : API externe **Groq** (`reformProvider` auto, `reformModel`,
+  `reformBaseUrl`, `reformTimeoutMs` 8 s ; clé : `$GROQ_API_KEY` ou
+  `~/.local/share/ime-predictord/groq.key` — jamais dans le dépôt stow) avec
+  repli **local hors-ligne** (Qwen3 embarqué, sampling seedé, `<think>`
+  désactivé). `reformProvider: "local"` = 100 % hors-ligne garanti. Prompt
+  partagé entre les deux (`reform_prompts.h`).
+- **Architecture (2026-07-04)** : l'endpoint est servi par un **worker
+  dédié** du daemon — le poll loop ne gèle JAMAIS (la complétion continue
+  pendant les secondes de génération ; mesuré au test : complétion en 1 ms
+  pendant une reformulation lente). Réponse **différée** sur la même
+  connexion (lignes déposées via `postLine` + pipe de réveil) ; un job du
+  même client encore en file est remplacé (cycling de modes). **Streaming**
+  local : chaque variante part en `partial:true` dès que sa ligne est
+  générée — la 1re s'affiche pendant que les suivantes se calculent (la
+  génération s'arrête d'ailleurs dès n variantes acceptées). **Cache LRU**
+  (8 entrées, clé texte+mode+nonce+n) : revenir sur un mode déjà visité est
+  instantané et gratuit ; les échecs ne sont jamais cachés.
+
 ## Interactions
 
 - **Navigation** : Tab entre dans la barre par la **gauche**, ⇧Tab par la
@@ -484,6 +508,29 @@ python3 ime/daemon/test_predict.py "$(nix build ./ime#predictord --no-link --pri
       une fois le support modèle/daemon en place). `toggleLang()` scindé en
       `readLang()`/`writeLang(v)` (même écriture textuelle atomique). Tests :
       5 cas engine (chips, chiffre, fermeture, Échap, →+Entrée).
+- [x] **Reformulation — batch architecture (2026-07-04).** (A1) L'endpoint
+      `reformulate` passe sur un **worker dédié** avec réponse différée
+      (postLine + pipe de réveil partagé) : le poll loop ne gèle plus pendant
+      les secondes d'appel Groq / génération locale — testé : complétion en
+      1 ms pendant une reformulation lente (avant : bloquée derrière, jusqu'à
+      20 s). File FIFO, job du même client remplacé s'il attend encore.
+      (A2) **Streaming** : `neural.reformulate` accepte un callback par
+      variante (parsing ligne-à-ligne incrémental + arrêt dès n variantes) ;
+      le daemon pousse des lignes `partial:true`, l'engine met la bulle à
+      jour au fil de l'eau (1re variante navigable immédiatement, position
+      de navigation préservée). Groq reste non-streamé (répond < 2 s).
+      (A3) **Cache LRU** 8 entrées (texte+mode+nonce+n) partagé
+      worker/thread principal : cycling de modes déjà visités instantané.
+      + `reformTimeoutMs` 20 s → 8 s (l'engine abandonne à 12 s) ; includes
+      threading hors du `#ifdef WITH_NEURAL` (le worker existe aussi en
+      build pur n-gram). Tests : +5 cas daemon (mock HTTP OpenAI local —
+      variantes différées, cache, nonce, non-blocage mesuré, aboutissement).
+      Streaming local vérifié en smoke GGUF réel : partial à t+1,1 s, final
+      à t+2,2 s. ATTENTION (préexistant, hors batch) : le repli local partage
+      le modèle du mot-suivant — avec le GGUF *Base* déployé, les variantes
+      locales sont inutilisables (le Base ne suit pas le chat template) ; le
+      repli n'a de valeur qu'avec un GGUF instruct, sinon Groq est la seule
+      vraie source.
 - [ ] (Polish) auto-accent quand la forme sans accent est au dico (ex. `garcon`
       reste `garcon` car présent dans le corpus) — limite de qualité du corpus.
 

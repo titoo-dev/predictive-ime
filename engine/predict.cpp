@@ -534,8 +534,14 @@ struct ReformResult {
   std::vector<std::string> variants;
   std::string source; // "groq" / "local" / "none" → badge du header
 };
-ReformResult reformulateDaemon(const std::string &sentence,
-                               const std::string &mode, uint32_t nonce) {
+// La réponse peut arriver en PLUSIEURS lignes : des lignes
+// {"variants":[...],"partial":true} (STREAMING local — la 1re variante
+// s'affiche pendant que les suivantes se génèrent encore), puis la ligne
+// FINALE {"variants":[...],"source":...} qui clôt l'échange. `onPartial` est
+// appelé depuis le thread appelant pour chaque ligne partielle.
+ReformResult reformulateDaemon(
+    const std::string &sentence, const std::string &mode, uint32_t nonce,
+    const std::function<void(std::vector<std::string>)> &onPartial = nullptr) {
   ReformResult out;
   int fd = connectDaemon(/*timeoutMs=*/12000);
   if (fd < 0)
@@ -555,17 +561,29 @@ ReformResult reformulateDaemon(const std::string &sentence,
   ssize_t n;
   while ((n = ::read(fd, tmp, sizeof(tmp))) > 0) {
     buf.append(tmp, n);
-    if (!buf.empty() && buf.back() == '\n')
-      break;
+    size_t nl;
+    while ((nl = buf.find('\n')) != std::string::npos) {
+      std::string one = buf.substr(0, nl);
+      buf.erase(0, nl + 1);
+      try {
+        json resp = json::parse(one);
+        std::vector<std::string> vars;
+        for (auto &v : resp.value("variants", json::array()))
+          vars.push_back(v.get<std::string>());
+        if (resp.value("partial", false)) {
+          if (onPartial)
+            onPartial(std::move(vars));
+          continue;
+        }
+        out.variants = std::move(vars);
+        out.source = resp.value("source", std::string{"none"});
+        ::close(fd);
+        return out;
+      } catch (...) {
+      }
+    }
   }
   ::close(fd);
-  try {
-    json resp = json::parse(buf);
-    for (auto &v : resp.value("variants", json::array()))
-      out.variants.push_back(v.get<std::string>());
-    out.source = resp.value("source", std::string{"none"});
-  } catch (...) {
-  }
   return out;
 }
 
@@ -1679,7 +1697,32 @@ private:
     std::string mode = kReformModes[state->reformMode].key;
     uint32_t nonce = state->reformNonce;
     std::thread([this, ref, text, mode, nonce, gen]() mutable {
-      ReformResult r = reformulateDaemon(text, mode, nonce); // bloque DANS le thread
+      // STREAMING : chaque ligne partielle remplace le spinner par les
+      // variantes déjà prêtes — navigables tout de suite, la liste se
+      // complète au fil des lignes. La position de navigation est préservée.
+      auto onPartial = [this, ref, gen](std::vector<std::string> vars) {
+        instance_->eventDispatcher().scheduleWithContext(
+            ref, [this, ref, vars = std::move(vars), gen]() {
+              fcitx::InputContext *ic = ref.get();
+              if (!ic)
+                return;
+              auto *st = ic->propertyFor(&factory_);
+              if (!st->reformulating || st->reformGen != gen || vars.empty())
+                return;
+              bool first = st->reformLoading;
+              st->reformLoading = false;
+              st->cands = vars;
+              if (first) {
+                st->navIndex = 0;
+                st->navigating = true;
+              }
+              if (st->navIndex >= (int)st->cands.size())
+                st->navIndex = 0;
+              setReformulationCandidates(ic, st);
+            });
+      };
+      ReformResult r =
+          reformulateDaemon(text, mode, nonce, onPartial); // bloque DANS le thread
       instance_->eventDispatcher().scheduleWithContext(ref, [this, ref, r, gen]() {
         fcitx::InputContext *ic = ref.get();
         if (!ic)
@@ -1687,6 +1730,7 @@ private:
         auto *st = ic->propertyFor(&factory_);
         if (!st->reformulating || st->reformGen != gen)
           return; // annulé ou résultat obsolète (mode changé entre-temps)
+        bool wasLoading = st->reformLoading;
         st->reformLoading = false;
         if (r.variants.empty()) {
           exitReformulation(ic, st);
@@ -1694,7 +1738,10 @@ private:
         }
         st->cands = r.variants;
         st->reformSource = r.source;
-        st->navIndex = 0;
+        // streaming : si des partielles étaient déjà affichées, on garde la
+        // position de navigation (l'utilisateur explore peut-être déjà).
+        if (wasLoading || st->navIndex >= (int)st->cands.size())
+          st->navIndex = 0;
         st->navigating = true;
         setReformulationCandidates(ic, st);
       });
