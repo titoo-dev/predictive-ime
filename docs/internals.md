@@ -201,12 +201,19 @@ P1(w)    = 0.7·Pcont(w) + 0.3·Pfreq(w)
   variantes LLM (1-9/↑↓/Entrée remplace, Backspace juste après = revert,
   Échap annule). ←/→ changent de MODE (`reformuler/formel/simple/court/
   corriger/traduire`), re-Ctrl+Alt+R régénère (nonce).
-- **Sources** : API externe **Groq** (`reformProvider` auto, `reformModel`,
-  `reformBaseUrl`, `reformTimeoutMs` 8 s ; clé : `$GROQ_API_KEY` ou
-  `~/.local/share/ime-predictord/groq.key` — jamais dans le dépôt stow) avec
-  repli **local hors-ligne** (Qwen3 embarqué, sampling seedé, `<think>`
-  désactivé). `reformProvider: "local"` = 100 % hors-ligne garanti. Prompt
-  partagé entre les deux (`reform_prompts.h`).
+- **Source : Groq UNIQUEMENT** (`reformModel`, `reformBaseUrl`,
+  `reformTimeoutMs` 8 s ; clé : `$GROQ_API_KEY` ou
+  `~/.local/share/ime-predictord/groq.key` — jamais dans le dépôt stow).
+  La qualité d'abord : le repli local (GGUF Base du mot-suivant) produisait
+  des variantes inutilisables — retiré. **L'échec s'affiche** au lieu de
+  disparaître : la réponse porte `error`
+  (`no_key`/`auth`/`network`/`http`/`empty`) et l'engine montre un panneau
+  compact — clé manquante/refusée → « Entrée : configurer » lance
+  **`ime-preferences --groq-key`** (fenêtre où COLLER la clé fonctionne,
+  écrite en 0600 dans le data dir, puis **validation automatique** via l'op
+  daemon `{"reformCheck":true}` = appel Groq minimal → ✓ et fermeture auto,
+  ou ✗ clé refusée). Réseau/API en panne → « ⚠ Reformulation indisponible ».
+  `neural.reformulate` reste dans neural.cpp mais n'est plus branché.
 - **Architecture (2026-07-04)** : l'endpoint est servi par un **worker
   dédié** du daemon — le poll loop ne gèle JAMAIS (la complétion continue
   pendant les secondes de génération ; mesuré au test : complétion en 1 ms
@@ -531,6 +538,23 @@ python3 ime/daemon/test_predict.py "$(nix build ./ime#predictord --no-link --pri
       locales sont inutilisables (le Base ne suit pas le chat template) ; le
       repli n'a de valeur qu'avec un GGUF instruct, sinon Groq est la seule
       vraie source.
+- [x] **Reformulation — Groq-only + UX de panne (2026-07-04).** Le repli
+      local est retiré (qualité d'abord : le GGUF Base rendait du charabia).
+      `reformulateHttp` remonte un KIND (`ok/no_key/auth/network/http/empty`)
+      inclus dans la réponse ; l'engine affiche un panneau COMPACT au lieu
+      d'un échec silencieux : clé manquante/refusée → « Entrée : configurer »
+      lance `ime-preferences --groq-key` (double fork), réseau/API →
+      « ⚠ indisponible ». Le dialogue de clé : champ collable, écrit
+      `groq.key` (0600, data dir), puis VALIDATION AUTOMATIQUE via le nouvel
+      op `{"reformCheck":true}` (appel Groq minimal sur le worker, différé) —
+      ✓ fermeture auto, ✗ message. `no_key` est détecté SANS réseau → le
+      panneau apparaît quasi instantanément au hotkey. Au passage : le
+      remplacement de jobs en file se fait par PHRASE (l'engine ouvre une
+      connexion par demande — l'ancien critère « même client » ne matchait
+      jamais), l'évincé reçoit `superseded` immédiatement ; `reformProvider`
+      supprimé de la config. Tests : +3 cas daemon (401→auth, reformCheck
+      refusée/acceptée) ; smoke offscreen du dialogue. Limite : les panneaux
+      engine (rendu async) ne sont pas couverts par le harnais engine.
 - [ ] (Polish) auto-accent quand la forme sans accent est au dico (ex. `garcon`
       reste `garcon` car présent dans le corpus) — limite de qualité du corpus.
 

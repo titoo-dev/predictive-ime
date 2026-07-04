@@ -537,16 +537,23 @@ try:
     hits = []
     slow = [False]
 
+    unauth = [False]
+
     class Mock(http.server.BaseHTTPRequestHandler):
         def do_POST(self):
             self.rfile.read(int(self.headers.get("Content-Length", 0)))
             hits.append(1)
             if slow[0]:
                 time.sleep(1.2)
-            body = json.dumps({"choices": [{"message": {"content":
-                "Variante numéro un.\nVariante numéro deux.\n"
-                "Variante numéro trois.\nVariante numéro quatre."}}]}).encode()
-            self.send_response(200)
+            if unauth[0]:
+                body = b'{"error":{"message":"Invalid API Key"}}'
+                self.send_response(401)
+            else:
+                body = json.dumps({"choices": [{"message": {"content":
+                    "Variante numéro un.\nVariante numéro deux.\n"
+                    "Variante numéro trois.\nVariante numéro quatre."}}]}
+                    ).encode()
+                self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
@@ -595,6 +602,24 @@ try:
     t.join()
     check("reformulate: la reformulation lente aboutit quand même",
           len(got["r"].get("variants", [])) == 2, str(got.get("r")))
+    slow[0] = False
+    # Groq-only + kinds d'erreur : 401 → error "auth" (l'engine affiche le
+    # panneau « clé refusée — Entrée : reconfigurer »), jamais mis en cache.
+    unauth[0] = True
+    r = req({"reformulate": "phrase pour tester l'auth", "n": 2,
+             "mode": "rephrase", "nonce": 0})
+    check("reformulate: 401 → error 'auth', aucune variante",
+          r.get("error") == "auth" and r.get("variants") == [], str(r))
+    # reformCheck : validation de clé (dialogue --groq-key). Clé refusée…
+    r = req({"reformCheck": True})
+    check("reformCheck: clé refusée → keyValid false, error auth",
+          r.get("keyPresent") is True and r.get("keyValid") is False and
+          r.get("error") == "auth", str(r))
+    # …puis acceptée (l'API répond 200) : keyValid true.
+    unauth[0] = False
+    r = req({"reformCheck": True})
+    check("reformCheck: clé acceptée → keyValid true",
+          r.get("keyValid") is True and r.get("keyPresent") is True, str(r))
     httpd.shutdown()
     set_config({}, 12)
 

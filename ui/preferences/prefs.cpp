@@ -17,6 +17,7 @@
 #include <QGuiApplication>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QLocalSocket>
 #include <QObject>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
@@ -295,6 +296,61 @@ QVariant parseValue(const QString &raw) {
 
 } // namespace
 
+// Saisie/validation de la clé Groq (dialogue --groq-key, lancé par l'engine
+// depuis le panneau « Clé API requise »). La clé va dans le DATA dir
+// (~/.local/share/ime-predictord/groq.key, 0600 — jamais dans le dépôt stow),
+// puis le DAEMON la valide (op reformCheck = appel Groq minimal — il relit la
+// clé à chaque appel, donc effet immédiat, aucun restart).
+class KeyTool : public QObject {
+    Q_OBJECT
+public:
+    Q_INVOKABLE bool save(const QString &key) {
+        QString base = qEnvironmentVariable("XDG_DATA_HOME");
+        if (base.isEmpty())
+            base = QDir::homePath() + "/.local/share";
+        const QString dir = base + "/ime-predictord";
+        QDir().mkpath(dir);
+        const QString p = dir + "/groq.key";
+        QSaveFile f(p);
+        if (!f.open(QIODevice::WriteOnly))
+            return false;
+        f.write(key.trimmed().toUtf8());
+        f.write("\n");
+        if (!f.commit())
+            return false;
+        QFile::setPermissions(p, QFileDevice::ReadOwner |
+                                     QFileDevice::WriteOwner);
+        return true;
+    }
+
+    // "valid" | "invalid" (clé refusée) | "offline" (réseau) | "daemon"
+    // (daemon injoignable). BLOQUANT (quelques secondes au pire) — le QML
+    // l'appelle via un Timer pour que « Validation… » s'affiche d'abord.
+    Q_INVOKABLE QString validate() {
+        QString sock = qEnvironmentVariable("IME_PREDICTORD_SOCK");
+        if (sock.isEmpty())
+            sock = "/tmp/ime-predictord.sock";
+        QLocalSocket s;
+        s.connectToServer(sock);
+        if (!s.waitForConnected(1500))
+            return "daemon";
+        s.write("{\"reformCheck\":true}\n");
+        s.flush();
+        QByteArray buf;
+        while (!buf.contains('\n')) {
+            if (!s.waitForReadyRead(10000))
+                return "daemon";
+            buf += s.readAll();
+        }
+        const QJsonObject r =
+            QJsonDocument::fromJson(buf.left(buf.indexOf('\n'))).object();
+        if (r.value("keyValid").toBool())
+            return "valid";
+        return r.value("error").toString() == "network" ? "offline"
+                                                        : "invalid";
+    }
+};
+
 class Cfg : public QObject {
     Q_OBJECT
 public:
@@ -335,6 +391,111 @@ private:
     QJsonObject obj_;
 };
 
+// Dialogue de SAISIE DE CLÉ (--groq-key) : un champ où COLLER fonctionne
+// (impossible dans le panneau de l'IME — Ctrl+V va à l'appli), validation
+// AUTOMATIQUE à l'enregistrement (via le daemon), fermeture auto si valide.
+static const char *kGroqKeyQml = R"QML(
+import QtQuick
+import QtQuick.Window
+
+Window {
+    id: win
+    visible: true
+    title: "IME — Clé API Groq"
+    color: colors.surface
+    width: 480
+    height: col.implicitHeight + 40
+    minimumWidth: 480
+    minimumHeight: col.implicitHeight + 40
+
+    function go() {
+        var k = field.text.trim()
+        if (!k.length) { status.text = "La clé est vide."; return }
+        if (!keytool.save(k)) { status.text = "✗ Écriture impossible."; return }
+        status.text = "Validation en cours…"
+        checkTimer.start()
+    }
+
+    Column {
+        id: col
+        x: 20; y: 20
+        width: parent.width - 40
+        spacing: 12
+
+        Text {
+            text: "Clé API Groq (reformulation)"
+            color: colors.onSurface
+            font.bold: true; font.pixelSize: 15; font.family: "Maple Mono NF"
+        }
+        Text {
+            text: "Colle ta clé (console.groq.com → API Keys) puis Entrée. " +
+                  "Elle est stockée en local, hors de tout dépôt " +
+                  "(~/.local/share/ime-predictord/groq.key)."
+            color: colors.onSurface; opacity: 0.55
+            font.pixelSize: 11; font.family: "Maple Mono NF"
+            width: parent.width; wrapMode: Text.Wrap
+        }
+        Rectangle {
+            width: parent.width; height: 36; radius: 8
+            color: "transparent"
+            border.color: field.activeFocus ? colors.accent : colors.outline
+            border.width: 1
+            TextInput {
+                id: field
+                anchors.fill: parent; anchors.margins: 9
+                color: colors.onSurface
+                font.pixelSize: 12; font.family: "Maple Mono NF"
+                selectByMouse: true
+                clip: true
+                focus: true
+                onAccepted: win.go()
+            }
+        }
+        Row {
+            spacing: 10
+            Rectangle {
+                width: btnLabel.implicitWidth + 24; height: 32; radius: 8
+                color: colors.accent
+                Text {
+                    id: btnLabel
+                    anchors.centerIn: parent
+                    text: "Valider et enregistrer"
+                    color: colors.surface
+                    font.pixelSize: 12; font.family: "Maple Mono NF"
+                }
+                MouseArea { anchors.fill: parent; onClicked: win.go() }
+            }
+            Text {
+                id: status
+                anchors.verticalCenter: parent.verticalCenter
+                text: ""
+                color: colors.onSurface
+                font.pixelSize: 12; font.family: "Maple Mono NF"
+            }
+        }
+    }
+
+    Timer { // laisse « Validation en cours… » se PEINDRE avant l'appel bloquant
+        id: checkTimer
+        interval: 60
+        onTriggered: {
+            var r = keytool.validate()
+            if (r === "valid") {
+                status.text = "✓ Clé valide — la reformulation est prête !"
+                closeTimer.start()
+            } else if (r === "invalid") {
+                status.text = "✗ Clé refusée par l'API — vérifie-la."
+            } else if (r === "offline") {
+                status.text = "⚠ Réseau injoignable — clé enregistrée, elle sera utilisée dès le retour du réseau."
+            } else {
+                status.text = "⚠ Daemon injoignable — clé enregistrée."
+            }
+        }
+    }
+    Timer { id: closeTimer; interval: 1400; onTriggered: Qt.quit() }
+}
+)QML";
+
 int main(int argc, char **argv) {
     QGuiApplication::setDesktopFileName("ime-preferences");
     QGuiApplication app(argc, argv);
@@ -342,11 +503,13 @@ int main(int argc, char **argv) {
     Cfg cfg(configPath());
 
     // mode CLI : --set k=v (répétable) applique et sort, sans UI.
-    bool smoke = false, didSet = false;
+    bool smoke = false, didSet = false, groqKey = false;
     const QStringList args = app.arguments();
     for (int i = 1; i < args.size(); i++) {
         if (args[i] == "--smoke") {
             smoke = true;
+        } else if (args[i] == "--groq-key") {
+            groqKey = true;
         } else if (args[i] == "--set" && i + 1 < args.size()) {
             const QString kv = args[++i];
             int eq = kv.indexOf('=');
@@ -358,6 +521,21 @@ int main(int argc, char **argv) {
     }
     if (didSet && !smoke)
         return 0;
+
+    if (groqKey) { // dialogue de clé, sans le popover complet
+        QQmlApplicationEngine engine;
+        KeyTool keytool;
+        engine.rootContext()->setContextProperty("keytool", &keytool);
+        engine.rootContext()->setContextProperty("colors", loadColors());
+        engine.loadData(kGroqKeyQml);
+        if (engine.rootObjects().isEmpty()) {
+            fprintf(stderr, "ime-preferences: QML clé sans objet racine\n");
+            return 1;
+        }
+        if (smoke)
+            QTimer::singleShot(400, &app, &QGuiApplication::quit);
+        return app.exec();
+    }
 
     QQmlApplicationEngine engine;
     QObject::connect(

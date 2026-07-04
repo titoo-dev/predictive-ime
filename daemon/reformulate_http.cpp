@@ -126,14 +126,21 @@ std::vector<std::string> reformulateHttp(const std::string &sentence, int n,
                                          const std::string &model,
                                          const std::string &cfgDir,
                                          long timeoutMs, const std::string &mode,
-                                         uint32_t nonce) {
-  if (sentence.empty()) return {};
+                                         uint32_t nonce, std::string *errKind) {
+  auto fail = [&](const char *kind) -> std::vector<std::string> {
+    if (errKind)
+      *errKind = kind;
+    return {};
+  };
+  if (errKind)
+    *errKind = "ok";
+  if (sentence.empty()) return fail("empty");
   if (n < 1) n = 3;
   std::string key = readKey(cfgDir);
   if (key.empty()) {
     if (getenv("IME_DEBUG"))
-      fprintf(stderr, "[reform-http] pas de clé (GROQ_API_KEY / groq.key) — repli local\n");
-    return {}; // pas de clé → on retombe sur le local
+      fprintf(stderr, "[reform-http] pas de clé (GROQ_API_KEY / groq.key)\n");
+    return fail("no_key");
   }
 
   static std::once_flag once;
@@ -158,7 +165,7 @@ std::vector<std::string> reformulateHttp(const std::string &sentence, int n,
   std::string payload = body.dump();
 
   CURL *curl = curl_easy_init();
-  if (!curl) return {};
+  if (!curl) return fail("network");
   std::string resp;
   curl_slist *hdrs = nullptr;
   hdrs = curl_slist_append(hdrs, "Content-Type: application/json");
@@ -182,7 +189,9 @@ std::vector<std::string> reformulateHttp(const std::string &sentence, int n,
     if (getenv("IME_DEBUG"))
       fprintf(stderr, "[reform-http] rc=%d (%s) http=%ld resp=%.300s\n", rc,
               curl_easy_strerror(rc), http, resp.c_str());
-    return {};
+    if (rc != CURLE_OK)
+      return fail("network"); // injoignable / timeout
+    return fail(http == 401 || http == 403 ? "auth" : "http");
   }
 
   std::string content;
@@ -194,7 +203,7 @@ std::vector<std::string> reformulateHttp(const std::string &sentence, int n,
     if (getenv("IME_DEBUG"))
       fprintf(stderr, "[reform-http] parse KO: %s resp=%.300s\n", e.what(),
               resp.c_str());
-    return {};
+    return fail("http");
   }
   if (getenv("IME_DEBUG"))
     fprintf(stderr, "[reform-http] lang=%s http=%ld content=\"%.300s\"\n",
@@ -221,5 +230,7 @@ std::vector<std::string> reformulateHttp(const std::string &sentence, int n,
     seen.push_back(vN);
     variants.push_back(v);
   }
+  if (variants.empty())
+    return fail("empty");
   return variants;
 }

@@ -47,6 +47,7 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/un.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include <nlohmann/json.hpp>
@@ -532,7 +533,10 @@ void vetoDaemon(const std::string &typed, const std::string &applied) {
 // long (≠ prédiction par-frappe) — action explicite, exécutée dans un thread.
 struct ReformResult {
   std::vector<std::string> variants;
-  std::string source; // "groq" / "local" / "none" → badge du header
+  std::string source; // "groq" / "none" → badge du header
+  // pourquoi c'est vide : no_key / auth / network / http / empty / superseded
+  // (cf reformulate_http.h) — l'engine en fait un panneau compact.
+  std::string error;
 };
 // La réponse peut arriver en PLUSIEURS lignes : des lignes
 // {"variants":[...],"partial":true} (STREAMING local — la 1re variante
@@ -577,6 +581,7 @@ ReformResult reformulateDaemon(
         }
         out.variants = std::move(vars);
         out.source = resp.value("source", std::string{"none"});
+        out.error = resp.value("error", std::string{});
         ::close(fd);
         return out;
       } catch (...) {
@@ -607,6 +612,7 @@ struct PredictState : public fcitx::InputContextProperty {
   int langIndex = 0;                 // choix surligné dans kLangChoices
   bool reformulating = false;        // mode reformulation : cands = variantes de la sélection
   bool reformLoading = false;        // génération en cours (placeholder « ⟳ »)
+  std::string reformNotice;          // panneau d'échec (no_key/auth/network/…)
   std::string reformText;            // texte source (sélection / surrounding) — regen + revert
   int reformMode = 0;                // index dans kReformModes (←/→ pour changer)
   uint32_t reformNonce = 0;          // varie le seed → « régénérer » (Ctrl+Alt+R)
@@ -786,6 +792,25 @@ public:
         return;
       }
       exitLangMenu(ic, state); // autre touche → on sort et on continue
+    }
+
+    // (R-notice) PANNEAU D'ÉCHEC de reformulation (clé manquante/refusée,
+    // API indisponible) : Entrée ouvre le dialogue de clé quand c'est une
+    // affaire de clé ; Échap/Entrée sont avalées, toute autre touche ferme
+    // le panneau puis continue sa vie normale.
+    if (state->reformulating && !state->reformNotice.empty()) {
+      bool keyIssue =
+          state->reformNotice == "no_key" || state->reformNotice == "auth";
+      bool enter = !mod &&
+                   (sym == FcitxKey_Return || sym == FcitxKey_KP_Enter);
+      if (keyIssue && enter)
+        spawnKeyDialog();
+      exitReformulation(ic, state);
+      if (enter || sym == FcitxKey_Escape) {
+        event.filterAndAccept();
+        return;
+      }
+      // fall-through : la touche est traitée normalement ci-dessous
     }
 
     // (R) MODE REFORMULATION : la barre montre 3 variantes de la sélection ;
@@ -1619,6 +1644,49 @@ private:
     exitLangMenu(ic, state);
   }
 
+  // Lance le dialogue de saisie de clé (ime-preferences --groq-key) : une
+  // fenêtre Qt où COLLER la clé fonctionne — un Ctrl+V n'atteint jamais
+  // l'IME, la saisie ne peut donc pas se faire dans le panneau lui-même.
+  // Double fork : pas de zombie, le dialogue survit à l'engine.
+  static void spawnKeyDialog() {
+    pid_t pid = ::fork();
+    if (pid == 0) {
+      if (::fork() == 0) {
+        ::setsid();
+        ::execlp("ime-preferences", "ime-preferences", "--groq-key",
+                 (char *)nullptr);
+        ::_exit(127);
+      }
+      ::_exit(0);
+    }
+    if (pid > 0)
+      ::waitpid(pid, nullptr, 0);
+  }
+
+  // Panneau COMPACT d'échec de reformulation : un seul chip, message clair.
+  // no_key/auth → Entrée ouvre le dialogue de clé ; sinon toute touche ferme.
+  void showReformNotice(fcitx::InputContext *ic, PredictState *state,
+                        const std::string &kind) {
+    state->reformNotice = kind.empty() ? "network" : kind;
+    state->reformLoading = false;
+    state->navigating = false;
+    std::string msg;
+    if (state->reformNotice == "no_key")
+      msg = "Clé API Groq requise — Entrée : configurer · Échap";
+    else if (state->reformNotice == "auth")
+      msg = "Clé API refusée — Entrée : reconfigurer · Échap";
+    else
+      msg = "⚠ Reformulation indisponible (réseau/API)";
+    state->cands = {msg};
+    auto list = std::make_unique<PredictCandidateList>();
+    list->append(msg, /*autoApply=*/false);
+    list->setCursorIndex(-1);
+    ic->inputPanel().reset();
+    ic->inputPanel().setCandidateList(std::move(list));
+    ic->updatePreedit();
+    ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
+  }
+
   // --- Reformulation : sélection → 3 variantes LLM, le choix remplace ---
   void setReformulationCandidates(fcitx::InputContext *ic, PredictState *state) {
     auto list = std::make_unique<PredictCandidateList>();
@@ -1733,7 +1801,13 @@ private:
         bool wasLoading = st->reformLoading;
         st->reformLoading = false;
         if (r.variants.empty()) {
-          exitReformulation(ic, st);
+          // une demande plus récente est en route → on laisse sa place
+          if (r.error == "superseded")
+            return;
+          // qualité d'abord (Groq-only) : l'échec s'AFFICHE au lieu de
+          // disparaître en silence — clé manquante/refusée → Entrée ouvre
+          // le dialogue de configuration, sinon message compact.
+          showReformNotice(ic, st, r.error);
           return;
         }
         st->cands = r.variants;
@@ -1754,6 +1828,7 @@ private:
     state->navigating = false;
     state->reformText.clear();
     state->reformSource.clear();
+    state->reformNotice.clear();
     // NB : on NE touche PAS à reformRevert* — le revert doit survivre au commit
     // (il s'arme dans commitReformulation et se consomme au prochain Backspace).
     state->cands.clear();

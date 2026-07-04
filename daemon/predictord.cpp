@@ -288,11 +288,10 @@ struct Config {
   bool neuralOnly = false;
 
   // --- REFORMULATION (Ctrl+Alt+R sur une sélection). Source des variantes :
-  //   "auto"  → API externe si une clé est dispo, sinon local (neural)
-  //   "groq"  → API externe (repli local si l'appel échoue)
-  //   "local" → uniquement le neural local (hors-ligne, plus lent)
-  // La clé n'est JAMAIS ici : $GROQ_API_KEY ou ~/.config/ime-predictord/groq.key.
-  std::string reformProvider = "auto";
+  // API externe (Groq) UNIQUEMENT — la qualité d'abord (le repli local via le
+  // GGUF du mot-suivant produisait des variantes inutilisables). Échec →
+  // l'engine affiche un panneau compact (clé manquante / API indisponible).
+  // La clé n'est JAMAIS ici : $GROQ_API_KEY ou groq.key dans le DATA dir.
   std::string reformModel = "llama-3.3-70b-versatile";
   std::string reformBaseUrl = "https://api.groq.com/openai/v1/chat/completions";
   // Groq répond en < 2 s : 8 s couvrent les mauvais jours SANS immobiliser le
@@ -825,7 +824,6 @@ struct Model {
           fresh.neuralThreads = j.value("neuralThreads", fresh.neuralThreads);
           fresh.neuralTopk = j.value("neuralTopk", fresh.neuralTopk);
           fresh.neuralOnly = j.value("neuralOnly", fresh.neuralOnly);
-          fresh.reformProvider = j.value("reformProvider", fresh.reformProvider);
           fresh.reformModel = j.value("reformModel", fresh.reformModel);
           fresh.reformBaseUrl = j.value("reformBaseUrl", fresh.reformBaseUrl);
           fresh.reformTimeoutMs = j.value("reformTimeoutMs", fresh.reformTimeoutMs);
@@ -2075,9 +2073,12 @@ int main(int argc, char **argv) {
   // revenir sur un mode déjà visité est instantané et gratuit.
   struct ReformJob {
     uint64_t client = 0;
-    std::string sentence, mode, provider, baseUrl, model, cfgDir;
+    std::string sentence, mode, baseUrl, model, cfgDir;
     int n = 3, timeoutMs = 8000;
     uint32_t nonce = 0;
+    // VALIDATION de clé (panneau « fournir la clé ») : appel Groq minimal
+    // (1 variante d'une phrase fixe) juste pour vérifier présence + validité.
+    bool checkOnly = false;
   };
   struct ReformHit {
     std::string key;
@@ -2102,39 +2103,30 @@ int main(int argc, char **argv) {
         job = std::move(rjQueue.front());
         rjQueue.pop_front();
       }
-      std::vector<std::string> variants;
-      std::string source = "none";
-      if (job.provider != "local") {
-        variants = reformulateHttp(job.sentence, job.n, job.baseUrl, job.model,
-                                   job.cfgDir, job.timeoutMs, job.mode,
-                                   job.nonce);
-        if (!variants.empty())
-          source = "groq";
+      // GROQ SEULEMENT : la qualité d'abord — le repli local (GGUF du
+      // mot-suivant) produisait des variantes inutilisables. En cas d'échec,
+      // `error` dit pourquoi et l'engine l'affiche en panneau compact
+      // (no_key/auth → inviter à configurer la clé ; network/http → message).
+      std::string kind = "ok";
+      std::vector<std::string> variants = reformulateHttp(
+          job.sentence, job.n, job.baseUrl, job.model, job.cfgDir,
+          job.timeoutMs, job.mode, job.nonce, &kind);
+      if (job.checkOnly) {
+        // Validation de clé : seule la CAUSE compte, pas les variantes.
+        json resp;
+        resp["reformCheck"] = true;
+        resp["keyPresent"] = kind != "no_key";
+        // « empty » = HTTP 200 sans variante exploitable → la clé est bonne.
+        resp["keyValid"] = kind == "ok" || kind == "empty";
+        resp["error"] = kind;
+        postLine(job.client, resp.dump() + "\n");
+        continue;
       }
-#ifdef WITH_NEURAL
-      // Repli LOCAL hors-ligne, en STREAMING (A2) : chaque variante part vers
-      // le client dès que sa ligne est complète (partial:true) — la 1re
-      // s'affiche pendant que le modèle génère encore les suivantes. La
-      // réponse FINALE (sans partial) clôt l'échange.
-      if (variants.empty() && neural.ready()) {
-        variants = neural.reformulate(
-            job.sentence, job.n, job.mode, job.nonce,
-            [&](const std::vector<std::string> &sofar) {
-              json p;
-              p["variants"] = sofar;
-              p["partial"] = true;
-              try {
-                postLine(job.client, p.dump() + "\n");
-              } catch (...) {
-              }
-            });
-        if (!variants.empty())
-          source = "local";
-      }
-#endif
+      std::string source = variants.empty() ? "none" : "groq";
       json resp;
       resp["variants"] = variants;
       resp["source"] = source;
+      resp["error"] = kind;
       std::string out;
       try {
         out = resp.dump() + "\n";
@@ -2261,6 +2253,27 @@ int main(int argc, char **argv) {
         resp["ok"] = true;
       } else if (req.contains("stats")) {
         resp = model.stats();
+      } else if (req.contains("reformCheck")) {
+        // VALIDATION de clé Groq (panneau « fournir la clé » + dialogue
+        // ime-preferences --groq-key) : appel minimal sur le worker, réponse
+        // différée {"reformCheck":true,"keyPresent":…,"keyValid":…,"error":…}.
+        model.maybeReload();
+        {
+          std::lock_guard<std::mutex> lk(rjMu);
+          ReformJob job;
+          job.client = clientSeq;
+          job.checkOnly = true;
+          job.sentence = "Bonjour tout le monde."; // phrase fixe, n=1 : minimal
+          job.mode = "rephrase";
+          job.n = 1;
+          job.baseUrl = model.cfg.reformBaseUrl;
+          job.model = model.cfg.reformModel;
+          job.cfgDir = model.cfgDir_;
+          job.timeoutMs = std::min(model.cfg.reformTimeoutMs, 6000);
+          rjQueue.push_back(std::move(job));
+        }
+        rjCv.notify_one();
+        return std::string{}; // réponse différée (postLine du worker)
       } else if (req.contains("reformulate")) {
         // Reformulation à la demande (sélection → variantes), traitée sur le
         // WORKER : Groq (secondes de réseau) ou génération locale ne bloquent
@@ -2272,7 +2285,8 @@ int main(int argc, char **argv) {
         int n = req.value("n", 3);
         std::string mode = req.value("mode", std::string{"rephrase"});
         uint32_t nonce = (uint32_t)req.value("nonce", 0);
-        model.maybeReload(); // provider/baseUrl/timeout à chaud
+        model.maybeReload(); // baseUrl/model/timeout à chaud
+        std::vector<uint64_t> superseded;
         {
           std::lock_guard<std::mutex> lk(rjMu);
           const std::string key = reformKey(sentence, mode, nonce, n);
@@ -2295,17 +2309,30 @@ int main(int argc, char **argv) {
           job.mode = mode;
           job.n = n;
           job.nonce = nonce;
-          job.provider = model.cfg.reformProvider;
           job.baseUrl = model.cfg.reformBaseUrl;
           job.model = model.cfg.reformModel;
           job.cfgDir = model.cfgDir_;
           job.timeoutMs = model.cfg.reformTimeoutMs;
-          // un job du même client encore en file est périmé (mode changé
-          // avant même que le worker ne l'ait pris) : on le remplace.
-          for (auto it = rjQueue.begin(); it != rjQueue.end();)
-            it = (it->client == clientSeq) ? rjQueue.erase(it) : it + 1;
+          // Un job encore en file pour la MÊME phrase est périmé (l'engine
+          // ouvre une connexion par demande : cycler les modes = plusieurs
+          // clients, seule la dernière demande compte). L'évincé reçoit une
+          // réponse « superseded » immédiate — son thread engine se termine
+          // au lieu d'attendre son timeout ; le compteur de génération côté
+          // engine la jette de toute façon.
+          for (auto it = rjQueue.begin(); it != rjQueue.end();) {
+            if (!it->checkOnly && it->sentence == sentence) {
+              superseded.push_back(it->client);
+              it = rjQueue.erase(it);
+            } else {
+              ++it;
+            }
+          }
           rjQueue.push_back(std::move(job));
         }
+        for (uint64_t c : superseded)
+          postLine(c,
+                   "{\"variants\":[],\"source\":\"none\",\"error\":"
+                   "\"superseded\"}\n");
         rjCv.notify_one();
         return std::string{}; // réponse différée (postLine du worker)
       } else {
