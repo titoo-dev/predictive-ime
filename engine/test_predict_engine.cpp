@@ -379,6 +379,60 @@ void revertTests(Harness &h) {
   check("revert: après revert, Espace garde le littéral (veto)", true);
 }
 
+void recomposeTests(Harness &h) {
+  h.reset();
+  h.setCaps(fcitx::CapabilityFlags{fcitx::CapabilityFlag::Preedit,
+                                   fcitx::CapabilityFlag::SurroundingText});
+  h.setSurrounding("", 0);
+
+  // « je deman ␣ » puis Backspace (efface l'espace) : la composition doit se
+  // ROUVRIR sur « deman » — barre re-proposée, contexte « je » conservé.
+  h.daemon->setReply({"demande", "demander"}, "", false);
+  h.expectCommit("je ");
+  h.type("je");
+  h.type(" ");
+  h.expectCommit("deman ");
+  h.type("deman");
+  h.type(" ");
+  // l'app contient « je deman » ; le harnais simule son SurroundingText
+  h.setSurrounding("je deman ", 9);
+  h.key("BackSpace");
+  check("recompose: préedit rouvert sur 'deman'",
+        h.preedit().rfind("deman", 0) == 0, h.preedit());
+  check("recompose: candidats re-proposés", !h.candidates().empty(),
+        h.candidates().empty() ? "vide" : h.candidates()[0]);
+  bool hasJe = false, hasDeman = false;
+  std::string dump;
+  for (auto &w : h.daemon->lastContext()) {
+    if (w == "je")
+      hasJe = true;
+    if (w == "deman")
+      hasDeman = true;
+    dump += w + " ";
+  }
+  check("recompose: contexte 'je' conservé (sans 'deman' résiduel)",
+        hasJe && !hasDeman, dump);
+  h.expectCommit("deman"); // Échap referme proprement (committe le littéral)
+  h.key("Escape");
+
+  // Backspace au MILIEU d'un mot (« dem|an ») : PAS de recomposition — la
+  // touche file à l'app (recomposer la moitié gauche corromprait le texte).
+  h.reset();
+  h.setCaps(fcitx::CapabilityFlags{fcitx::CapabilityFlag::Preedit,
+                                   fcitx::CapabilityFlag::SurroundingText});
+  h.setSurrounding("deman", 3);
+  h.key("BackSpace");
+  check("recompose: pas de recomposition en milieu de mot",
+        h.preedit().empty(), h.preedit());
+
+  // Sans SurroundingText : comportement inchangé (la touche file à l'app).
+  h.reset();
+  h.setCaps(fcitx::CapabilityFlag::Preedit);
+  h.key("BackSpace");
+  check("recompose: sans SurroundingText, Backspace file à l'app",
+        h.preedit().empty(), h.preedit());
+}
+
 void multiWordTests(Harness &h) {
   h.reset();
   h.setCaps(fcitx::CapabilityFlags{fcitx::CapabilityFlag::Preedit,
@@ -575,6 +629,7 @@ int main() {
     interactionTests(h);
     optInTests(h);
     revertTests(h);
+    recomposeTests(h);
     multiWordTests(h);
     englishTests(h);
     surroundingContextTests(h);

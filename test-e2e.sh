@@ -153,6 +153,9 @@ printf '{"autoApply": false}\n' > "$WT/config/ime-predictord/config.json"
 expect "autoApply off: littéral gardé"  "bonjou "               "bonjou "
 expect "autoApply off: accents restaurés" "francais "           "français "
 expect "autoApply off: → accepte"      "bonjou<RIGHT>"          "bonjour"
+# recomposition : « bonjou ␣ » puis Backspace efface l'espace → la composition
+# se ROUVRE sur le mot (barre + fantôme de retour) ; → accepte la complétion.
+expect "recompose: ⌫ rouvre le mot"     "je bonjou <BS><RIGHT>"  "je bonjour"
 # escapeForward (défaut) : Échap committe le littéral PUIS atteint l'app —
 # zenity (cancel) se ferme sans rien imprimer → résultat vide attendu.
 printf '{"escapeForward": true}\n' > "$WT/config/ime-predictord/config.json"

@@ -400,6 +400,24 @@ std::vector<std::string> lastWords(const std::vector<uint32_t> &cps,
   return out;
 }
 
+// Supprime `n` cp avant le curseur ET répercute sur la copie LOCALE du
+// SurroundingText : l'app ne renvoie son update qu'après un aller-retour,
+// et une complétion relancée juste derrière lirait sinon l'ancien texte
+// (le mot supprimé polluerait son propre contexte).
+void deleteSurroundingBefore(fcitx::InputContext *ic, unsigned n) {
+  ic->deleteSurroundingText(-int(n), n);
+  auto &st = ic->surroundingText();
+  auto cps = decodeUtf8(st.text());
+  size_t cur = st.cursor();
+  if (n == 0 || n > cur || cur > cps.size())
+    return;
+  std::string out;
+  for (size_t i = 0; i < cps.size(); i++)
+    if (i < cur - n || i >= cur)
+      appendCp(out, cps[i]);
+  st.setText(out, cur - n, cur - n);
+}
+
 // ----------------------------------------------------------- daemon IPC -----
 struct DaemonReply {
   std::vector<std::string> candidates;
@@ -922,7 +940,7 @@ public:
         autoCps > 0 &&
         ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText) &&
         ic->surroundingText().isValid()) {
-      ic->deleteSurroundingText(-int(autoCps), autoCps);
+      deleteSurroundingBefore(ic, autoCps);
       state->buffer = state->lastAutoLit;
       state->vetoAuto = true;
       // veto PERSISTANT : cette paire tapé→appliqué ne sera plus jamais
@@ -978,12 +996,57 @@ public:
       return;
     }
 
-    // (2bis) Backspace AVEC BUFFER VIDE : on supprime du texte DÉJÀ committé
-    //        — Backspace simple (un caractère) ou Ctrl+Backspace (un MOT). La
-    //        barre mot-suivant est spéculative : on la FERME et on laisse la
-    //        touche filer à l'application (pas de filterAndAccept). Sans cette
-    //        branche, Ctrl+Backspace (mod) tombait dans « (4) if (mod) return »
-    //        et la barre restait ouverte même une fois l'input entièrement vidé.
+    // (2bis) Backspace AVEC BUFFER VIDE : on supprime du texte DÉJÀ committé.
+    //        Si la suppression « rentre » dans un mot (fin de mot juste avant
+    //        le curseur — cas typique : « deman ␣ » puis ⌫ efface l'espace),
+    //        on RECOMPOSE : le mot repasse en préedit et la barre revient,
+    //        contexte intact — sinon revenir sur un mot déjà committé ne
+    //        proposait plus rien. Même patron que le revert (0) :
+    //        deleteSurroundingText + buffer + updateCompletion.
+    if (sym == FcitxKey_BackSpace && !mod && state->buffer.empty() &&
+        ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText) &&
+        ic->surroundingText().isValid()) {
+      const auto &st = ic->surroundingText();
+      auto cps = decodeUtf8(st.text());
+      size_t cur = st.cursor();
+      auto isWordCp = [](uint32_t c) {
+        return isLetterCp(c) || c == '\'' || c == 0x2019 || c == '-';
+      };
+      // pas de sélection, curseur en FIN de mot (jamais en plein milieu —
+      // recomposer la moitié gauche corromprait le texte au commit suivant)
+      if (st.anchor() == cur && cur > 0 && cur <= cps.size() &&
+          (cur == cps.size() || !isWordCp(cps[cur]))) {
+        size_t end = cur - 1; // état après le Backspace simulé
+        size_t start = end;
+        while (start > 0 && isWordCp(cps[start - 1]))
+          --start;
+        bool hasLetter = false;
+        for (size_t i = start; i < end; i++)
+          hasLetter = hasLetter || isLetterCp(cps[i]);
+        // ponytail: cap à 32 cp — un token géant (URL…) ne se recompose pas
+        if (hasLetter && end - start <= 32) {
+          std::string word;
+          for (size_t i = start; i < end; i++)
+            appendCp(word, cps[i]);
+          deleteSurroundingBefore(ic, cur - start);
+          state->buffer = word;
+          // le mot recomposé n'est plus committé — mais seulement s'il est
+          // bien le dernier du contexte (on peut backspacer un VIEUX mot)
+          if (!state->ctx.empty() && state->ctx.back().rfind(word, 0) == 0)
+            state->ctx.pop_back();
+          state->navigating = false;
+          updateCompletion(ic, state);
+          event.filterAndAccept();
+          return;
+        }
+      }
+    }
+    //        Sinon : Backspace simple (un caractère) ou Ctrl+Backspace (un
+    //        MOT). La barre mot-suivant est spéculative : on la FERME et on
+    //        laisse la touche filer à l'application (pas de filterAndAccept).
+    //        Sans cette branche, Ctrl+Backspace (mod) tombait dans « (4) if
+    //        (mod) return » et la barre restait ouverte même une fois l'input
+    //        entièrement vidé.
     if (sym == FcitxKey_BackSpace && state->buffer.empty()) {
       state->navigating = false;
       if (ic->inputPanel().candidateList())
