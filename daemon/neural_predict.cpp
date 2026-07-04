@@ -30,17 +30,13 @@ int main(int argc, char **argv) {
     std::string line(inbuf);
     while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) line.pop_back();
     if (line.empty()) continue;
-    std::vector<std::string> words;
-    std::istringstream iss(line);
-    for (std::string w; iss >> w;) words.push_back(w);
-    if (words.empty()) continue;
 
     auto t0 = std::chrono::steady_clock::now();
-    std::vector<std::string> cands = np.nextWords(words, topk);
+    auto cands = np.nextWords(line, topk, /*deadlineMs=*/0);
     auto t1 = std::chrono::steady_clock::now();
 
     printf("ctx=\"%s\"\n  candidates:", line.c_str());
-    for (auto &c : cands) printf(" \"%s\"", c.c_str());
+    for (auto &c : cands) printf(" \"%s\"(%.3f)", c.word.c_str(), c.prob);
     printf("\n  latency=%.1f ms\n", ms(t1 - t0));
     fflush(stdout);
   }

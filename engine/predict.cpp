@@ -17,6 +17,7 @@
 //
 // Sélection : Tab / ⇧Tab navigue, Espace ou Entrée valide le candidat surligné.
 #include <fcitx-utils/capabilityflags.h>
+#include <fcitx-utils/event.h>
 #include <fcitx-utils/key.h>
 #include <fcitx-utils/keysym.h>
 #include <fcitx-utils/eventdispatcher.h>
@@ -77,6 +78,11 @@ struct EngineCfg {
   // quand neural est activé ; au prix d'un léger hitch après Espace).
   int socketTimeoutMs = 150;
   int nextWordTimeoutMs = 150;
+  // Deux phases (E5) : la barre mot-suivant s'affiche TOUT DE SUITE (n-gram),
+  // puis se met à jour quand le neural aboutit (2e ligne sur la même
+  // connexion, lue depuis la boucle d'événements fcitx — zéro blocage).
+  // Sans neural côté daemon la réponse n'est jamais "pending" → aucun effet.
+  bool asyncNextWord = true;
   // Programmes (sous-chaînes de ic->program(), ex. "ghostty") où la barre
   // SPÉCULATIVE mot-suivant est supprimée : dans un terminal elle n'a pas de
   // preedit pour s'ancrer au curseur et « traîne » derrière lui. La complétion
@@ -113,6 +119,7 @@ const EngineCfg &engineCfg() {
         fresh.socketTimeoutMs = j.value("socketTimeoutMs", fresh.socketTimeoutMs);
         fresh.nextWordTimeoutMs =
             j.value("nextWordTimeoutMs", fresh.nextWordTimeoutMs);
+        fresh.asyncNextWord = j.value("asyncNextWord", fresh.asyncNextWord);
         for (const auto &e :
              j.value("nextWordBarExclude", nlohmann::json::array()))
           if (e.is_string())
@@ -321,6 +328,9 @@ struct DaemonReply {
   std::vector<std::string> candidates;
   bool literalIsWord = false;
   std::string autocomplete; // mot à appliquer sur Espace (haute confiance), ou ""
+  std::string ghost;        // complétion affichée en fantôme (→ l'accepte)
+  bool accentOnly = false;  // autocomplete = pure restauration d'accents
+  bool pending = false;     // un refresh neural suivra sur la même connexion
 };
 
 // Connexion au daemon BORNÉE dans le temps : on tourne sur le thread principal
@@ -352,8 +362,14 @@ int connectDaemon(int timeoutMs = kDaemonTimeoutMs) {
   return fd;
 }
 
+// pendingFd (E5) : si non-nul et que le daemon annonce un refresh à venir
+// ("pending":true), la connexion reste OUVERTE et son fd est rendu à
+// l'appelant (qui la surveille depuis la boucle d'événements fcitx) ; sinon
+// elle est fermée comme avant.
 DaemonReply queryDaemon(const std::vector<std::string> &context,
-                        const std::string &prefix) {
+                        const std::string &prefix,
+                        const std::string &wide = {},
+                        int *pendingFd = nullptr) {
   DaemonReply out;
   // Mot-suivant (prefix vide) = peut être neural → budget séparé, relevable.
   // Complétion intra-mot (prefix non vide) = n-gram rapide → timeout court, le
@@ -366,6 +382,14 @@ DaemonReply queryDaemon(const std::vector<std::string> &context,
   json req;
   req["context"] = context;
   req["prefix"] = prefix;
+  // Contexte LARGE (texte brut avant le curseur, phrases précédentes et
+  // ponctuation comprises) : réservé au prédicteur neuronal côté daemon — son
+  // avantage mesuré EXIGE le contexte long. Le n-gram garde `context` (borné
+  // à la phrase).
+  if (!wide.empty())
+    req["wide"] = wide;
+  if (pendingFd)
+    req["async"] = true; // deux phases : n-gram immédiat + refresh neural
   std::string line = req.dump() + "\n";
   if (::send(fd, line.data(), line.size(), MSG_NOSIGNAL) < 0) {
     ::close(fd);
@@ -376,18 +400,26 @@ DaemonReply queryDaemon(const std::vector<std::string> &context,
   ssize_t n;
   while ((n = ::read(fd, tmp, sizeof(tmp))) > 0) {
     buf.append(tmp, n);
-    if (!buf.empty() && buf.back() == '\n')
+    if (buf.find('\n') != std::string::npos)
       break;
   }
-  ::close(fd);
   try {
-    json resp = json::parse(buf);
+    json resp = json::parse(buf.substr(0, buf.find('\n')));
     for (auto &c : resp.value("candidates", json::array()))
       out.candidates.push_back(c.get<std::string>());
     out.literalIsWord = resp.value("literalIsWord", false);
     out.autocomplete = resp.value("autocomplete", std::string{});
+    // repli vieux daemon (pas de champ ghost) : le fantôme suit l'autocomplete
+    out.ghost = resp.value("ghost", out.autocomplete);
+    out.accentOnly = resp.value("accentOnly", false);
+    out.pending = resp.value("pending", false);
   } catch (...) {
   }
+  if (out.pending && pendingFd) {
+    *pendingFd = fd; // la 2e ligne arrivera ici — surveillée par l'event loop
+    return out;
+  }
+  ::close(fd);
   return out;
 }
 
@@ -470,6 +502,8 @@ struct PredictState : public fcitx::InputContextProperty {
   bool navigating = false;           // l'utilisateur a commencé à choisir (Tab)
   bool literalIsWord = false;        // le préfixe tapé est-il déjà un vrai mot ?
   std::string autocomplete;          // mot appliqué sur Espace (haute confiance)
+  std::string ghost;                 // complétion fantôme (→ l'accepte)
+  bool accentOnly = false;           // autocomplete = restauration d'accents pure
   // Fenêtre de REVERT d'une auto-application (Backspace juste après) :
   std::string lastAutoLit;           // le littéral qui a été remplacé
   std::string lastAutoWord;          // le mot qui avait été appliqué
@@ -485,6 +519,9 @@ struct PredictState : public fcitx::InputContextProperty {
   // Revert (Backspace juste après remplacement → restaure l'original). One-shot.
   std::string reformRevertOrig;
   uint32_t reformRevertCps = 0;      // points de code de la variante committée à effacer
+  // Génération de la barre mot-suivant (E5) : un refresh neural arrivé APRÈS
+  // que l'état a changé (frappe, commit, reset) est jeté (gen différente).
+  uint64_t nextWordGen = 0;
 };
 
 class PredictCandidate : public fcitx::CandidateWord {
@@ -567,6 +604,8 @@ public:
     instance_->inputContextManager().registerProperty("predictState",
                                                        &factory_);
   }
+
+  ~PredictEngine() override { disarmRefresh(); }
 
   void keyEvent(const fcitx::InputMethodEntry &,
                 fcitx::KeyEvent &event) override {
@@ -808,6 +847,20 @@ public:
         event.filterAndAccept();
         return;
       }
+      // → ACCEPTE le texte fantôme (accept explicite, façon Copilot/fish) :
+      // committe la complétion SANS espace — la frappe continue naturellement.
+      // Seulement quand le fantôme est réellement AFFICHÉ (mêmes conditions
+      // que updateCompletion) ; sinon → committe le littéral et file à l'app
+      // (branche « toute autre touche » plus bas), comme avant.
+      if (!mod && sym == FcitxKey_Right && !state->navigating &&
+          engineCfg().ghostText && !state->literalIsWord &&
+          !state->vetoAuto &&
+          state->ghost.size() > state->buffer.size() &&
+          state->ghost.compare(0, state->buffer.size(), state->buffer) == 0) {
+        commitWord(ic, state, state->ghost, /*trailingSpace=*/false);
+        event.filterAndAccept();
+        return;
+      }
       if (!mod && sym == FcitxKey_space) {
         std::string lit = state->buffer;
         std::string chosen = chooseOnSpace(state);
@@ -970,10 +1023,83 @@ public:
     state->vetoAuto = false;
     state->lastAutoCps = 0;
     state->lastAutoLit.clear();
+    state->ghost.clear();
+    state->accentOnly = false;
+    state->nextWordGen++; // un refresh neural en vol devient périmé
     clearPanel(ic);
   }
 
 private:
+  // ---- Refresh mot-suivant asynchrone (E5) --------------------------------
+  // Une seule connexion en attente à la fois (un clavier, un curseur) : armer
+  // remplace/ferme la précédente. Le fd est surveillé depuis la boucle
+  // d'événements de fcitx — rien ne bloque jamais le thread clavier.
+  void disarmRefresh() {
+    if (refreshWatch_)
+      refreshWatch_->setEnabled(false);
+    if (refreshFd_ >= 0) {
+      ::close(refreshFd_);
+      refreshFd_ = -1;
+    }
+    refreshBuf_.clear();
+  }
+
+  void armRefresh(int fd, fcitx::InputContext *ic, PredictState *state) {
+    disarmRefresh();
+    refreshWatch_.reset(); // l'ancienne source (désactivée) peut mourir ici
+    refreshFd_ = fd;
+    refreshUUID_ = ic->uuid();
+    refreshGen_ = state->nextWordGen;
+    refreshWatch_ = instance_->eventLoop().addIOEvent(
+        fd, fcitx::IOEventFlags{fcitx::IOEventFlag::In},
+        [this](fcitx::EventSourceIO *, int, fcitx::IOEventFlags) {
+          onRefreshReadable();
+          return true;
+        });
+  }
+
+  void onRefreshReadable() {
+    if (refreshFd_ < 0)
+      return;
+    char tmp[4096];
+    ssize_t n;
+    while ((n = ::read(refreshFd_, tmp, sizeof(tmp))) > 0)
+      refreshBuf_.append(tmp, n);
+    size_t nl = refreshBuf_.find('\n');
+    if (nl == std::string::npos) {
+      // EOF/erreur sans ligne complète (daemon redémarré…) : on désarme.
+      if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK))
+        disarmRefresh();
+      return;
+    }
+    std::string line = refreshBuf_.substr(0, nl);
+    disarmRefresh(); // single-shot : une ligne = un refresh
+    std::vector<std::string> cands;
+    try {
+      json resp = json::parse(line);
+      if (!resp.value("refresh", false))
+        return;
+      for (auto &c : resp.value("candidates", json::array()))
+        cands.push_back(c.get<std::string>());
+    } catch (...) {
+      return;
+    }
+    if (cands.empty())
+      return;
+    auto *ic = instance_->inputContextManager().findByUUID(refreshUUID_);
+    if (!ic || !ic->hasFocus())
+      return;
+    auto *state = ic->propertyFor(&factory_);
+    // Périmé si quoi que ce soit a bougé depuis l'armement (frappe, commit,
+    // navigation, reset) — la barre affichée doit toujours refléter l'état.
+    if (state->nextWordGen != refreshGen_ || !state->buffer.empty() ||
+        state->navigating)
+      return;
+    state->cands = std::move(cands);
+    state->navIndex = 0;
+    setCandidates(ic, state);
+    ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
+  }
   void clearPanel(fcitx::InputContext *ic) {
     ic->inputPanel().reset();
     ic->updatePreedit();
@@ -1020,6 +1146,37 @@ private:
     return state->ctx;
   }
 
+  // Contexte LARGE pour le prédicteur neuronal : le texte BRUT avant le
+  // curseur (casse, ponctuation, phrases précédentes — tout ce qu'un LLM
+  // exploite et que le contexte n-gram borné à la phrase jette). ~240
+  // caractères, coupés à un début de mot. Repli sans SurroundingText : les
+  // derniers mots committés.
+  std::string wideTextFor(fcitx::InputContext *ic, PredictState *state) {
+    if (ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText) &&
+        ic->surroundingText().isValid()) {
+      auto cps = decodeUtf8(ic->surroundingText().text());
+      unsigned int cur = ic->surroundingText().cursor();
+      if (cur < cps.size())
+        cps.resize(cur);
+      size_t from = cps.size() > 240 ? cps.size() - 240 : 0;
+      if (from > 0) // ne pas démarrer en plein mot
+        while (from < cps.size() && isLetterCp(cps[from]))
+          ++from;
+      std::string out;
+      for (size_t i = from; i < cps.size(); i++)
+        appendCp(out, cps[i]);
+      if (!out.empty())
+        return out;
+    }
+    std::string out;
+    for (const auto &w : state->ctx) {
+      if (!out.empty())
+        out += ' ';
+      out += w;
+    }
+    return out;
+  }
+
   // 8 mots de contexte (repli quand pas de SurroundingText) : le daemon
   // n'utilise que les 2 derniers pour les n-grammes, mais tout le contexte sert
   // à la DÉTECTION DE LANGUE et à l'ACCORD (déterminant gouverneur du SN).
@@ -1051,7 +1208,10 @@ private:
       return state->buffer;
     // auto-application haute confiance seulement (complétion de préfixe, ou
     // faute simple) ; sinon on garde le littéral — jamais "j'ai" → "jail".
-    if (!state->literalIsWord && !state->autocomplete.empty())
+    // Une RESTAURATION D'ACCENTS (fold-equal : francais→français) s'applique
+    // même si le tapé est un vrai mot du corpus — elle ne change jamais le mot.
+    if (!state->autocomplete.empty() &&
+        (!state->literalIsWord || state->accentOnly))
       return state->autocomplete;
     return state->buffer;
   }
@@ -1093,6 +1253,7 @@ private:
   void commitWord(fcitx::InputContext *ic, PredictState *state,
                   const std::string &raw, bool trailingSpace,
                   bool learn = true) {
+    state->nextWordGen++; // le commit invalide tout refresh en vol
     bool trigger = isTriggerBuffer(state->buffer); // emoji ':' / snippet ';'
     std::string word = applyCase(raw, state->buffer);
     // Auto-majuscule (amélioration D) en DÉBUT DE PHRASE : on s'appuie sur le
@@ -1141,15 +1302,19 @@ private:
 
   // Mode complétion : candidats commençant par le buffer (avec autocorrection).
   void updateCompletion(fcitx::InputContext *ic, PredictState *state) {
+    state->nextWordGen++; // la frappe invalide tout refresh mot-suivant en vol
     ic->inputPanel().reset();
     if (state->buffer.empty()) {
       showNextWord(ic, state);
       return;
     }
-    auto reply = queryDaemon(contextFor(ic, state), state->buffer);
+    auto reply = queryDaemon(contextFor(ic, state), state->buffer,
+                             wideTextFor(ic, state));
     state->cands = reply.candidates;
     state->literalIsWord = reply.literalIsWord;
     state->autocomplete = reply.autocomplete;
+    state->ghost = reply.ghost;
+    state->accentOnly = reply.accentOnly;
     if (state->cands.empty())
       state->cands.push_back(state->buffer); // repli : le brut
 
@@ -1160,19 +1325,22 @@ private:
     // Opt-out : autoApplyNeedsRevert=false.
     if (engineCfg().autoApplyNeedsRevert && !isTriggerBuffer(state->buffer) &&
         !(ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText) &&
-          ic->surroundingText().isValid()))
+          ic->surroundingText().isValid())) {
       state->autocomplete.clear();
+      state->accentOnly = false;
+      // le fantôme reste : → est un accept EXPLICITE, pas besoin de revert.
+    }
 
-    // GHOST TEXT : si l'Espace va compléter le mot, le reste s'affiche déjà
-    // dans le préedit, curseur entre le tapé et le fantôme ("bonjou‸r") —
-    // uniquement quand l'auto-complétion PROLONGE octet-à-octet la frappe
+    // GHOST TEXT : le reste de la complétion haute-confiance s'affiche dans
+    // le préedit, curseur entre le tapé et le fantôme ("bonjou‸r") — que
+    // l'Espace l'applique (autoApply) ou non : → l'accepte EXPLICITEMENT.
+    // Uniquement quand la complétion PROLONGE octet-à-octet la frappe
     // (jamais pour une correction floue : la barre + liseré s'en chargent).
     std::string ghost;
     if (engineCfg().ghostText && !state->literalIsWord && !state->vetoAuto &&
-        state->autocomplete.size() > state->buffer.size() &&
-        state->autocomplete.compare(0, state->buffer.size(), state->buffer) ==
-            0)
-      ghost = state->autocomplete.substr(state->buffer.size());
+        state->ghost.size() > state->buffer.size() &&
+        state->ghost.compare(0, state->buffer.size(), state->buffer) == 0)
+      ghost = state->ghost.substr(state->buffer.size());
 
     fcitx::Text preedit;
     preedit.append(state->buffer,
@@ -1194,6 +1362,8 @@ private:
   void showNextWord(fcitx::InputContext *ic, PredictState *state) {
     ic->inputPanel().reset();
     state->autocomplete.clear(); // pas de marquage « auto » en mot-suivant
+    state->ghost.clear();
+    state->accentOnly = false;
     state->literalIsWord = false;
     if (!engineCfg().nextWordBar) { // mode calme : pas de barre spéculative
       state->cands.clear();
@@ -1217,7 +1387,16 @@ private:
         return;
       }
     auto ctx = contextFor(ic, state);
-    auto reply = queryDaemon(ctx, "");
+    state->nextWordGen++; // nouvelle barre → tout refresh antérieur est périmé
+    int pendingFd = -1;
+    auto reply =
+        queryDaemon(ctx, "", wideTextFor(ic, state),
+                    engineCfg().asyncNextWord ? &pendingFd : nullptr);
+    // Deux phases (E5) : la 1re réponse (n-gram, instantanée) s'affiche tout
+    // de suite ; si le daemon annonce un refresh neural, la connexion reste
+    // ouverte et la barre se mettra à jour depuis la boucle d'événements.
+    if (pendingFd >= 0)
+      armRefresh(pendingFd, ic, state);
     state->cands = reply.candidates;
     if (state->cands.empty()) {
       clearPanel(ic);
@@ -1363,8 +1542,9 @@ private:
     // 10 labels de CommonCandidateList (qui FATAL-abort fcitx au-delà).
     auto list = std::make_unique<PredictCandidateList>();
     // le candidat que l'Espace appliquera est marqué (gras → liseré dans l'UI)
-    bool willAuto = !state->buffer.empty() && !state->literalIsWord &&
-                    !state->autocomplete.empty() && !state->vetoAuto;
+    bool willAuto = !state->buffer.empty() && !state->autocomplete.empty() &&
+                    !state->vetoAuto &&
+                    (!state->literalIsWord || state->accentOnly);
     for (auto &w : state->cands)
       list->append(applyCase(w, state->buffer),
                    willAuto && w == state->autocomplete);
@@ -1373,6 +1553,12 @@ private:
   }
 
   fcitx::Instance *instance_;
+  // Refresh asynchrone (E5) — au plus UNE connexion en attente.
+  std::unique_ptr<fcitx::EventSourceIO> refreshWatch_;
+  int refreshFd_ = -1;
+  fcitx::ICUUID refreshUUID_{};
+  uint64_t refreshGen_ = 0;
+  std::string refreshBuf_;
   fcitx::FactoryFor<PredictState> factory_;
 };
 

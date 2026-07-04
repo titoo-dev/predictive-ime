@@ -120,6 +120,8 @@ Window {
             model: [
                 { key: "autoApply",            def: true,  label: "Espace complète / corrige",
                   desc: "le candidat au liseré accent remplace le mot tapé" },
+                { key: "accentRestore",        def: true,  label: "Restauration d'accents",
+                  desc: "francais→français, oeuvre→œuvre sur Espace — n'ajoute que les signes, jamais un autre mot (marche même sans auto-correction)" },
                 { key: "autoApplyNeedsRevert", def: true,  label: "… seulement si annulable",
                   desc: "exige le surrounding-text (revert Backspace possible)" },
                 { key: "nextWordBar",          def: true,  label: "Barre mot-suivant",

@@ -27,6 +27,8 @@
 //   trigrams.tsv, trigrams.bo.tsv, pcont.tsv (format build_ngrams.py).
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <cmath>
 #include <csignal>
 #include <cstdint>
 #include <cstdio>
@@ -43,6 +45,9 @@
 
 #ifdef WITH_NEURAL
 #include "neural.h"
+#include <condition_variable>
+#include <mutex>
+#include <thread>
 #endif
 
 #include "reformulate_http.h" // reformulation via API externe (Groq), repli local
@@ -194,12 +199,23 @@ const std::unordered_map<char, std::string> &azerty() {
 // ------------------------------------------------------------------ Model ----
 struct Result {
   std::vector<std::string> candidates;
+  // Scores parallèles à candidates (complétion seulement) : nécessaires au
+  // rerank neuronal opportuniste (E3). Vide sur les autres chemins.
+  std::vector<double> scores;
   bool literalIsWord = false;
   // Mot que l'Espace doit auto-appliquer (haute confiance). "" → garder le
   // littéral. On n'y met une correction FLOUE que si le préfixe ne contient pas
   // d'apostrophe/trait d'union (sinon c'est une contraction qu'on ne mutile pas,
   // ex. "j'ai" qui ne doit jamais devenir "jail").
   std::string autocomplete;
+  // Complétion haute-confiance TOUJOURS calculée (mêmes garde-fous), même
+  // quand autoApply est off : l'engine l'affiche en texte fantôme et → la
+  // committe EXPLICITEMENT. L'Espace, lui, n'applique que `autocomplete`.
+  std::string ghost;
+  // autocomplete est une RESTAURATION D'ACCENTS pure (fold-equal au tapé :
+  // francais→français, oeuvre→œuvre, c'etait→c'était) : l'engine peut alors
+  // l'appliquer même si le tapé est un vrai mot du corpus (literalIsWord).
+  bool accentOnly = false;
 };
 
 // Réglages utilisateur — $XDG_CONFIG_HOME/ime-predictord/config.json,
@@ -208,6 +224,7 @@ struct Config {
   bool autoApply = true;    // l'Espace peut-il remplacer ?
   double autoDom = 2.0;     // dominance top/2e exigée pour auto-appliquer
   int autoMinLen = 3;       // longueur mini du préfixe pour auto-appliquer
+  // Restauration d'ACCENTS/ligatures sur Espace, même quand autoApply est
   double langBoost = 1.6;   // boost des mots de la langue active
   double agreeBoost = 2.0;  // boost d'accord nombre/genre (×si accord, ÷sinon)
   // Agressivité des mots APPRIS : multiplicateur sur la confiance (cf USER_MIN).
@@ -267,6 +284,26 @@ struct Config {
   std::string reformModel = "llama-3.3-70b-versatile";
   std::string reformBaseUrl = "https://api.groq.com/openai/v1/chat/completions";
   int reformTimeoutMs = 20000;
+  // Budget TEMPS de l'appel neuronal (prefill + expansions comprises) : passé
+  // ce délai on rend ce qu'on a (l'engine a son propre timeout côté socket —
+  // sans ce budget le daemon continuait à brûler du CPU pour une réponse que
+  // plus personne n'attendait).
+  int neuralBudgetMs = 180;
+  // Fusion des scores (E4) : multiplicateur des probabilités neuronales sur
+  // l'échelle du modèle n-gram. >1 → le neural mène (sa distribution est plus
+  // étalée que les bigrammes KN très sûrs type « ne→pas »).
+  double neuralBoost = 2.0;
+  // Rerank neuronal de la COMPLÉTION (E3) : opportuniste — seulement quand le
+  // cache KV est déjà chaud pour ce contexte (jamais de prefill sur le chemin
+  // chaud de la frappe). rerankWeight = poids λ du log-prob neuronal dans le
+  // mélange géométrique avec P_KN.
+  bool neuralRerank = true;
+  double rerankWeight = 0.4;
+  // Deux phases ASYNCHRONES (E5) : quand l'engine envoie "async":true, la
+  // réponse n-gram part TOUT DE SUITE (pending:true) et le neural tourne sur
+  // un thread de travail — une 2e ligne {"refresh":true} suit sur la même
+  // connexion. Plus aucun hitch après Espace.
+  bool asyncNeural = true;
 };
 
 struct Model {
@@ -278,6 +315,10 @@ struct Model {
   std::unordered_map<std::string, Morph> morph_;
   std::vector<std::string> fold;  // forme repliée (minuscule sans accent)
   std::vector<uint32_t> byFold;   // indices triés par forme repliée
+  // Élisions/contractions indexées par repli SANS APOSTROPHE : « jai »→j'ai,
+  // « dici »→d'ici, « cetait »→c'était. Petit sous-ensemble (mots contenant
+  // une apostrophe), trié pour la recherche par préfixe.
+  std::vector<std::pair<std::string, uint32_t>> elisions_;
   std::unordered_set<std::string> caseWords; // mots en minuscule, accents gardés
   std::unordered_map<std::string, uint32_t> id_;
   double freqTot_ = 1.0; // Σ freq (P1, mélange unigramme)
@@ -300,8 +341,23 @@ struct Model {
   static constexpr double UNI_MIX = 0.7;
   // Canal de faute (noisy channel) : P(frappe|mot) par type d'opération.
   static constexpr double CH_TRANSPOSE = 0.12; // inversion de 2 lettres
+  static constexpr double CH_APOS = 0.11;      // apostrophe oubliée (« jai »)
+  // Élision dont le repli sans apostrophe est EXACTEMENT le tapé (« dici » ==
+  // d'ici entier) : bien plus probable qu'une faute générique — sans ce boost
+  // « ici » (très fréquent, canal lettre-en-trop) passait devant d'ici.
+  static constexpr double CH_APOS_EXACT = 0.5;
   static constexpr double CH_SUBST = 0.10;     // voisin AZERTY
+  static constexpr double CH_MISS = 0.09;      // lettre OUBLIÉE (omission)
   static constexpr double CH_EXTRA = 0.07;     // lettre en trop
+  // Lettre en trop EN TÊTE de mot : rare comme faute de frappe — c'est bien
+  // plus souvent une élision sans apostrophe (« dici », « cetait ») qu'un
+  // « d » parasite devant « ici ».
+  static constexpr double CH_EXTRA_HEAD = 0.02;
+  static constexpr double CH_SPLIT = 0.10;     // espace oublié (« dela »)
+  // Restauration d'accents : le candidat fold-equal doit peser au moins ça
+  // face au meilleur candidat global — un mot-poubelle du corpus (« cétait »,
+  // 259 occurrences) ne doit pas court-circuiter « c'était ».
+  static constexpr double ACCENT_MIN_VS_TOP = 0.25;
   // (Les garde-fous d'auto-application — longueur mini, dominance — sont dans
   // Config : réglables à chaud via config.json.)
   // Un mot APPRIS hors vocabulaire doit avoir été vu >= 2 fois avant de passer
@@ -525,6 +581,17 @@ struct Model {
       byFold[i] = i;
     std::sort(byFold.begin(), byFold.end(),
               [&](uint32_t a, uint32_t b) { return fold[a] < fold[b]; });
+    // index des élisions par repli SANS apostrophe (« jai » → j'ai)
+    elisions_.clear();
+    for (uint32_t i = 0; i < words.size(); i++) {
+      if (fold[i].find('\'') == std::string::npos)
+        continue;
+      std::string k = fold[i];
+      k.erase(std::remove(k.begin(), k.end(), '\''), k.end());
+      if (k.size() >= 2)
+        elisions_.push_back({std::move(k), i});
+    }
+    std::sort(elisions_.begin(), elisions_.end());
     pcont.resize(words.size(), 0.f);
     freqTot_ = 1.0;
     for (uint32_t fr : freq)
@@ -720,6 +787,10 @@ struct Model {
           fresh.autoApply = j.value("autoApply", fresh.autoApply);
           fresh.autoDom = j.value("autoDom", fresh.autoDom);
           fresh.autoMinLen = j.value("autoMinLen", fresh.autoMinLen);
+          fresh.accentRestore = j.value("accentRestore", fresh.accentRestore);
+          fresh.accentDom = j.value("accentDom", fresh.accentDom);
+          fresh.barWords = std::max(1, std::min(8, j.value("barWords",
+                                                           fresh.barWords)));
           fresh.langBoost = j.value("langBoost", fresh.langBoost);
           fresh.agreeBoost = j.value("agreeBoost", fresh.agreeBoost);
           fresh.learnedBoost = j.value("learnedBoost", fresh.learnedBoost);
@@ -727,10 +798,6 @@ struct Model {
           fresh.proclisisDemote =
               j.value("proclisisDemote", fresh.proclisisDemote);
           fresh.multiWord = j.value("multiWord", fresh.multiWord);
-          // barre de mots : au moins 1 suggestion (un 0/négatif viderait la barre).
-          fresh.barWords = std::max(1, j.value("barWords", fresh.barWords));
-          fresh.accentRestore = j.value("accentRestore", fresh.accentRestore);
-          fresh.accentDom = j.value("accentDom", fresh.accentDom);
           fresh.lang = j.value("lang", fresh.lang);
           if (fresh.lang != "auto" && fresh.lang != "fr" &&
               fresh.lang != "en" && fresh.lang != "off") {
@@ -747,6 +814,11 @@ struct Model {
           fresh.reformModel = j.value("reformModel", fresh.reformModel);
           fresh.reformBaseUrl = j.value("reformBaseUrl", fresh.reformBaseUrl);
           fresh.reformTimeoutMs = j.value("reformTimeoutMs", fresh.reformTimeoutMs);
+          fresh.neuralBudgetMs = j.value("neuralBudgetMs", fresh.neuralBudgetMs);
+          fresh.neuralBoost = j.value("neuralBoost", fresh.neuralBoost);
+          fresh.neuralRerank = j.value("neuralRerank", fresh.neuralRerank);
+          fresh.rerankWeight = j.value("rerankWeight", fresh.rerankWeight);
+          fresh.asyncNeural = j.value("asyncNeural", fresh.asyncNeural);
         } catch (const std::exception &e) {
           fprintf(stderr, "[predictord] config.json invalide: %s\n", e.what());
         }
@@ -857,6 +929,62 @@ struct Model {
       out << keep;
     }
     return removed;
+  }
+
+  // Canal APOSTROPHE OUBLIÉE pour une clé sans apostrophe. Deux sources :
+  //  - les élisions du VOCABULAIRE, indexées par repli sans apostrophe
+  //    (« jai » → j'ai) — correspondance exacte du mot entier = boost
+  //    CH_APOS_EXACT (bien plus probable qu'une faute générique) ;
+  //  - la SYNTHÈSE productive proclitique+'+mot (« temmener » → t' + emmener
+  //    → t'emmener, absent du vocabulaire) — l'élision française est
+  //    productive, le vocab ne liste pas toutes les formes. Initiale
+  //    vocalique exigée (t'emmener ✓, t'porte ✗). `synth` l'active (on la
+  //    coupe quand le préfixe a déjà des correspondances exactes : taper
+  //    « les » ne doit pas faire surgir « l'esprit »).
+  template <class Score, class Offer>
+  void elisionOffers(const std::string &key, double ch, bool synth,
+                     Score &&score, Offer &&offer) {
+    auto [el, eh] = elisionPrefixRange(key);
+    for (auto it = el; it != eh; ++it)
+      offer(words[it->second],
+            score(it->second) *
+                (it->first == key ? ch * (CH_APOS_EXACT / CH_APOS) : ch));
+    if (!synth)
+      return;
+    size_t plen = 0;
+    if (key.size() >= 3 && std::strchr("jcdlmnst", key[0]))
+      plen = 1;
+    else if (key.size() >= 4 && key[0] == 'q' && key[1] == 'u')
+      plen = 2;
+    if (!plen || std::string("aeiouyh").find(key[plen]) == std::string::npos)
+      return;
+    const std::string rest = key.substr(plen);
+    auto [lo, hi] = foldedPrefixRange(rest);
+    std::vector<std::pair<uint32_t, double>> tops;
+    for (auto it = lo; it != hi; ++it)
+      tops.push_back({*it, score(*it)});
+    std::partial_sort(tops.begin(),
+                      tops.begin() + std::min<size_t>(3, tops.size()),
+                      tops.end(),
+                      [](auto &a, auto &b) { return a.second > b.second; });
+    for (size_t i = 0; i < std::min<size_t>(3, tops.size()); i++)
+      offer(key.substr(0, plen) + "'" + words[tops[i].first],
+            tops[i].second * ch);
+  }
+
+  // Borne [lo,hi) des ÉLISIONS dont le repli sans apostrophe commence par
+  // `fp` (« jai » → j'ai, « jav » → j'avais…).
+  std::pair<std::vector<std::pair<std::string, uint32_t>>::const_iterator,
+            std::vector<std::pair<std::string, uint32_t>>::const_iterator>
+  elisionPrefixRange(const std::string &fp) const {
+    auto lo = std::lower_bound(
+        elisions_.begin(), elisions_.end(), fp,
+        [](const auto &a, const std::string &p) { return a.first < p; });
+    auto hi = lo;
+    while (hi != elisions_.end() &&
+           hi->first.compare(0, fp.size(), fp) == 0)
+      ++hi;
+    return {lo, hi};
   }
 
   // Borne [lo,hi) des mots dont le repli commence par `fp`.
@@ -1116,16 +1244,23 @@ struct Model {
   }
 
   // ----------------------------------------------------------- prédiction ---
+  // neuralCands : candidats (mot, probabilité softmax) du prédicteur neuronal,
+  // FUSIONNÉS au mot-suivant sur l'échelle des scores (E4) — vide sans neural.
   Result predict(const std::vector<std::string> &context,
-                 const std::string &prefix, int k = 6) {
+                 const std::string &prefix, int k = 6,
+                 const std::vector<std::pair<std::string, double>>
+                     &neuralCands = {}) {
     Result res;
     // mode emoji : la barre devient une GRILLE (3×8) → 24 candidats.
     if (!prefix.empty() && prefix[0] == ':')
       k = 24;
     std::unordered_set<std::string> seen;
     auto push = [&](const std::string &w) {
-      if ((int)res.candidates.size() < k && seen.insert(w).second)
+      if ((int)res.candidates.size() < k && seen.insert(w).second) {
         res.candidates.push_back(w);
+        return true;
+      }
+      return false;
     };
 
     if (!prefix.empty() && prefix[0] == ':')
@@ -1133,8 +1268,30 @@ struct Model {
     else if (!prefix.empty())
       completePrefix(context, prefix, k, push, res);
     else
-      predictNext(context, k, push, res);
+      predictNext(context, k, push, res, neuralCands);
     return res;
+  }
+
+  // Un mot que le daemon connaît déjà : vocabulaire du modèle (dict perso
+  // compris) ou appris. Sert à repérer les FRAGMENTS BPE du neural (« l » de
+  // « l'école ») qui méritent une expansion multi-token (E2).
+  bool isKnownWord(const std::string &w) const {
+    return caseWords.count(lowerKeep(w)) > 0 || userUni.count(w) > 0;
+  }
+
+  // Candidat neuronal suspect de n'être qu'un DÉBUT de mot : inconnu de tout
+  // lexique, ou lettre seule qui n'est pas un vrai mot français/anglais isolé
+  // (« l » « d » « j » traînent dans le vocab OpenSubtitles en artefacts de
+  // tokenisation — on ne s'y fie pas).
+  bool looksFragment(const std::string &w) const {
+    if (!isKnownWord(w))
+      return true;
+    if (w.size() > 2)
+      return false;
+    static const std::unordered_set<std::string> kSingles = {
+        "a", "à", "y", "ô", "i"}; // vrais mots d'une lettre (fr + « I » anglais)
+    std::string f = lowerKeep(w);
+    return decodeUtf8(f).size() == 1 && !kSingles.count(f);
   }
 
 private:
@@ -1271,19 +1428,48 @@ private:
     for (auto it = lo; it != hi; ++it, ++exact)
       offer(words[*it], scoreOf(*it));
 
+    // (2bis) APOSTROPHE OUBLIÉE : « jai »→j'ai, « dici »→d'ici, « cetait »→
+    //        c'était — élisions du vocab + synthèse proclitique (t'emmener).
+    //        Synthèse seulement sans correspondance exacte (pas de bruit
+    //        « l'esprit » en tapant « les »).
+    if (fp.size() >= 2 && fp.find('\'') == std::string::npos)
+      elisionOffers(fp, CH_APOS, /*synth=*/exact == 0, scoreOf, offer);
+
     // (3) autocorrection noisy-channel (edit-distance 1) si l'exact est maigre.
     if (exact < size_t(k))
       fuzzyComplete(fp, scoreOf, offer);
+
+    // (3bis) ESPACE OUBLIÉ : le préfixe se coupe en deux vrais mots dont le
+    //        bigramme est OBSERVÉ (« dela » → « de la ») → l'expression est
+    //        offerte, jamais auto-appliquée (garde-fou espace plus bas).
+    //        Moitiés >= 2 lettres, jamais à travers apostrophe/trait d'union.
+    if (fp.size() >= 4 && fp.find_first_of("'-") == std::string::npos) {
+      for (size_t s = 2; s + 2 <= fp.size(); s++) {
+        const std::string f1 = fp.substr(0, s), f2 = fp.substr(s);
+        auto [l1, h1] = foldedPrefixRange(f1);
+        for (auto it1 = l1; it1 != h1 && fold[*it1] == f1; ++it1) {
+          auto a = biAdj.find(*it1);
+          if (a == biAdj.end())
+            continue;
+          auto [l2, h2] = foldedPrefixRange(f2);
+          for (auto it2 = l2; it2 != h2 && fold[*it2] == f2; ++it2)
+            if (const float *p = CtxScorer::find(&a->second, *it2))
+              offer(words[*it1] + " " + words[*it2],
+                    scoreOf(*it1) * double(*p) * CH_SPLIT);
+        }
+      }
+    }
 
     std::partial_sort(
         ranked.begin(),
         ranked.begin() + std::min<size_t>(k, ranked.size()), ranked.end(),
         [](auto &a, auto &b) { return a.second > b.second; });
     for (auto &p : ranked)
-      push(p.first);
+      if (push(p.first))
+        res.scores.push_back(p.second); // parallèle à candidates (rerank E3)
 
-    // Auto-complétion sur Espace (haute confiance seulement — les candidats
-    // restent affichés, on bride uniquement le REMPLACEMENT automatique) :
+    // GHOST — complétion haute confiance, TOUJOURS calculée (les candidats
+    // restent affichés, on bride uniquement le remplacement automatique) :
     //  - préfixe assez long (un sigle de 2 lettres « az » ne devient pas
     //    « aziz ») ;
     //  - le top doit DOMINER le 2e candidat (ambigu → on garde le littéral,
@@ -1292,10 +1478,11 @@ private:
     //  - une correction FLOUE ne raccourcit jamais la frappe (« pcq » ne
     //    devient pas « pc ») et jamais à travers une apostrophe/trait d'union
     //    (on ne mutile pas une contraction, « j'ai » ≠ jail).
+    // L'Espace ne l'applique que si autoApply (cf plus bas) ; sinon elle
+    // reste un texte fantôme que → committe explicitement.
     if (!snippetExact.empty()) {
-      res.autocomplete = snippetExact; // déclencheur explicite → toujours
-    } else if (cfg.autoApply && !res.candidates.empty() &&
-               fp.size() >= size_t(cfg.autoMinLen)) {
+      res.ghost = snippetExact; // déclencheur explicite → toujours
+    } else if (!res.candidates.empty() && fp.size() >= size_t(cfg.autoMinLen)) {
       const std::string &top = res.candidates.front();
       const std::string ftop = foldStr(top);
       bool topIsPrefix = ftop.compare(0, fp.size(), fp) == 0;
@@ -1304,9 +1491,93 @@ private:
       bool dominant =
           isForced || ranked.size() < 2 ||
           ranked[0].second >= cfg.autoDom * std::max(ranked[1].second, 1e-300);
-      bool fuzzyOk = ftop.size() >= fp.size() && !fpHasPunct;
+      // jamais d'auto-application d'une expression À ESPACE (« de la ») : la
+      // coupure espace-oublié se choisit explicitement (Tab), l'Espace garde
+      // le littéral.
+      bool fuzzyOk = ftop.size() >= fp.size() && !fpHasPunct &&
+                     ftop.find(' ') == std::string::npos;
       if (dominant && (topIsPrefix || fuzzyOk))
-        res.autocomplete = top;
+        res.ghost = top;
+    }
+
+    // RESTAURATION D'ACCENTS : meilleure forme FOLD-EQUAL ≠ tapé — n'ajoute
+    // que des accents/ligatures, jamais un autre mot, y compris à travers les
+    // élisions (c'etait→c'était : même repli). Si la graphie brute existe
+    // AUSSI dans le corpus (francais, garcon…), la forme accentuée doit la
+    // dominer ×accentDom (faute d'accent probable vs vrai homographe) ; les
+    // ligatures œ/æ sont restaurées sans seuil (oe/ae n'est jamais voulu).
+    std::string accentWord;
+    if (fp.size() >= 2) {
+      const std::string typedLower = lowerKeep(prefix);
+      double typedFreq = 0.0;
+      auto tid = id_.find(typedLower);
+      if (tid != id_.end())
+        typedFreq = double(freq[tid->second]);
+      uint32_t best = 0xFFFFFFFFu;
+      double bestS = 0.0;
+      for (auto it = lo; it != hi && fold[*it] == fp; ++it) {
+        if (lowerKeep(words[*it]) == typedLower)
+          continue; // le tapé lui-même
+        double s = scoreOf(*it);
+        if (s > bestS) {
+          bestS = s;
+          best = *it;
+        }
+      }
+      if (best != 0xFFFFFFFFu) {
+        std::string k = lowerKeep(words[best]);
+        for (const auto &[lig, plain] :
+             {std::pair<const char *, const char *>{"œ", "oe"},
+              {"æ", "ae"}}) {
+          size_t p;
+          while ((p = k.find(lig)) != std::string::npos)
+            k.replace(p, strlen(lig), plain);
+        }
+        bool ligOnly = (k == typedLower);
+        bool dominant =
+            typedFreq <= 0.0 ||
+            double(freq[best]) >= cfg.accentDom * typedFreq;
+        // GARDE ANTI-POUBELLE : la forme accentuée doit peser face au meilleur
+        // candidat global — « cétait » (259 occurrences de bruit corpus) ne
+        // court-circuite pas « c'était » (canal élision, largement devant).
+        // Si le candidat accentué EST le top du classement, il est crédible
+        // par définition — sans ce court-circuit, un mot APPRIS (score
+        // plancher learnedFloor bien au-dessus de l'échelle modèle) se
+        // comparait à lui-même et tuait sa propre restauration (« français »
+        // appris une fois → « francais » ne se corrigeait plus).
+        bool credible =
+            ranked.empty() || words[best] == ranked[0].first ||
+            bestS >= ACCENT_MIN_VS_TOP * ranked[0].second;
+        if ((ligOnly || dominant) && credible)
+          accentWord = words[best];
+      }
+    }
+
+    // L'Espace applique : la complétion complète (autoApply), sinon la seule
+    // restauration d'accents (accentRestore) — sinon rien, littéral gardé.
+    if (cfg.autoApply) {
+      // le garde apostrophe bloque les restaurations d'élision (c'était) dans
+      // le ghost — l'accent fold-equal, sûr par construction, le complète.
+      // Ghost == le littéral lui-même (graphie brute plus fréquente au corpus,
+      // ex. « coeur » vs « cœur ») : sans intérêt pour l'Espace → on retombe
+      // sur la restauration d'accents (la ligature doit gagner).
+      bool ghostIsLiteral =
+          !res.ghost.empty() && lowerKeep(res.ghost) == lowerKeep(prefix);
+      res.autocomplete =
+          (!res.ghost.empty() && !ghostIsLiteral) ? res.ghost : accentWord;
+      // RESTAURATION pure = ne diffère du tapé que par accents et/ou
+      // APOSTROPHES (« jai » → j'ai : mêmes lettres). L'engine peut alors
+      // appliquer même si le tapé traîne dans le vocab comme bruit de corpus
+      // (« jai » y est) — une restauration ne change jamais le mot.
+      auto stripApos = [](std::string s) {
+        s.erase(std::remove(s.begin(), s.end(), '\''), s.end());
+        return s;
+      };
+      res.accentOnly = !res.autocomplete.empty() &&
+                       stripApos(foldStr(res.autocomplete)) == stripApos(fp);
+    } else if (cfg.accentRestore && !accentWord.empty()) {
+      res.autocomplete = accentWord;
+      res.accentOnly = true;
     }
     // RESTITUTION D'ACCENT (indépendante de autoApply) : si le mot tapé n'est
     // qu'une version DÉSACCENTUÉE d'un mot du modèle (même forme pliée, accents/
@@ -1333,8 +1604,10 @@ private:
     // VETO : remplacement déjà refusé par un revert → plus jamais auto.
     if (!res.autocomplete.empty()) {
       auto vIt = veto_.find(fp);
-      if (vIt != veto_.end() && vIt->second.count(res.autocomplete))
+      if (vIt != veto_.end() && vIt->second.count(res.autocomplete)) {
         res.autocomplete.clear();
+        res.accentOnly = false;
+      }
     }
 
     // Suggestion emoji : le mot tapé est exactement un mot-clé emoji
@@ -1344,10 +1617,14 @@ private:
       auto e = emojiExact_.find(fp);
       if (e != emojiExact_.end()) {
         const std::string &emo = emojis_[e->second];
-        if ((int)res.candidates.size() >= k)
+        if ((int)res.candidates.size() >= k) {
           res.candidates.back() = emo;
-        else
+          if (!res.scores.empty())
+            res.scores.back() = 0.0; // jamais reranké au-dessus des mots
+        } else {
           res.candidates.push_back(emo);
+          res.scores.push_back(0.0);
+        }
       }
     }
   }
@@ -1380,7 +1657,7 @@ private:
         continue;
       std::string v = fp;
       v.erase(i, 1);
-      addv(v, CH_EXTRA);
+      addv(v, i == 0 ? CH_EXTRA_HEAD : CH_EXTRA);
     }
     const auto &adj = azerty(); // substitutions par adjacence
     for (size_t i = 0; i < L; i++) {
@@ -1393,6 +1670,15 @@ private:
         addv(v, CH_SUBST);
       }
     }
+    // Lettre OUBLIÉE : insérer chaque lettre à chaque position (« bonjur » →
+    // « bonjour »). ~26·L variantes de plus — chaque lookup reste en µs, et le
+    // fuzzy ne tourne déjà que quand les correspondances exactes sont maigres.
+    for (size_t i = 0; i <= L; i++)
+      for (char c = 'a'; c <= 'z'; c++) {
+        std::string v = fp;
+        v.insert(v.begin() + i, c);
+        addv(v, CH_MISS);
+      }
     for (const auto &[v, ch] : variants) {
       auto [lo, hi] = foldedPrefixRange(v);
       // top-3 par variante suffisent (on ne veut pas noyer les exacts)
@@ -1405,6 +1691,14 @@ private:
       size_t kk = std::min<size_t>(3, tops.size());
       for (size_t i = 0; i < kk; i++)
         offer(words[tops[i].first], tops[i].second * ch);
+      // ÉLISIONS composées : la variante corrigée peut aussi être une élision
+      // sans apostrophe — « temener » → (insert m) → « temmener » → t'emmener
+      // (synthèse t'+emmener). Deux fautes cumulées → canaux multipliés.
+      // Synthèse seulement si la variante GARDE la 1re lettre tapée : une
+      // substitution du proclitique lui-même fabriquait du bruit (« dici » →
+      // variante « sici » → « s'ici », qui n'existe pas).
+      if (v.find('\'') == std::string::npos)
+        elisionOffers(v, ch * CH_APOS, /*synth=*/v[0] == fp[0], score, offer);
     }
   }
 
@@ -1414,7 +1708,9 @@ private:
   // compte les bigrammes d'amorce). L'apprentissage utilisateur passe devant.
   template <class Push>
   void predictNext(const std::vector<std::string> &context, int k,
-                   Push &&push, Result &res) {
+                   Push &&push, Result &res,
+                   const std::vector<std::pair<std::string, double>>
+                       &neuralCands = {}) {
     std::vector<std::string> ctx = context;
     if (ctx.empty())
       ctx.push_back("<s>");
@@ -1497,10 +1793,35 @@ private:
     std::partial_sort(v.begin(), v.begin() + kk, v.end(),
                       [](auto &a, auto &b) { return a.second > b.second; });
 
-    // (3) FUSION appris + modèle : on ne passe aux chaînes que pour le PETIT
-    //     haut de liste (kk) plus les bigrammes appris (poignée) — le hot path
-    //     entier (itération des milliers de suiveurs) reste intact. Déduplique
-    //     par mot en gardant le meilleur score, puis retri global.
+    // (2.5) NEURAL (E4) : les candidats neuronaux passent par le MÊME pipeline
+    //     multiplicatif que tout le monde — langue stricte (exclusion), accord
+    //     grammatical, puis fusion par score avec le modèle et l'appris. Fini le
+    //     préfixage brut qui court-circuitait langFactor/agreeFactor/apprentissage.
+    std::vector<std::pair<std::string, double>> nsc;
+    for (const auto &[w, p] : neuralCands) {
+      double f = 1.0;
+      auto idit = id_.find(lowerKeep(w));
+      if (idit != id_.end())
+        f = langFactor(ctxL, idit->second) * agreeFactor(want, idit->second);
+      double s = p * cfg.neuralBoost * f;
+      if (s > 0.0)
+        nsc.push_back({w, s});
+    }
+
+    // neuralOnly = mot-suivant 100% neuronal (n-gram/appris écartés) — mais
+    // toujours filtré langue + accord, et trié par score.
+    if (cfg.neuralOnly && !nsc.empty()) {
+      std::sort(nsc.begin(), nsc.end(),
+                [](auto &a, auto &b) { return a.second > b.second; });
+      for (auto &p : nsc)
+        push(p.first);
+      return;
+    }
+
+    // (3) FUSION appris + modèle + neural : on ne passe aux chaînes que pour le
+    //     PETIT haut de liste (kk) plus les bigrammes appris (poignée) — le hot
+    //     path entier (itération des milliers de suiveurs) reste intact.
+    //     Déduplique par mot en gardant le meilleur score, puis retri global.
     std::vector<std::pair<std::string, double>> cand;
     std::unordered_map<std::string, size_t> at;
     auto add = [&](const std::string &w, double s) {
@@ -1513,6 +1834,8 @@ private:
     for (size_t i = 0; i < kk; i++)
       add(words[v[i].first], v[i].second);
     for (auto &p : learned)
+      add(p.first, p.second);
+    for (auto &p : nsc)
       add(p.first, p.second);
     size_t ck = std::min<size_t>(size_t(k) * 2, cand.size());
     std::partial_sort(cand.begin(), cand.begin() + ck, cand.end(),
@@ -1636,6 +1959,77 @@ int main(int argc, char **argv) {
   }
 #endif
 
+#ifdef WITH_NEURAL
+  // ---- Deux phases ASYNC (E5) : un thread de travail pour le neural. ----
+  // Le thread ne touche JAMAIS Model (appris/config/lexique mutent sur le
+  // thread principal) : il ne parle qu'à NeuralPredictor (verrouillé en
+  // interne). Un seul job en attente (le clavier n'a qu'un curseur) — un
+  // nouveau job remplace l'ancien. Résultats repostés au thread principal via
+  // un pipe de réveil, la FUSION (predict) reste donc mono-thread.
+  struct NeuralJob {
+    uint64_t client = 0;
+    std::string wide;
+    std::vector<std::string> ctx;
+    int topk = 6;
+    int budgetMs = 180;
+  };
+  struct NeuralDone {
+    uint64_t client;
+    std::vector<std::string> ctx;
+    std::vector<std::pair<std::string, double>> cands;
+  };
+  std::mutex njMu;
+  std::condition_variable njCv;
+  NeuralJob njPending;
+  bool njHas = false, njQuit = false;
+  std::vector<NeuralDone> njDone;
+  int wakePipe[2] = {-1, -1};
+  if (pipe(wakePipe) == 0) {
+    fcntl(wakePipe[0], F_SETFL, O_NONBLOCK);
+    fcntl(wakePipe[1], F_SETFL, O_NONBLOCK);
+  }
+  std::thread njWorker([&] {
+    for (;;) {
+      NeuralJob job;
+      {
+        std::unique_lock<std::mutex> lk(njMu);
+        njCv.wait(lk, [&] { return njHas || njQuit; });
+        if (njQuit)
+          return;
+        job = njPending;
+        njHas = false;
+      }
+      auto t0 = std::chrono::steady_clock::now();
+      auto nc = neural.nextWords(job.wide, job.topk, job.budgetMs);
+      std::vector<std::pair<std::string, double>> out;
+      for (const auto &c : nc) {
+        std::string w = c.word;
+        // Heuristique SANS lexique (le lexique vit sur l'autre thread) : une
+        // ou deux lettres, ou finale en apostrophe = fragment BPE probable
+        // (« l » de « l'école ») → expansion. Couvre les élisions observées.
+        bool fragmentish =
+            w.size() <= 2 || w.back() == '\'';
+        if (fragmentish) {
+          int remain =
+              job.budgetMs -
+              (int)std::chrono::duration_cast<std::chrono::milliseconds>(
+                  std::chrono::steady_clock::now() - t0)
+                  .count();
+          w = remain > 60 ? neural.expand(c, 3, remain) : std::string{};
+        }
+        if (!w.empty())
+          out.push_back({w, (double)c.prob});
+      }
+      {
+        std::lock_guard<std::mutex> lk(njMu);
+        njDone.push_back({job.client, job.ctx, std::move(out)});
+      }
+      ssize_t n = write(wakePipe[1], "x", 1);
+      (void)n;
+    }
+  });
+#endif
+
   std::string sockpath = argc > 2 ? argv[2] : "/tmp/ime-predictord.sock";
   unlink(sockpath.c_str());
   int srv = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0);
@@ -1650,7 +2044,10 @@ int main(int argc, char **argv) {
   fprintf(stderr, "[predictord] écoute sur %s\n", sockpath.c_str());
 
   // Traite UNE ligne de protocole, renvoie la réponse ('\n' terminée).
-  auto handleLine = [&](const std::string &line) -> std::string {
+  // clientSeq : identité stable du client (le refresh async lui est adressé).
+  auto handleLine = [&](const std::string &line,
+                        uint64_t clientSeq) -> std::string {
+    (void)clientSeq;
     json resp;
     try {
       json req = json::parse(line);
@@ -1704,27 +2101,91 @@ int main(int argc, char **argv) {
             req.value("context", std::vector<std::string>{});
         std::string prefix = req.value("prefix", std::string{});
         model.maybeReload(); // config/dict/snippets à chaud (mtime)
-        Result r = model.predict(ctx, prefix, model.cfg.barWords);
+        // Contexte LARGE (E1) : texte brut avant le curseur, phrases
+        // précédentes comprises — réservé au neural (le n-gram garde le
+        // contexte borné à la phrase). Repli : les mots du contexte joints.
+        std::string wide = req.value("wide", std::string{});
+        if (wide.empty())
+          for (const auto &w : ctx) {
+            if (!wide.empty())
+              wide += ' ';
+            wide += w;
+          }
 #ifdef WITH_NEURAL
-        // Neural EN TÊTE pour le mot-suivant (prefix vide) ; n-gram conservé pour
-        // la complétion intra-mot + literalIsWord/autocomplete (auto-apply sûr).
-        if (neural.ready() && (model.cfg.neural || neuralForced) &&
-            prefix.empty() && !ctx.empty()) {
-          std::vector<std::string> nc = neural.nextWords(ctx, model.cfg.neuralTopk);
-          if (!nc.empty()) {
-            if (model.cfg.neuralOnly) {
-              r.candidates = nc; // mot-suivant 100% neuronal (n-gram écarté)
-            } else {
-              std::vector<std::string> merged = nc;
-              for (auto &w : r.candidates) {
-                bool dup = false;
-                for (auto &m : merged) if (m == w) { dup = true; break; }
-                if (!dup) merged.push_back(w);
-              }
-              r.candidates.swap(merged);
+        // Mot-suivant neuronal (E1/E2/E4) : candidats scorés sur le contexte
+        // large, fragments BPE complétés (« l » → « l'école »), puis FUSION
+        // par score dans predict() (langue/accord/appris respectés).
+        bool neuralWants = neural.ready() &&
+                           (model.cfg.neural || neuralForced) &&
+                           prefix.empty() && !wide.empty();
+        // Deux phases (E5) : l'engine a demandé "async" → n-gram tout de
+        // suite (pending:true), neural sur le thread de travail, refresh sur
+        // la même connexion dès qu'il aboutit.
+        bool deferred = neuralWants && model.cfg.asyncNeural &&
+                        req.value("async", false) && wakePipe[1] >= 0;
+        if (deferred) {
+          {
+            std::lock_guard<std::mutex> lk(njMu);
+            njPending = {clientSeq, wide, ctx, model.cfg.neuralTopk,
+                         model.cfg.neuralBudgetMs};
+            njHas = true; // remplace un éventuel job périmé (latest-only)
+          }
+          njCv.notify_one();
+          resp["pending"] = true;
+        }
+        std::vector<std::pair<std::string, double>> neuralCands;
+        if (neuralWants && !deferred) {
+          auto t0 = std::chrono::steady_clock::now();
+          auto nc =
+              neural.nextWords(wide, model.cfg.neuralTopk, model.cfg.neuralBudgetMs);
+          for (const auto &c : nc) {
+            std::string w = c.word;
+            if (model.looksFragment(w)) {
+              int remain =
+                  model.cfg.neuralBudgetMs -
+                  (int)std::chrono::duration_cast<std::chrono::milliseconds>(
+                      std::chrono::steady_clock::now() - t0)
+                      .count();
+              // ~1 décde minimum ; sous ça on jette le fragment plutôt que
+              // d'offrir un demi-mot.
+              w = remain > 60 ? neural.expand(c, 3, remain) : std::string{};
             }
+            if (!w.empty())
+              neuralCands.push_back({w, (double)c.prob});
           }
         }
+        Result r = model.predict(ctx, prefix, model.cfg.barWords, neuralCands);
+        // Rerank neuronal de la complétion (E3) — opportuniste : seulement si
+        // le cache KV est déjà chaud pour ce contexte exact (le mot-suivant
+        // vient de tourner dessus). Mélange géométrique log-linéaire.
+        if (neural.ready() && (model.cfg.neural || neuralForced) &&
+            model.cfg.neuralRerank && !prefix.empty() && prefix[0] != ':' &&
+            !wide.empty() && r.candidates.size() >= 2 &&
+            r.scores.size() == r.candidates.size()) {
+          std::vector<float> lp;
+          if (neural.scoreFirstTokens(wide, r.candidates, lp)) {
+            const double lam = model.cfg.rerankWeight;
+            std::vector<size_t> ord(r.candidates.size());
+            std::vector<double> blend(r.candidates.size());
+            for (size_t i = 0; i < ord.size(); i++) {
+              ord[i] = i;
+              blend[i] = (1.0 - lam) * std::log(std::max(r.scores[i], 1e-300)) +
+                         lam * (double)lp[i];
+            }
+            std::stable_sort(ord.begin(), ord.end(), [&](size_t a, size_t b) {
+              return blend[a] > blend[b];
+            });
+            std::vector<std::string> rc;
+            rc.reserve(ord.size());
+            for (size_t i : ord)
+              rc.push_back(r.candidates[i]);
+            r.candidates.swap(rc);
+            // autocomplete inchangé : la sémantique d'auto-application reste
+            // 100% n-gram (conservatrice) — le rerank ne réordonne que la barre.
+          }
+        }
+#else
+        Result r = model.predict(ctx, prefix, model.cfg.barWords);
 #endif
         // Plafond DUR de la barre de mots : seul le top-N (cfg.barWords) le plus
         // pertinent est montré. predict() le respecte déjà côté n-gram ; on le
@@ -1739,6 +2200,8 @@ int main(int argc, char **argv) {
         resp["candidates"] = r.candidates;
         resp["literalIsWord"] = r.literalIsWord;
         resp["autocomplete"] = r.autocomplete;
+        resp["ghost"] = r.ghost;
+        resp["accentOnly"] = r.accentOnly;
       }
     } catch (const std::exception &e) {
       resp["candidates"] = json::array();
@@ -1759,13 +2222,22 @@ int main(int argc, char **argv) {
   // l'engine — synchrone sur le thread clavier de fcitx — attendait derrière.
   struct Client {
     int fd;
+    uint64_t seq; // identité stable (l'fd peut être réutilisé après close)
     std::string in, out;
   };
   std::vector<Client> clients;
   std::vector<pollfd> pfds;
+  uint64_t clientSeq = 0;
   for (;;) {
     pfds.clear();
     pfds.push_back({srv, POLLIN, 0});
+#ifdef WITH_NEURAL
+    // fd 1 du tableau : le pipe de réveil du worker neural (résultats prêts).
+    pfds.push_back({wakePipe[0], POLLIN, 0});
+    constexpr size_t kFixed = 2;
+#else
+    constexpr size_t kFixed = 1;
+#endif
     for (auto &cl : clients)
       pfds.push_back(
           {cl.fd, short(POLLIN | (cl.out.empty() ? 0 : POLLOUT)), 0});
@@ -1778,11 +2250,44 @@ int main(int argc, char **argv) {
         if (c < 0)
           break; // EAGAIN : plus personne en attente
         fcntl(c, F_SETFL, fcntl(c, F_GETFL) | O_NONBLOCK);
-        clients.push_back({c, {}, {}}); // servi au prochain tour de poll
+        clients.push_back({c, ++clientSeq, {}, {}}); // servi au prochain tour
       }
+#ifdef WITH_NEURAL
+    if (pfds[1].revents & POLLIN) {
+      char sink[64];
+      while (read(wakePipe[0], sink, sizeof(sink)) > 0)
+        ;
+      std::vector<NeuralDone> ready;
+      {
+        std::lock_guard<std::mutex> lk(njMu);
+        ready.swap(njDone);
+      }
+      // FUSION sur le thread principal (accès Model exclusif) puis refresh au
+      // client d'origine — s'il est parti entre-temps, on jette.
+      for (auto &d : ready) {
+        Client *dst = nullptr;
+        for (auto &cl : clients)
+          if (cl.seq == d.client && cl.fd >= 0) {
+            dst = &cl;
+            break;
+          }
+        if (!dst)
+          continue;
+        Result r = model.predict(d.ctx, "", model.cfg.barWords, d.cands);
+        json resp;
+        resp["candidates"] = r.candidates;
+        resp["refresh"] = true;
+        try {
+          dst->out += resp.dump() + "\n";
+        } catch (...) {
+        }
+        // le flush partira au POLLOUT du prochain tour (out non vide).
+      }
+    }
+#endif
     for (size_t i = 0; i < nOld; i++) {
       Client &cl = clients[i];
-      short ev = pfds[i + 1].revents;
+      short ev = pfds[i + kFixed].revents;
       if (!ev)
         continue;
       bool eof = false, drop = false;
@@ -1809,7 +2314,7 @@ int main(int argc, char **argv) {
       while (!drop && (nl = cl.in.find('\n')) != std::string::npos) {
         std::string line = cl.in.substr(0, nl);
         cl.in.erase(0, nl + 1);
-        cl.out += handleLine(line);
+        cl.out += handleLine(line, cl.seq);
       }
       // flush non bloquant ; le reste partira sur POLLOUT. EPIPE = client
       // parti sans lire (learn fire-and-forget de l'engine) : on jette.

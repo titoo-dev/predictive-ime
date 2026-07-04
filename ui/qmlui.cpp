@@ -12,6 +12,7 @@
 // re-planifie dispatch()/flush sur le THREAD PRINCIPAL ; update() et les
 // callbacks registry tournent donc tous sur le thread principal → pas de race.
 #define _GNU_SOURCE 1
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <memory>
@@ -22,6 +23,7 @@
 #include <unistd.h>
 
 #include <QImage>
+#include <QPainter>
 #include <QString>
 #include <QStringList>
 #include <QVariantMap>
@@ -154,6 +156,12 @@ private:
             destroyPanel(); // remet aussi l'anim d'apparition à zéro
             surface_ = wl_compositor_create_surface(compositor_);
             popup_ = zwp_input_method_v2_get_input_popup_surface(im, surface_);
+            // le compositeur nous dit où est la LIGNE DE TEXTE dans nos
+            // coordonnées de surface — sert à l'évitement (cf renderFrame)
+            zwp_input_popup_surface_v2_add_listener(popup_, &popupListener_,
+                                                    this);
+            tiRect_ = {};
+            lifted_ = false;
             currentIc_ = ic;
             currentIm_ = im;
         }
@@ -222,6 +230,17 @@ private:
             QP_DEBUG() << "render returned null image";
             return false;
         }
+        // ÉVITEMENT DU TEXTE : si le compositeur a posé la popup SUR la ligne
+        // en cours de frappe (le rect text-input — événement
+        // text_input_rectangle, en coordonnées de NOTRE surface — intersecte
+        // la barre), on décale la barre DANS la surface, sur un canvas
+        // transparent : collée AU-DESSUS de la ligne si la place existe,
+        // sinon juste EN DESSOUS. Le texte reste visible à travers les pixels
+        // transparents (une popup input-method ne prend pas l'input).
+        // Hystérésis `lifted_` : on garde le mode jusqu'au démappage (mot
+        // suivant) — sans quoi surface qui rétrécit → compositeur qui
+        // replace → nouvel overlap → oscillation visible.
+        img = avoidTextRow(img);
         wl_buffer *buf = makeImageBuffer(shm_, img);
         if (!buf)
             return false;
@@ -232,6 +251,42 @@ private:
         wl_surface_commit(surface_);
         wl_display_flush(display_);
         return true;
+    }
+
+    // Décale la barre dans un canvas transparent pour ne jamais recouvrir la
+    // ligne de texte (cf renderFrame). Sans rect connu, ou sans overlap : image
+    // inchangée.
+    QImage avoidTextRow(QImage img) {
+        if (!tiRect_.valid)
+            return img;
+        const int barH = img.height();
+        // GARDE-FOU : une « ligne de texte » plus haute que toute la barre
+        // n'en est pas une — c'est le rect de REPLI du compositeur (fenêtre
+        // entière, app sans rectangle de curseur). Aucun évitement fiable
+        // possible : rendu inchangé.
+        if (tiRect_.h > barH)
+            return img;
+        const int rowH = std::max(tiRect_.h, 2); // rect dégénéré (h=0) = ligne
+        const bool overlap = tiRect_.y < barH && tiRect_.y + rowH > 0;
+        if (overlap)
+            lifted_ = true;
+        if (!lifted_ || tiRect_.y + rowH <= 0)
+            return img; // pas de recouvrement (ou texte au-dessus : flip fait)
+        int canvasH, barY;
+        if (tiRect_.y >= barH) {
+            canvasH = tiRect_.y;      // barre collée AU-DESSUS de la ligne
+            barY = tiRect_.y - barH;
+        } else {
+            barY = tiRect_.y + rowH;  // pas la place : juste EN DESSOUS
+            canvasH = barY + barH;
+        }
+        QImage canvas(img.width(), canvasH,
+                      QImage::Format_ARGB32_Premultiplied);
+        canvas.fill(Qt::transparent);
+        QPainter p(&canvas);
+        p.drawImage(0, barY, img);
+        p.end();
+        return canvas;
     }
 
     void scheduleFrame() {
@@ -274,7 +329,23 @@ private:
         finishUnmap();
     }
 
+    // événement text_input_rectangle : position de la ligne de texte dans les
+    // coordonnées de notre surface (mis à jour à chaque replacement).
+    static void popupTextInputRect(void *data, zwp_input_popup_surface_v2 *,
+                                   int32_t x, int32_t y, int32_t w,
+                                   int32_t h) {
+        auto *self = static_cast<QmlPanel *>(data);
+        self->tiRect_ = {x, y, w, h, true};
+        // Diagnostic « la barre ne suit pas le curseur » : si ce rect ne
+        // change JAMAIS pendant la frappe, c'est l'application qui ne met pas
+        // à jour son rectangle de curseur (text-input v3) — le compositeur
+        // n'a alors rien à suivre. `fcitx5 --verbose qmlpanel=5` pour voir.
+        QP_DEBUG() << "text_input_rectangle " << x << "," << y << " " << w
+                   << "x" << h;
+    }
+
     void finishUnmap() {
+        lifted_ = false; // l'évitement se réévalue au prochain mot
         hideGuard_.reset();
         if (frameCb_) {
             wl_callback_destroy(frameCb_);
@@ -323,11 +394,18 @@ private:
     zwp_input_method_v2 *currentIm_ = nullptr;
     std::unique_ptr<PanelView> view_;
     std::unique_ptr<EventSourceTime> hideGuard_; // échéance du fondu orphelin
+    struct TiRect {
+        int x = 0, y = 0, w = 0, h = 0;
+        bool valid = false;
+    } tiRect_;          // ligne de texte, en coordonnées de notre surface
+    bool lifted_ = false; // évitement engagé (hystérésis jusqu'au démappage)
 
     static constexpr wl_registry_listener registryListener_ = {
         &QmlPanel::registryGlobal, &QmlPanel::registryRemove};
     static constexpr wl_callback_listener frameListener_ = {
         &QmlPanel::frameDone};
+    static constexpr zwp_input_popup_surface_v2_listener popupListener_ = {
+        &QmlPanel::popupTextInputRect};
 };
 
 // Hors-ligne : les loaders de dépendance (auto) sont alors entièrement déclarés.

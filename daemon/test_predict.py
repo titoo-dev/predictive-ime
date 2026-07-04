@@ -24,6 +24,14 @@ WORDS = {
     # restitution d'accent : homographe DOMINANT (être ≫ etre → restitue) et
     # homographe NON dominant (mûr < accentDom×mur → garde le littéral).
     "etre": 50, "mur": 1000, "mûr": 2000,
+    # apostrophe oubliée (canal élision) : jai→j'ai, dici→d'ici, cest→c'est,
+    # temener→t'emmener (élision + lettre oubliée, canaux composés). « jai »
+    # est AUSSI un mot-poubelle du corpus (comme dans le vrai modèle) : la
+    # restauration doit passer outre literalIsWord (accentOnly).
+    "d'ici": 6000, "c'est": 60000, "t'emmener": 800, "jai": 300,
+    # restauration d'accents : graphie brute AUSSI au corpus (dominance
+    # accentDom), homographe légitime (cote/côté), ligature (coeur/cœur).
+    "francais": 1500, "cote": 5000, "côté": 6000, "coeur": 9000, "cœur": 4000,
 }
 # 3e colonne de words.tsv : langue (boost selon la langue du contexte)
 LANGS = {"bonjour": "fr", "soleil": "fr", "solar": "en", "the": "en"}
@@ -135,6 +143,33 @@ try:
     check("typo transposition: qaund → quand", "quand" in c, str(c))
     c = cands("bonjpur")
     check("typo adjacence AZERTY: bonjpur → bonjour", "bonjour" in c, str(c))
+
+    # 2bis) lettre OUBLIÉE + espace oublié (E8)
+    c = cands("bonjor")
+    check("typo omission: bonjor → bonjour", "bonjour" in c, str(c))
+    c = cands("travil")
+    check("typo omission: travil → travail", "travail" in c, str(c))
+    c = cands("nepas")
+    check("espace oublié: nepas → « ne pas »", "ne pas" in c, str(c))
+    a = auto("nepas")
+    check("espace oublié: jamais auto-appliqué", " " not in a, repr(a))
+
+    # 2ter) APOSTROPHE OUBLIÉE (canal élision, repli sans apostrophe)
+    c = cands("jai")
+    check("élision: jai → j'ai", "j'ai" in c, str(c))
+    r = req({"prefix": "jai", "context": []})
+    check("élision: jai → j'ai auto-appliqué (dominant)",
+          r.get("autocomplete") == "j'ai", str(r))
+    check("élision: restauration pure → accentOnly (malgré « jai » au vocab)",
+          r.get("accentOnly") is True and r.get("literalIsWord") is True,
+          str(r))
+    c = cands("dici")
+    check("élision: dici → d'ici", "d'ici" in c, str(c))
+    c = cands("cest")
+    check("élision: cest → c'est", "c'est" in c, str(c))
+    c = cands("temener")
+    check("élision composée: temener → t'emmener (apostrophe + lettre)",
+          "t'emmener" in c, str(c))
 
     # 3) complétion re-classée par le contexte
     base = cands("v")
@@ -417,6 +452,59 @@ try:
     c = cands("coeur")
     check("emoji: hint — 'coeur' (mot normal) propose ❤️ en fin de barre",
           "❤️" in c, str(c))
+
+    # 8bis) RESTAURATION D'ACCENTS (fold-equal) + ghost découplé + barWords
+    r = req({"prefix": "etre", "context": []})
+    check("accent: etre → être (accentOnly)",
+          r.get("autocomplete") == "être" and r.get("accentOnly") is True,
+          str(r))
+    r = req({"prefix": "francais", "context": []})
+    check("accent: francais → français malgré le corpus (dominance ≥ accentDom)",
+          r.get("autocomplete") == "français" and r.get("accentOnly") is True,
+          str(r))
+    r = req({"prefix": "cote", "context": []})
+    check("accent: cote intouché (homographe sous accentDom)",
+          r.get("autocomplete", "") in ("", "cote"), str(r))
+    r = req({"prefix": "coeur", "context": []})
+    check("accent: coeur → cœur (ligature, sans seuil de dominance)",
+          r.get("autocomplete") == "cœur" and r.get("accentOnly") is True,
+          str(r))
+
+    cfgpath = f"{cfgdir}/config.json"
+    def set_config(obj, bump):
+        with open(cfgpath, "w", encoding="utf-8") as f:
+            json.dump(obj, f)
+        t = time.time() + bump  # mtime distinct → rechargement à chaud garanti
+        os.utime(cfgpath, (t, t))
+
+    set_config({"autoApply": False}, 2)
+    r = req({"prefix": "bonjou", "context": []})
+    check("autoApply off: l'Espace garde le littéral (pas d'autocomplete)",
+          r.get("autocomplete", "") == "", str(r))
+    check("autoApply off: le GHOST reste calculé (→ l'accepte)",
+          r.get("ghost") == "bonjour", str(r))
+    r = req({"prefix": "etre", "context": []})
+    check("autoApply off: l'accent est restauré quand même (accentRestore)",
+          r.get("autocomplete") == "être" and r.get("accentOnly") is True,
+          str(r))
+    # régression : un mot APPRIS (score plancher learnedFloor) ne doit pas
+    # tuer sa propre restauration (garde `credible` auto-comparée).
+    req({"learn": {"prev": "", "word": "être"}})
+    r = req({"prefix": "etre", "context": []})
+    check("autoApply off: l'accent survit à l'apprentissage du mot",
+          r.get("autocomplete") == "être" and r.get("accentOnly") is True,
+          str(r))
+    req({"forget": {"word": "être"}})
+
+    set_config({"autoApply": False, "accentRestore": False}, 4)
+    r = req({"prefix": "etre", "context": []})
+    check("autoApply off + accentRestore off: plus rien ne s'applique",
+          r.get("autocomplete", "") == "", str(r))
+
+    set_config({"barWords": 3}, 6)
+    c = cands("v")
+    check("barWords: la barre est tronquée aux 3 meilleurs", len(c) <= 3, str(c))
+    set_config({}, 8)  # retour aux défauts pour la suite
 
     # 9) ROBUSTESSE SIGPIPE : l'engine envoie "learn" en fire-and-forget (écrit
     #    puis ferme SANS lire la réponse). Sans SIG_IGN, le write du daemon sur
