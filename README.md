@@ -50,6 +50,15 @@ Add `Predict` as an input method (e.g. with `fcitx5-configtool`) and restart fci
 Settings live in `~/.config/ime-predictord/` (hot-reloaded): `config.json`,
 `snippets.tsv`, `dict.txt`. The `ime-preferences` app edits `config.json`.
 
+**Language.** `lang` in `config.json` picks the suggestion language: `fr` / `en`
+(deterministic, the other language is strictly excluded), `auto` (context
+vote), `off`. **Ctrl+Shift+L** toggles fr ↔ en on the fly (the engine rewrites
+`lang` in place — formatting preserved — and the daemon hot-reloads it; the
+suggestion bar restarts in the new language as immediate feedback). English
+contractions (`don't`, `i'm`, `you're`…) are first-class vocabulary: completed
+from `don`, restored from `dont`/`im`/`cant`, and `i`/`i'…` are always
+capitalised to `I`/`I'…`.
+
 **Grammatical agreement.** The daemon boosts candidates that agree in number
 and gender with the governing determiner found in the surrounding sentence
 (`les petits chat…` → `chats`), using the Lefff morphological lexicon
