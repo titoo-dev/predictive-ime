@@ -55,47 +55,6 @@ static bool valid_utf8(const std::string &s) {
   return true;
 }
 
-// Langue de la phrase (FR par défaut = langue primaire de l'utilisateur). Sert à
-// ÉPINGLER la langue de sortie : sinon le modèle, instruit en français, TRADUISAIT
-// les phrases anglaises en français. Heuristique : accents latins fréquents en FR
-// → FR certain ; sinon vote des mots vides FR vs EN.
-static bool isFrench(const std::string &s) {
-  for (size_t i = 0; i + 1 < s.size(); ++i) {
-    if ((unsigned char)s[i] == 0xC3) {
-      unsigned char b = (unsigned char)s[i + 1];
-      // é è ê ë à â ç ô ö ù û ü î ï (formes minuscules courantes)
-      if (b == 0xA9 || b == 0xA8 || b == 0xAA || b == 0xAB || b == 0xA0 ||
-          b == 0xA2 || b == 0xA7 || b == 0xB4 || b == 0xB6 || b == 0xB9 ||
-          b == 0xBB || b == 0xBC || b == 0xAE || b == 0xAF)
-        return true; // un accent FR → quasi-certain français
-    }
-  }
-  std::string low;
-  low.reserve(s.size() + 2);
-  low += ' ';
-  for (char c : s)
-    low += (std::isalpha((unsigned char)c) ? (char)std::tolower((unsigned char)c)
-                                           : ' ');
-  low += ' ';
-  static const char *fr[] = {" le ", " la ", " les ", " un ", " une ", " des ",
-                             " je ", " tu ", " est ", " et ", " pour ", " que ",
-                             " pas ", " vous ", " ne ", " dans ", " avec ",
-                             " ce ", " sur ", " au ", " du ", " ça ", nullptr};
-  static const char *en[] = {" the ", " is ", " are ", " you ", " for ", " and ",
-                             " of ", " to ", " that ", " with ", " would ",
-                             " like ", " this ", " it ", " on ", " be ",
-                             " have ", " do ", " can ", " your ", " my ", nullptr};
-  auto count = [&](const char **ws) {
-    int n = 0;
-    for (int i = 0; ws[i]; ++i)
-      for (size_t p = low.find(ws[i]); p != std::string::npos;
-           p = low.find(ws[i], p + 1))
-        ++n;
-    return n;
-  };
-  return count(fr) >= count(en); // égalité → FR (langue primaire)
-}
-
 // Échantillonnage température + top-k + top-p (nucleus) sur les logits. Le greedy
 // (argmax) renvoyait des variantes IDENTIQUES — l'échantillonnage est ce qui les
 // rend distinctes. Pré-filtre top-k (sélection partielle, comme nextWords) pour
@@ -279,7 +238,7 @@ std::vector<std::string> NeuralPredictor::reformulate(
 
   // ÉPINGLAGE DE LANGUE + MODE : prompt partagé avec le backend Groq
   // (reform_prompts.h) → sémantique identique. translate inverse la langue.
-  bool fr = isFrench(sentence);
+  bool fr = reformIsFrench(sentence);
   std::string sys = reformSystemPrompt(mode, fr, want);
   // Bloc <think></think> PRÉ-REMPLI dans le tour assistant = méthode officielle
   // Qwen3 pour DÉSACTIVER le raisonnement → sortie directe (sinon le modèle

@@ -535,13 +535,18 @@ try:
     import http.server
     import threading
     hits = []
+    bodies = []  # corps des requêtes → vérifie le prompt système (langue)
     slow = [False]
 
     unauth = [False]
 
     class Mock(http.server.BaseHTTPRequestHandler):
         def do_POST(self):
-            self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            raw = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            try:
+                bodies.append(json.loads(raw))
+            except ValueError:
+                pass
             hits.append(1)
             if slow[0]:
                 time.sleep(1.2)
@@ -620,8 +625,30 @@ try:
     r = req({"reformCheck": True})
     check("reformCheck: clé acceptée → keyValid true",
           r.get("keyValid") is True and r.get("keyPresent") is True, str(r))
+    # ÉPINGLAGE DE LANGUE : cfg.lang choisi ("fr"/"en") PRIME sur l'heuristique
+    # de détection de la phrase ; "auto" (défaut) garde l'heuristique.
+    base = {"reformBaseUrl": f"http://127.0.0.1:{httpd.server_port}",
+            "reformTimeoutMs": 3000}
+    set_config({**base, "lang": "en"}, 13)
+    req({"reformulate": "bonjour à tous les amis", "n": 2,
+         "mode": "rephrase", "nonce": 0})
+    sysp = bodies[-1]["messages"][0]["content"]
+    check("reformulate: lang=en épingle l'anglais malgré une phrase FR",
+          "English" in sysp, sysp[:70])
+    set_config({**base, "lang": "fr"}, 14)
+    req({"reformulate": "the quick brown fox jumps over the fence", "n": 2,
+         "mode": "rephrase", "nonce": 0})
+    sysp = bodies[-1]["messages"][0]["content"]
+    check("reformulate: lang=fr épingle le français malgré une phrase EN",
+          "français" in sysp, sysp[:70])
+    set_config({**base, "lang": "auto"}, 15)
+    req({"reformulate": "the quick brown fox jumps over the fence", "n": 2,
+         "mode": "rephrase", "nonce": 1})
+    sysp = bodies[-1]["messages"][0]["content"]
+    check("reformulate: lang=auto garde l'heuristique (EN détecté)",
+          "English" in sysp, sysp[:70])
     httpd.shutdown()
-    set_config({}, 12)
+    set_config({}, 16)
 
     # 9) ROBUSTESSE SIGPIPE : l'engine envoie "learn" en fire-and-forget (écrit
     #    puis ferme SANS lire la réponse). Sans SIG_IGN, le write du daemon sur

@@ -2074,6 +2074,7 @@ int main(int argc, char **argv) {
   struct ReformJob {
     uint64_t client = 0;
     std::string sentence, mode, baseUrl, model, cfgDir;
+    std::string lang = "auto"; // langue CHOISIE (cfg.lang) — prime sur l'heuristique
     int n = 3, timeoutMs = 8000;
     uint32_t nonce = 0;
     // VALIDATION de clé (panneau « fournir la clé ») : appel Groq minimal
@@ -2090,9 +2091,9 @@ int main(int argc, char **argv) {
   std::deque<ReformJob> rjQueue;
   std::deque<ReformHit> reformCache;
   auto reformKey = [](const std::string &s, const std::string &mode,
-                      uint32_t nonce, int n) {
+                      uint32_t nonce, int n, const std::string &lang) {
     return s + '\x1f' + mode + '\x1f' + std::to_string(nonce) + '\x1f' +
-           std::to_string(n);
+           std::to_string(n) + '\x1f' + lang; // lang : changer fr↔en régénère
   };
   std::thread rjWorker([&] {
     for (;;) {
@@ -2110,7 +2111,7 @@ int main(int argc, char **argv) {
       std::string kind = "ok";
       std::vector<std::string> variants = reformulateHttp(
           job.sentence, job.n, job.baseUrl, job.model, job.cfgDir,
-          job.timeoutMs, job.mode, job.nonce, &kind);
+          job.timeoutMs, job.mode, job.nonce, job.lang, &kind);
       if (job.checkOnly) {
         // Validation de clé : seule la CAUSE compte, pas les variantes.
         json resp;
@@ -2137,8 +2138,8 @@ int main(int argc, char **argv) {
       if (!variants.empty()) { // jamais les échecs (réseau coupé ≠ définitif)
         std::lock_guard<std::mutex> lk(rjMu);
         reformCache.push_front(
-            {reformKey(job.sentence, job.mode, job.nonce, job.n), variants,
-             source});
+            {reformKey(job.sentence, job.mode, job.nonce, job.n, job.lang),
+             variants, source});
         if (reformCache.size() > 8)
           reformCache.pop_back();
       }
@@ -2289,7 +2290,8 @@ int main(int argc, char **argv) {
         std::vector<uint64_t> superseded;
         {
           std::lock_guard<std::mutex> lk(rjMu);
-          const std::string key = reformKey(sentence, mode, nonce, n);
+          const std::string key =
+              reformKey(sentence, mode, nonce, n, model.cfg.lang);
           for (auto it = reformCache.begin(); it != reformCache.end(); ++it)
             if (it->key == key) {
               resp["variants"] = it->variants;
@@ -2313,6 +2315,7 @@ int main(int argc, char **argv) {
           job.model = model.cfg.reformModel;
           job.cfgDir = model.cfgDir_;
           job.timeoutMs = model.cfg.reformTimeoutMs;
+          job.lang = model.cfg.lang;
           // Un job encore en file pour la MÊME phrase est périmé (l'engine
           // ouvre une connexion par demande : cycler les modes = plusieurs
           // clients, seule la dernière demande compte). L'évincé reçoit une

@@ -1,5 +1,48 @@
 #pragma once
+#include <cctype>
 #include <string>
+
+// Langue d'une phrase (FR par défaut = langue primaire de l'utilisateur) :
+// accents latins fréquents en FR → FR certain ; sinon vote des mots vides FR
+// vs EN. PARTAGÉ entre le backend Groq (reformulate_http.cpp) et le neural
+// local (neural.cpp). NB : la langue CHOISIE (cfg.lang "fr"/"en") prime sur
+// cette heuristique — elle ne sert qu'en "auto".
+inline bool reformIsFrench(const std::string &s) {
+  for (size_t i = 0; i + 1 < s.size(); ++i) {
+    if ((unsigned char)s[i] == 0xC3) {
+      unsigned char b = (unsigned char)s[i + 1];
+      // é è ê ë à â ç ô ö ù û ü î ï (formes minuscules courantes)
+      if (b == 0xA9 || b == 0xA8 || b == 0xAA || b == 0xAB || b == 0xA0 ||
+          b == 0xA2 || b == 0xA7 || b == 0xB4 || b == 0xB6 || b == 0xB9 ||
+          b == 0xBB || b == 0xBC || b == 0xAE || b == 0xAF)
+        return true; // un accent FR → quasi-certain français
+    }
+  }
+  std::string low;
+  low.reserve(s.size() + 2);
+  low += ' ';
+  for (char c : s)
+    low += (std::isalpha((unsigned char)c) ? (char)std::tolower((unsigned char)c)
+                                           : ' ');
+  low += ' ';
+  static const char *fr[] = {" le ", " la ", " les ", " un ", " une ", " des ",
+                             " je ", " tu ", " est ", " et ", " pour ", " que ",
+                             " pas ", " vous ", " ne ", " dans ", " avec ",
+                             " ce ", " sur ", " au ", " du ", " ca ", nullptr};
+  static const char *en[] = {" the ", " is ", " are ", " you ", " for ", " and ",
+                             " of ", " to ", " that ", " with ", " would ",
+                             " like ", " this ", " it ", " on ", " be ",
+                             " have ", " do ", " can ", " your ", " my ", nullptr};
+  auto count = [&](const char **ws) {
+    int n = 0;
+    for (int i = 0; ws[i]; ++i)
+      for (size_t p = low.find(ws[i]); p != std::string::npos;
+           p = low.find(ws[i], p + 1))
+        ++n;
+    return n;
+  };
+  return count(fr) >= count(en); // égalité → FR (langue primaire)
+}
 
 // Prompt système de reformulation pour (mode, langue source FR?, nombre de
 // variantes). PARTAGÉ entre le backend Groq (reformulate_http.cpp) et le neural

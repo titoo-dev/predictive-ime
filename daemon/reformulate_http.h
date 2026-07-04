@@ -17,10 +17,12 @@
 //   "empty"   HTTP 200 mais aucune variante utilisable
 // mode : rephrase|formal|simple|short|correct|translate (cf reform_prompts.h).
 // nonce : varie le seed → « régénérer » donne d'autres variantes.
+// lang : langue CHOISIE ("fr"/"en" épinglent la sortie ; "auto"/autre →
+//        heuristique reformIsFrench sur la phrase).
 std::vector<std::string> reformulateHttp(const std::string &sentence, int n,
                                          const std::string &baseUrl,
                                          const std::string &model,
                                          const std::string &cfgDir,
                                          long timeoutMs, const std::string &mode,
-                                         uint32_t nonce,
+                                         uint32_t nonce, const std::string &lang,
                                          std::string *errKind = nullptr);

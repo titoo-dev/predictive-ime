@@ -32,44 +32,6 @@ bool validUtf8(const std::string &s) {
   return true;
 }
 
-// Langue de la phrase (FR par défaut). Cf daemon/neural.cpp::isFrench — accents
-// latins FR fréquents → FR certain ; sinon vote des mots vides.
-bool isFrench(const std::string &s) {
-  for (size_t i = 0; i + 1 < s.size(); ++i) {
-    if ((unsigned char)s[i] == 0xC3) {
-      unsigned char b = (unsigned char)s[i + 1];
-      if (b == 0xA9 || b == 0xA8 || b == 0xAA || b == 0xAB || b == 0xA0 ||
-          b == 0xA2 || b == 0xA7 || b == 0xB4 || b == 0xB6 || b == 0xB9 ||
-          b == 0xBB || b == 0xBC || b == 0xAE || b == 0xAF)
-        return true;
-    }
-  }
-  std::string low;
-  low.reserve(s.size() + 2);
-  low += ' ';
-  for (char c : s)
-    low += (std::isalpha((unsigned char)c) ? (char)std::tolower((unsigned char)c)
-                                           : ' ');
-  low += ' ';
-  static const char *fr[] = {" le ", " la ", " les ", " un ", " une ", " des ",
-                             " je ", " tu ", " est ", " et ", " pour ", " que ",
-                             " pas ", " vous ", " ne ", " dans ", " avec ",
-                             " ce ", " sur ", " au ", " du ", " ca ", nullptr};
-  static const char *en[] = {" the ", " is ", " are ", " you ", " for ", " and ",
-                             " of ", " to ", " that ", " with ", " would ",
-                             " like ", " this ", " it ", " on ", " be ",
-                             " have ", " do ", " can ", " your ", " my ", nullptr};
-  auto count = [&](const char **ws) {
-    int n = 0;
-    for (int i = 0; ws[i]; ++i)
-      for (size_t p = low.find(ws[i]); p != std::string::npos;
-           p = low.find(ws[i], p + 1))
-        ++n;
-    return n;
-  };
-  return count(fr) >= count(en);
-}
-
 std::string trimmed(const std::string &s) {
   size_t a = s.find_first_not_of(" \t\r\n");
   if (a == std::string::npos) return {};
@@ -126,7 +88,8 @@ std::vector<std::string> reformulateHttp(const std::string &sentence, int n,
                                          const std::string &model,
                                          const std::string &cfgDir,
                                          long timeoutMs, const std::string &mode,
-                                         uint32_t nonce, std::string *errKind) {
+                                         uint32_t nonce, const std::string &lang,
+                                         std::string *errKind) {
   auto fail = [&](const char *kind) -> std::vector<std::string> {
     if (errKind)
       *errKind = kind;
@@ -147,8 +110,9 @@ std::vector<std::string> reformulateHttp(const std::string &sentence, int n,
   std::call_once(once, [] { curl_global_init(CURL_GLOBAL_DEFAULT); });
 
   // Prompt partagé avec le neural (reform_prompts.h) : mode + épinglage de
-  // langue (translate inverse la langue). On sur-génère (n+1).
-  bool fr = isFrench(sentence);
+  // langue (translate inverse la langue). La langue CHOISIE (cfg.lang
+  // "fr"/"en") prime ; l'heuristique ne sert qu'en "auto". Sur-génère (n+1).
+  bool fr = lang == "fr" || (lang != "en" && reformIsFrench(sentence));
   int want = n + 1;
   std::string sys = reformSystemPrompt(mode, fr, want);
 
