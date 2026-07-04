@@ -518,6 +518,14 @@ void englishTests(Harness &h) {
   h.key("Return");
   check("langue: →/Entrée applique le choix surligné (auto)",
         readCfg().find("\"lang\":\"auto\"") != std::string::npos, readCfg());
+  // AZERTY : la rangée de chiffres NON shiftée envoie &é"'(… — le panneau
+  // doit l'accepter comme 1-9 (sinon : fermeture SILENCIEUSE, rien appliqué —
+  // « je bascule en anglais et rien ne change »).
+  h.setConfig({{"lang", "fr"}});
+  h.key("Control+Shift+L");
+  h.key("eacute"); // touche « 2 » AZERTY sans Shift → English
+  check("langue: AZERTY 'é' (rangée 2) applique lang=en",
+        readCfg().find("\"lang\":\"en\"") != std::string::npos, readCfg());
   h.setConfig(json::object()); // restaure les défauts
 }
 
@@ -652,7 +660,7 @@ void reformTests(Harness h, fcitx::Instance *instance) {
                         h.candidates()[0] == "la planète",
                     h.candidates().empty() ? "vide" : h.candidates()[0]);
               h.expectCommit("la planète");
-              h.key("1");
+              h.key("ampersand"); // AZERTY : « 1 » sans Shift = '&'
               check("reform: avec sélection, pas de delete du champ",
                     h.ic->surroundingText().text() == "bonjour le monde",
                     h.ic->surroundingText().text());

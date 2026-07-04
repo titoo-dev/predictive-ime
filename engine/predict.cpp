@@ -712,6 +712,26 @@ private:
   int cursor_ = -1;
 };
 
+// Chiffre « physique » 0-based d'une touche pour la SÉLECTION dans les
+// panneaux MODAUX (langue, reformulation) : '1'-'9' directs, sinon la rangée
+// AZERTY non shiftée (&é"'(-è_ç — sur AZERTY les chiffres exigent Shift, et
+// « autre touche » fermait le panneau EN SILENCE : bascule de langue perdue),
+// sinon le keycode évdev 10-18 (rangée physique, indépendant de la
+// disposition — couvre BÉPO & co en session réelle ; les tests headless ne
+// portent pas de keycode). Ne PAS utiliser pendant la composition : é/è/ç/-
+// y sont des lettres.
+int panelDigit(const fcitx::Key &key, uint32_t cp) {
+  if (cp >= '1' && cp <= '9')
+    return int(cp - '1');
+  static const uint32_t az[] = {'&', 0xE9, '"', '\'', '(', '-', 0xE8, '_', 0xE7};
+  for (int i = 0; i < 9; i++)
+    if (cp && cp == az[i])
+      return i;
+  if (key.code() >= 10 && key.code() <= 18)
+    return key.code() - 10;
+  return -1;
+}
+
 // Panneau de LANGUE (Ctrl+Shift+L) : valeur écrite dans config.json + libellé
 // des chips. Extensible : ajouter une langue = une ligne ici (une fois le
 // support daemon/modèle en place).
@@ -789,8 +809,9 @@ public:
         event.filterAndAccept();
         return;
       }
-      if (!mod && cp >= '1' && cp <= '9' && int(cp - '1') < kNumLangChoices) {
-        applyLangChoice(ic, state, int(cp - '1'));
+      int ld = panelDigit(key, cp);
+      if (!mod && ld >= 0 && ld < kNumLangChoices) {
+        applyLangChoice(ic, state, ld);
         event.filterAndAccept();
         return;
       }
@@ -867,8 +888,9 @@ public:
         return;
       }
       int n = (int)state->cands.size();
-      if (!mod && cp >= '1' && cp <= '9' && int(cp - '1') < n) {
-        commitReformulation(ic, state, int(cp - '1'));
+      int rd = panelDigit(key, cp);
+      if (!mod && rd >= 0 && rd < n) {
+        commitReformulation(ic, state, rd);
         event.filterAndAccept();
         return;
       }
