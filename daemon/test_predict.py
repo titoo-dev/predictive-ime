@@ -514,7 +514,7 @@ try:
     set_config({}, 8)  # retour aux défauts pour la suite
 
     # 8bis) CACHE DE RÉCENCE : un mot déjà présent dans le texte avant le
-    #       curseur (`wide`) est boosté (recencyBoost, défaut 1.6). Contexte
+    #       curseur (`wide`) est boosté (recencyBoost, défaut 1.3). Contexte
     #       VIDE ou neutre pour ne pas mélanger avec le boost de langue.
     c = cands("sol")
     check("récence: sans wide, solar (3500) devant soleil (3000)",
