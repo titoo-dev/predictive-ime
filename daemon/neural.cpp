@@ -61,6 +61,10 @@ static bool valid_utf8(const std::string &s) {
 // éviter de trier les ~150k tokens du vocab à chaque pas.
 static llama_token sampleTok(const float *logits, int n_vocab, float temp,
                              float topP, int topK, std::mt19937 &rng) {
+  // topK vient d'un env réglable (IME_REFORM_TOPK) : 0 ou négatif ferait un
+  // idx(topK) énorme après conversion en size_t, et val[topK - 1] lirait hors
+  // borne. Borné des DEUX côtés ici, pas chez l'appelant.
+  if (topK < 1) topK = 1;
   if (topK > n_vocab) topK = n_vocab;
   std::vector<int> idx(topK, -1);
   std::vector<float> val(topK, -1e30f); // triés décroissants par insertion
