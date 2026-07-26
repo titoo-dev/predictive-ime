@@ -226,6 +226,7 @@ struct Harness {
   }
   // Préedit du PANNEAU (pas envoyé à l'application) : c'est là que vit la
   // requête du picker emoji, et le marqueur de mode grille pour l'UI.
+  std::string auxUp() { return ic->inputPanel().auxUp().toStringForCommit(); }
   std::string panelPreedit() {
     return ic->inputPanel().preedit().toStringForCommit();
   }
@@ -429,6 +430,48 @@ void interactionTests(Harness &h) {
   h.key("Home");
   h.key("Return");
   check("emoji: Fin puis Début sautent aux extrémités", true);
+
+  // PAGINATION : 30 candidats = 2 pages de 24. La grille n'en montre que 24,
+  // ↓ depuis la dernière ligne TOURNE LA PAGE (colonne conservée) et Entrée
+  // committe le bon emoji ABSOLU (page 2, colonne 1 → index 24).
+  {
+    std::vector<std::string> many;
+    for (int i = 0; i < 30; i++)
+      many.push_back("e" + std::to_string(i));
+    h.daemon->setReply(many, "", false);
+    h.expectCommit("e24");
+    h.key("Super+semicolon");
+    h.type("x");
+    check("emoji: la grille est bornée à une page de 24",
+          h.candidates().size() == 24,
+          std::to_string(h.candidates().size()));
+    h.key("Right"); // index 0 (page 1)
+    h.key("Down");  // 8
+    h.key("Down");  // 16
+    h.key("Down");  // 24 hors page → page 2, colonne 0
+    check("emoji: page 2 affichée (reste 6 candidats)",
+          h.candidates().size() == 6, std::to_string(h.candidates().size()));
+    check("emoji: indicateur de page", h.auxUp() == "2/2", h.auxUp());
+    h.key("Return");
+    check("emoji: ↓ tourne la page et Entrée committe l'emoji absolu", true);
+  }
+
+  // Page précédente : ↑ depuis la première ligne revient à la page d'avant.
+  {
+    std::vector<std::string> many;
+    for (int i = 0; i < 30; i++)
+      many.push_back("f" + std::to_string(i));
+    h.daemon->setReply(many, "", false);
+    h.expectCommit("f16");
+    h.key("Super+semicolon");
+    h.type("x");
+    h.key("Next");     // Page suivante (PgDn) → page 2
+    check("emoji: PgDn passe en page 2", h.auxUp() == "2/2", h.auxUp());
+    h.key("Up");       // remonte : page 1, dernière ligne, colonne 0 → 16
+    check("emoji: PgUp/↑ revient en page 1", h.auxUp() == "1/2", h.auxUp());
+    h.key("Return");
+    check("emoji: ↑ depuis la 1re ligne revient à la page précédente", true);
+  }
 
   // ponctuation : committe le mot (sans espace) ; le '.' file à l'application
   h.daemon->setReply({"fin"}, "", true);

@@ -180,6 +180,17 @@ P1(w)    = 0.7·Pcont(w) + 0.3·Pfreq(w)
   déclencheur : c'est un caractère normal partout (`10:30`, « bonjour :
   voici »). En interne le buffer reste `:requête` (l'UI déduit le mode grille
   de ce préfixe) — seule l'entrée dans le mode a changé.
+- **Même quand l'IME prédictif n'est PAS la méthode active** : fcitx n'envoie
+  les touches qu'à la méthode COURANTE, donc le raccourci serait mort tant
+  qu'on n'a pas fait Ctrl+Espace. L'addon écoute donc les touches en phase
+  `PreInputMethod` (`InputContextKeyEvent`, avant toute méthode) : si le
+  raccourci tombe alors qu'une autre méthode est active, il bascule sur
+  `predict` (`setCurrentInputMethod(ic, …, local=true)`) puis ouvre le picker.
+  Testable en headless avec un profil à deux méthodes (clavier par défaut).
+  **Piège de test** : sous Hyprland, `wtype` téléverse son PROPRE keymap et le
+  compositeur résout le keycode dans le sien — le raccourci injecté arrive
+  sous une autre touche (ici `Super+Escape`, donc le menu d'alimentation DMS).
+  L'injection ne vaut que sous sway ; sous Hyprland, tester à la main.
 - `Super+;` puis `coeur`→❤️, `soleil`→☀️, `fete`→🎉 — recherche par mot-clé
   CLDR replié (accents/ligatures : `cœur` marche aussi), le nom canonique
   (tts) domine les mots-clés, les **favoris appris remontent** (`learn` à
@@ -198,12 +209,20 @@ P1(w)    = 0.7·Pcont(w) + 0.3·Pfreq(w)
   ne saute plus à chaque frappe. Surface `surface_container_high`, champ de
   recherche `surface_container_highest`, textes secondaires
   `on_surface_variant` ; ligne d'aide clavier en bas.
+- **Pagination** : le daemon rend jusqu'à 96 emojis (4 pages), la grille en
+  montre 24 (`kGridPage`). `pageStart` est l'index absolu du premier emoji
+  affiché ; les candidats envoyés à l'UI ne sont QUE la page courante, et tout
+  accès passe par `candOf(state, indexLocal)` — sinon Entrée committerait
+  l'emoji de la page 1. ↓ sur la dernière ligne et ↑ sur la première
+  **tournent la page** en gardant la colonne ; ←/→ débordent aussi ;
+  **PgDn/PgUp** sautent d'une page ; Début/Fin vont au tout début / à la toute
+  fin. L'indicateur « 2/4 » part en `auxUp` et s'affiche à droite du champ de
+  recherche. Toute frappe revient en page 1.
 - **Navigation** : Tab/⇧Tab et **←/→ (entrée directe, sans Tab préalable)** de
   case en case, **↑/↓ d'une ligne** (±8), **Début/Fin** aux extrémités, 1-6
   sur la première ligne, taper affine en live. En grille les flèches sont
-  **bornées** (`navigate(..., clamp=true)`) : ← sur la 1re case ne renvoie
-  plus à la dernière, ↓ depuis une ligne incomplète tombe sur la dernière case
-  au lieu de reboucler en haut. Tab, lui, cycle toujours.
+  **bornées** (`navigate(..., clamp=true)`) au sein d'une page : ← sur la 1re
+  case ne renvoie plus à la dernière. Tab, lui, cycle toujours.
 - **Aucun résultat** : le picker reste ouvert et affiche « Aucun emoji pour
   … » (fermer la barre à la première faute de frappe est brutal, la frappe
   suivante peut retomber sur des résultats). Le littéral `:zzz` n'est jamais
@@ -634,6 +653,13 @@ vanilla → patch fcitx5 `INSTALL` + `getInputMethodV2Raw`,
 cf `ui/waylandim-public.patch`). Rendu **software** offscreen
 (`QQuickView::grabWindow` → `QImage` → buffer `wl_shm`), sans event-loop Qt
 (monothread, comme le module wayland).
+
+**Surlignage** : le pill n'interpole PAS un index flottant mais une
+progression `hlT` 0→1 entre deux cases (`hlFrom` → `hlTo`), et QML lerpe
+directement leurs positions. Avec un index flottant, un saut de ligne dans la
+grille (±8) faisait défiler le pill par toutes les cases intermédiaires : il
+partait à droite au lieu de descendre. Maintenant le trajet est une droite,
+diagonale comprise (voir la capture `picker-morph-mid.png` du rendu de test).
 
 **Animations** : l'état (apparition, position du pill, fondu de fermeture)
 est avancé côté C++ (steady_clock + ease-out cubic), exposé au QML en context

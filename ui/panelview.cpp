@@ -18,7 +18,8 @@
 
 // QML : TROIS rendus dans une même surface, choisis par `listMode` / `gridMode` —
 //  • COMPACT (mots) : barre de chips horizontales dense (façon Gboard),
-//    PILL accent qui GLISSE entre les candidats (hlPos flottant animé en C++).
+//    PILL accent qui GLISSE entre les candidats (hlFrom→hlTo, progression
+//    hlT animée en C++ : trajet en ligne droite, diagonale comprise).
 //  • PICKER EMOJI (`gridMode`) : surface Material 3 — champ de recherche en
 //    tête (la requête ne va PLUS dans l'application, cf engine), grille 8
 //    colonnes de cases carrées, case sélectionnée en secondaryContainer, ligne
@@ -81,16 +82,17 @@ Item {
             // en x ET en y (la grille emoji a plusieurs lignes)
             Rectangle {
                 id: pill
-                visible: hlPos >= 0 && rep.count > 0
-                property real p: Math.max(0, Math.min(hlPos, rep.count - 1))
-                property int i0: Math.floor(p)
-                property real f: p - i0
-                property Item a: rep.count > 0 ? rep.itemAt(i0) : null
+                visible: highlight >= 0 && rep.count > 0
+                // interpolation DIRECTE entre la case de départ et celle
+                // d'arrivée (cf hlT côté C++) : trajet en ligne droite
+                property Item a: rep.count > 0
+                    ? rep.itemAt(Math.max(0, Math.min(hlFrom, rep.count - 1))) : null
                 property Item b: rep.count > 0
-                    ? rep.itemAt(Math.min(i0 + 1, rep.count - 1)) : null
-                x: a ? row.x + a.x + (b ? (b.x - a.x) * f : 0) : 0
-                y: a ? row.y + a.y + (b ? (b.y - a.y) * f : 0) : 0
-                width: a ? a.width + (b ? (b.width - a.width) * f : 0) : 0
+                    ? rep.itemAt(Math.max(0, Math.min(hlTo, rep.count - 1))) : null
+                property real f: hlT
+                x: a && b ? row.x + a.x + (b.x - a.x) * f : 0
+                y: a && b ? row.y + a.y + (b.y - a.y) * f : 0
+                width: a && b ? a.width + (b.width - a.width) * f : 0
                 height: 26
                 radius: 8
                 color: colors.accent
@@ -127,7 +129,7 @@ Item {
                             border.width: 1
                             border.color: colors.accent
                             opacity: 0.9
-                            visible: isAuto && hlPos < 0
+                            visible: isAuto && highlight < 0
                         }
                         Text {
                             id: label
@@ -135,7 +137,7 @@ Item {
                             text: modelData
                             width: Math.min(implicitWidth, 190)
                             elide: Text.ElideRight
-                            color: hlPos >= 0 && index === Math.round(hlPos)
+                            color: index === highlight
                                    ? colors.onAccent : colors.onSurface
                             font.pixelSize: emoji ? 17 : 14
                             // NB: font.families (plural, QStringList) is NOT a
@@ -226,22 +228,32 @@ Item {
                     radius: 0.75
                     color: colors.accent
                 }
+                Text {                       // page courante (« 2/4 »)
+                    visible: headerText.length > 0
+                    anchors.right: parent.right
+                    anchors.rightMargin: 12
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: headerText
+                    color: colors.onSurfaceVariant
+                    font.pixelSize: 11
+                    font.family: "Maple Mono NF"
+                }
             }
 
-            // pill de sélection : même interpolation que la barre compacte
-            // (hlPos flottant animé en C++), en x ET en y — la grille a
-            // plusieurs lignes. M3 : état sélectionné = secondaryContainer.
+            // pill de sélection : interpolation directe départ→arrivée en x ET
+            // en y (la grille a plusieurs lignes ; un saut de ligne descend
+            // en diagonale au lieu de balayer la ligne).
+            // M3 : état sélectionné = secondaryContainer.
             Rectangle {
                 id: gpill
-                visible: hlPos >= 0 && grep.count > 0
-                property real p: Math.max(0, Math.min(hlPos, grep.count - 1))
-                property int i0: Math.floor(p)
-                property real f: p - i0
-                property Item a: grep.count > 0 ? grep.itemAt(i0) : null
+                visible: highlight >= 0 && grep.count > 0
+                property Item a: grep.count > 0
+                    ? grep.itemAt(Math.max(0, Math.min(hlFrom, grep.count - 1))) : null
                 property Item b: grep.count > 0
-                    ? grep.itemAt(Math.min(i0 + 1, grep.count - 1)) : null
-                x: a ? grid.x + a.x + (b ? (b.x - a.x) * f : 0) : 0
-                y: a ? grid.y + a.y + (b ? (b.y - a.y) * f : 0) : 0
+                    ? grep.itemAt(Math.max(0, Math.min(hlTo, grep.count - 1))) : null
+                property real f: hlT
+                x: a && b ? grid.x + a.x + (b.x - a.x) * f : 0
+                y: a && b ? grid.y + a.y + (b.y - a.y) * f : 0
                 width: root.cell
                 height: root.cell
                 radius: 10
@@ -275,7 +287,7 @@ Item {
                             border.width: 1
                             border.color: colors.accent
                             opacity: 0.55
-                            visible: isAuto && hlPos < 0
+                            visible: isAuto && highlight < 0
                         }
                         Text {
                             anchors.centerIn: parent
@@ -402,8 +414,7 @@ Item {
                 delegate: Item {
                     required property int index
                     required property string modelData
-                    readonly property bool sel: hlPos >= 0
-                        && index === Math.round(hlPos)
+                    readonly property bool sel: index === highlight
                     width: listLayout.width
                     height: Math.max(30, vtxt.implicitHeight + 13)
 
@@ -645,7 +656,9 @@ PanelView::PanelView() {
     colorsStamp_ = colorsStamp();
     ctx->setContextProperty("candidates", QStringList{});
     ctx->setContextProperty("highlight", -1);
-    ctx->setContextProperty("hlPos", -1.0);
+    ctx->setContextProperty("hlFrom", -1);
+    ctx->setContextProperty("hlTo", -1);
+    ctx->setContextProperty("hlT", 1.0);
     ctx->setContextProperty("appear", 1.0);
     ctx->setContextProperty("contentFade", 1.0);
     ctx->setContextProperty("autoMark", QVariantList{});
@@ -707,12 +720,24 @@ void PanelView::update(const QStringList &candidates, int highlight,
         appear_.done(now))
         fade_ = {0.35, 1.0, now, animMs(80)};
     composing_ = composing;
-    if (candidates != cands_ || highlight < 0 || hl_.to < 0) {
+    // Surlignage : on anime une PROGRESSION 0→1 entre la case de DÉPART et
+    // celle d'ARRIVÉE, pas un index flottant. Avec un index flottant, un saut
+    // de ligne (±8 dans la grille) faisait défiler le pill par toutes les
+    // cases intermédiaires — il traversait l'écran de gauche à droite au lieu
+    // de descendre. Ici QML interpole directement entre deux cases : le
+    // déplacement est une droite, y compris en diagonale.
+    if (candidates != cands_ || highlight < 0 || highlight_ < 0) {
         // nouveau contenu (frappe) ou pas de surlignage de départ : pas de
         // morph — le pill saute (ou disparaît), seul Tab→Tab anime.
-        hl_ = {double(highlight), double(highlight), now, 0};
+        hlFrom_ = hlTo_ = highlight;
+        hl_ = {1.0, 1.0, now, 0};
     } else if (highlight != highlight_) {
-        hl_ = {hl_.at(now), double(highlight), now, animMs(110)};
+        // morph interrompu en vol : on repart de la case VISÉE (110 ms, la
+        // reprise ne se voit pas) plutôt que de plomber le code avec les
+        // positions en pixels, que seul QML connaît.
+        hlFrom_ = hl_.done(now) ? hlTo_ : hlTo_;
+        hlTo_ = highlight;
+        hl_ = {0.0, 1.0, now, animMs(110)};
     }
     if (candidates != cands_) {
         emojiMark_.clear();
@@ -758,7 +783,7 @@ void PanelView::hidden() {
     headerText_.clear();
     searchText_.clear();
     hl_ = {};
-    hl_.to = -1.0;
+    hlFrom_ = hlTo_ = -1;
     fade_ = {1.0, 1.0, {}, 0};
 }
 
@@ -788,7 +813,9 @@ QImage PanelView::render() {
     }
     ctx->setContextProperty("candidates", cands_);
     ctx->setContextProperty("highlight", highlight_);
-    ctx->setContextProperty("hlPos", hl_.at(now));
+    ctx->setContextProperty("hlFrom", hlFrom_);
+    ctx->setContextProperty("hlTo", hlTo_);
+    ctx->setContextProperty("hlT", hl_.at(now));
     ctx->setContextProperty("appear",
                             hiding_ ? hide_.at(now) : appear_.at(now));
     ctx->setContextProperty("contentFade", fade_.at(now));

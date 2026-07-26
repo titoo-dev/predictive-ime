@@ -540,7 +540,7 @@ struct Model {
     std::sort(byW.begin(), byW.end(),
               [](auto &a, auto &b) { return a.first > b.first; });
     topEmojis_.clear();
-    for (size_t i = 0; i < byW.size() && topEmojis_.size() < 32; i++)
+    for (size_t i = 0; i < byW.size() && topEmojis_.size() < 96; i++)
       topEmojis_.push_back(byW[i].second);
     if (!emojiKeys_.empty())
       fprintf(stderr, "[predictord] %zu clés emoji, %zu emojis\n",
@@ -1306,9 +1306,10 @@ struct Model {
                  const std::vector<std::pair<std::string, double>>
                      &neuralCands = {}) {
     Result res;
-    // mode emoji : la barre devient une GRILLE (3×8) → 24 candidats.
+    // mode emoji : la barre devient une GRILLE (3×8). L'engine en affiche 24
+    // par PAGE et pagine avec ↑/↓/PgUp/PgDn → on en rend jusqu'à 4 pages.
     if (!prefix.empty() && prefix[0] == ':')
-      k = 24;
+      k = 96;
     std::unordered_set<std::string> seen;
     auto push = [&](const std::string &w) {
       if ((int)res.candidates.size() < k && seen.insert(w).second) {

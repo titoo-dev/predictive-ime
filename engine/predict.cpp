@@ -663,6 +663,10 @@ struct PredictState : public fcitx::InputContextProperty {
   // Génération de la barre mot-suivant (E5) : un refresh neural arrivé APRÈS
   // que l'état a changé (frappe, commit, reset) est jeté (gen différente).
   uint64_t nextWordGen = 0;
+  // Picker emoji : la grille montre une PAGE de 24 (3×8) ; `pageStart` est
+  // l'index absolu du premier emoji affiché. Les flèches débordent d'une page
+  // à l'autre, la barre de recherche affiche « 2/4 ».
+  size_t pageStart = 0;
   // Ce client a-t-il PUBLIÉ un texte environnant depuis qu'il a le focus ?
   // La capacité annoncée ne suffit pas : le cache de fcitx peut dater d'un
   // AUTRE contexte, et un client qui n'implémente pas set_surrounding_text
@@ -751,6 +755,12 @@ int panelDigit(const fcitx::Key &key, uint32_t cp) {
   return -1;
 }
 
+// Grille du picker emoji : 8 colonnes × 3 lignes par PAGE. Le daemon rend
+// jusqu'à 4 pages de résultats ; les flèches débordent d'une page à l'autre.
+constexpr int kGridCols = 8;
+constexpr int kGridRows = 3;
+constexpr int kGridPage = kGridCols * kGridRows;
+
 // Panneau de LANGUE (Ctrl+Shift+L) : valeur écrite dans config.json + libellé
 // des chips. Extensible : ajouter une langue = une ligne ici (une fois le
 // support daemon/modèle en place).
@@ -794,9 +804,57 @@ public:
           auto &e = static_cast<fcitx::InputContextEvent &>(event);
           e.inputContext()->propertyFor(&factory_)->sawSurrounding = true;
         });
+    // Le picker emoji ne doit PAS dépendre de l'activation de l'IME : sans
+    // ça, Super+; ne fait rien tant qu'on n'a pas basculé (Ctrl+Espace) sur
+    // « predict », puisque fcitx n'envoie les touches qu'à la méthode
+    // COURANTE. On écoute donc les touches en phase PreInputMethod (avant
+    // toute méthode) : si le raccourci tombe alors qu'une autre méthode est
+    // active, on bascule sur predict et on ouvre le picker dans la foulée.
+    hotkeyWatcher_ = instance_->watchEvent(
+        fcitx::EventType::InputContextKeyEvent,
+        fcitx::EventWatcherPhase::PreInputMethod, [this](fcitx::Event &event) {
+          auto &ke = static_cast<fcitx::KeyEvent &>(event);
+          if (ke.isRelease() || !isEmojiHotkey(ke.key()))
+            return;
+          auto *ic = ke.inputContext();
+          if (instance_->inputMethod(ic) == "predict")
+            return; // notre keyEvent s'en charge (et gère la fermeture)
+          instance_->setCurrentInputMethod(ic, "predict", /*local=*/true);
+          // la bascule passe par reset() : on ouvre APRÈS, sinon le picker
+          // serait effacé dans la foulée.
+          toggleEmojiPicker(ic, ic->propertyFor(&factory_));
+          ke.filterAndAccept();
+        });
   }
 
   ~PredictEngine() override { disarmRefresh(); }
+
+  // Le raccourci du picker. Sur AZERTY, ';' est en Shift+, → le keysym peut
+  // remonter en ':' ; on accepte les deux.
+  static bool isEmojiHotkey(const fcitx::Key &key) {
+    return (key.sym() == FcitxKey_semicolon || key.sym() == FcitxKey_colon) &&
+           key.states().test(fcitx::KeyState::Super);
+  }
+
+  // Ouvre le picker (ou le referme s'il est déjà ouvert). Le mot en cours est
+  // committé tel quel, SANS apprendre : c'est un fragment tapé, pas un mot
+  // validé.
+  void toggleEmojiPicker(fcitx::InputContext *ic, PredictState *state) {
+    if (isEmojiBuffer(state->buffer)) {
+      state->buffer.clear();
+      state->navigating = false;
+      state->pageStart = 0;
+      clearPanel(ic);
+      return;
+    }
+    if (!state->buffer.empty())
+      commitWord(ic, state, state->buffer, /*trailingSpace=*/false,
+                 /*learn=*/false);
+    state->buffer = ":";
+    state->navigating = false;
+    state->pageStart = 0;
+    updateCompletion(ic, state);
+  }
 
   // Le texte environnant de CE client est-il utilisable (lecture du contexte,
   // et surtout SUPPRESSION de texte déjà écrit) ?
@@ -1030,20 +1088,8 @@ public:
     //      (fragment tapé, pas un mot validé). Re-presser referme le picker.
     //      NB: sur AZERTY, ';' est en Shift+, → le keysym peut remonter en
     //      ':' ; on accepte les deux.
-    if ((sym == FcitxKey_semicolon || sym == FcitxKey_colon) &&
-        states.test(fcitx::KeyState::Super)) {
-      if (!state->buffer.empty() && state->buffer[0] == ':') {
-        state->buffer.clear();
-        state->navigating = false;
-        clearPanel(ic);
-      } else {
-        if (!state->buffer.empty())
-          commitWord(ic, state, state->buffer, /*trailingSpace=*/false,
-                     /*learn=*/false);
-        state->buffer = ":";
-        state->navigating = false;
-        updateCompletion(ic, state);
-      }
+    if (isEmojiHotkey(key)) {
+      toggleEmojiPicker(ic, state);
       event.filterAndAccept();
       return;
     }
@@ -1086,7 +1132,7 @@ public:
     if (!mod && cp && isWordExtender(cp, state->buffer.empty())) {
       if (state->navigating && cp >= '1' && cp <= '6' &&
           int(cp - '1') < (int)state->cands.size()) {
-        commitWord(ic, state, state->cands[cp - '1'], /*trailingSpace=*/true);
+        commitWord(ic, state, candOf(state, cp - '1'), /*trailingSpace=*/true);
         event.filterAndAccept();
         return;
       }
@@ -1201,8 +1247,26 @@ public:
         event.filterAndAccept();
         return;
       }
+      // ↑/↓ : une LIGNE. Au bord de la grille on ne s'arrête pas, on TOURNE
+      // LA PAGE (colonne conservée) — c'est le « scroll » du picker.
       if (!mod && emojiGrid && (sym == FcitxKey_Down || sym == FcitxKey_Up)) {
-        navigate(ic, state, sym == FcitxKey_Down ? +8 : -8, /*clamp=*/true);
+        bool down = sym == FcitxKey_Down;
+        int col = state->navigating ? state->navIndex % kGridCols : 0;
+        int next = state->navigating ? state->navIndex + (down ? +8 : -8)
+                                     : (down ? 0 : (kGridRows - 1) * kGridCols);
+        if (!state->navigating || (next >= 0 && next < pageCount(state)))
+          navigate(ic, state, state->navigating ? (down ? +8 : -8) : 0,
+                   /*clamp=*/true);
+        else if (!turnPage(ic, state, down ? +1 : -1, col))
+          navigate(ic, state, down ? +8 : -8, /*clamp=*/true); // dernière page
+        event.filterAndAccept();
+        return;
+      }
+      // Page suivante / précédente en un coup.
+      if (!mod && emojiGrid &&
+          (sym == FcitxKey_Page_Down || sym == FcitxKey_Page_Up)) {
+        turnPage(ic, state, sym == FcitxKey_Page_Down ? +1 : -1,
+                 state->navigating ? state->navIndex % kGridCols : 0);
         event.filterAndAccept();
         return;
       }
@@ -1210,17 +1274,32 @@ public:
       // marteler la flèche). Hors grille elles filent à l'application.
       if (!mod && emojiGrid &&
           (sym == FcitxKey_Home || sym == FcitxKey_End)) {
-        int sz = (int)state->cands.size();
-        navigateTo(ic, state, sym == FcitxKey_Home ? 0 : sz - 1);
+        if (sym == FcitxKey_Home)
+          state->pageStart = 0;
+        else
+          state->pageStart = (state->cands.size() - 1) / kGridPage * kGridPage;
+        setCandidates(ic, state);
+        showPageIndicator(ic, state);
+        navigateTo(ic, state, sym == FcitxKey_Home ? 0 : pageCount(state) - 1);
         event.filterAndAccept();
         return;
       }
       // ←/→ naviguent aussi ; en GRILLE emoji ils ENTRENT directement (pas
       // besoin de Tab d'abord — sans ça ils committaient le littéral ':xyz'
-      // et la touche fuyait vers l'application) et se BORNENT aux extrémités.
+      // et la touche fuyait vers l'application) et débordent de page en page.
       if (!mod && (state->navigating || emojiGrid) &&
           (sym == FcitxKey_Left || sym == FcitxKey_Right)) {
-        navigate(ic, state, sym == FcitxKey_Right ? +1 : -1, emojiGrid);
+        bool right = sym == FcitxKey_Right;
+        int next = state->navIndex + (right ? +1 : -1);
+        if (emojiGrid && state->navigating &&
+            (next < 0 || next >= pageCount(state)) &&
+            turnPage(ic, state, right ? +1 : -1,
+                     right ? 0 : kGridCols - 1)) {
+          // page tournée : on entre par le bord opposé
+          navigateTo(ic, state, right ? 0 : pageCount(state) - 1);
+        } else {
+          navigate(ic, state, right ? +1 : -1, emojiGrid);
+        }
         event.filterAndAccept();
         return;
       }
@@ -1262,7 +1341,7 @@ public:
           // snippet AVEC requête : Entrée prend le 1er candidat (comme
           // l'Espace, mais sans espace final). Le snippet nu (';' seul) garde
           // le comportement littéral — Entrée = retour-ligne.
-          commitWord(ic, state, state->cands[0], /*space=*/false);
+          commitWord(ic, state, candOf(state, 0), /*space=*/false);
           event.filterAndAccept();
         } else {
           commitWord(ic, state, state->buffer, /*space=*/false);
@@ -1342,7 +1421,7 @@ public:
       }
       if (cp >= '1' && cp <= '6' &&
           int(cp - '1') < (int)state->cands.size()) {
-        commitWord(ic, state, state->cands[cp - '1'], /*space=*/true);
+        commitWord(ic, state, candOf(state, cp - '1'), /*space=*/true);
         event.filterAndAccept();
         return;
       }
@@ -1573,13 +1652,63 @@ private:
       state->ctx.erase(state->ctx.begin());
   }
 
-  const std::string &highlighted(PredictState *state) {
+  // « 2/4 » dans le champ de recherche du picker (auxUp, que la barre QML
+  // rend à droite du champ). Une seule page → rien à afficher.
+  void showPageIndicator(fcitx::InputContext *ic, PredictState *state) {
+    int total = int(state->cands.size());
+    if (total <= kGridPage)
+      return;
+    int pages = (total + kGridPage - 1) / kGridPage;
+    int cur = int(state->pageStart) / kGridPage + 1;
+    ic->inputPanel().setAuxUp(
+        fcitx::Text(std::to_string(cur) + "/" + std::to_string(pages)));
+  }
+
+  // Change de page (delta en pages) en gardant la COLONNE, et surligne la
+  // ligne d'arrivée : vers le bas on entre par le haut, vers le haut par le
+  // bas. Rend false si la page n'existe pas (on est déjà au bout).
+  bool turnPage(fcitx::InputContext *ic, PredictState *state, int delta,
+                int column) {
+    long start = long(state->pageStart) + long(delta) * kGridPage;
+    if (start < 0 || start >= (long)state->cands.size())
+      return false;
+    state->pageStart = size_t(start);
+    int last = pageCount(state) - 1;
+    int idx = delta > 0 ? column : (kGridRows - 1) * kGridCols + column;
+    state->navigating = true;
+    state->navIndex = std::max(0, std::min(idx, last));
+    setCandidates(ic, state);
+    showPageIndicator(ic, state);
+    if (auto list = ic->inputPanel().candidateList())
+      if (auto *cl = dynamic_cast<PredictCandidateList *>(list.get()))
+        cl->setCursorIndex(state->navIndex);
+    ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
+    return true;
+  }
+
+  // Candidat d'index LOCAL à la page affichée (le picker emoji n'en montre
+  // que 24 à la fois ; partout ailleurs la page vaut toute la liste).
+  const std::string &candOf(PredictState *state, int local) {
     if (state->cands.empty())
       return state->buffer;
-    int i = state->navIndex;
-    if (i < 0 || i >= (int)state->cands.size())
-      i = 0;
+    size_t i = state->pageStart + size_t(local < 0 ? 0 : local);
+    if (i >= state->cands.size())
+      i = state->pageStart < state->cands.size() ? state->pageStart : 0;
     return state->cands[i];
+  }
+
+  const std::string &highlighted(PredictState *state) {
+    return candOf(state, state->navIndex);
+  }
+
+  // Nombre de candidats affichés dans la page courante.
+  int pageCount(PredictState *state) {
+    size_t rest = state->cands.size() > state->pageStart
+                      ? state->cands.size() - state->pageStart
+                      : 0;
+    return int(isEmojiBuffer(state->buffer)
+                   ? std::min<size_t>(rest, kGridPage)
+                   : rest);
   }
 
   // Mot retenu quand on appuie sur Espace en cours de composition :
@@ -1741,11 +1870,13 @@ private:
     // dans le préedit du PANNEAU — la barre QML en fait un champ de recherche,
     // et l'UI fcitx classique l'affiche au-dessus des candidats.
     if (isEmojiBuffer(state->buffer)) {
+      state->pageStart = 0; // la frappe change les résultats → retour page 1
       fcitx::Text query(state->buffer);
       query.setCursor(state->buffer.size());
       ic->inputPanel().setPreedit(query);
       ic->inputPanel().setClientPreedit(fcitx::Text{});
       setCandidates(ic, state);
+      showPageIndicator(ic, state);
       ic->updatePreedit();
       ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
       return;
@@ -2124,9 +2255,15 @@ private:
     bool willAuto = !state->buffer.empty() && !state->autocomplete.empty() &&
                     !state->vetoAuto &&
                     (!state->literalIsWord || state->accentOnly);
-    for (auto &w : state->cands)
+    size_t from = state->pageStart < state->cands.size() ? state->pageStart : 0;
+    size_t to = isEmojiBuffer(state->buffer)
+                    ? std::min(state->cands.size(), from + kGridPage)
+                    : state->cands.size();
+    for (size_t i = from; i < to; i++) {
+      const std::string &w = state->cands[i];
       list->append(applyCase(w, state->buffer),
                    willAuto && w == state->autocomplete);
+    }
     list->setCursorIndex(-1); // aucun surlignage tant qu'on ne navigue pas
     ic->inputPanel().setCandidateList(std::move(list));
   }
@@ -2153,6 +2290,10 @@ private:
   // canEditSurrounding).
   std::unique_ptr<fcitx::HandlerTableEntry<fcitx::EventHandler>>
       surroundingWatcher_;
+  // Super+; capté AVANT toute méthode d'entrée : le picker s'ouvre même quand
+  // l'IME prédictif n'est pas la méthode active.
+  std::unique_ptr<fcitx::HandlerTableEntry<fcitx::EventHandler>>
+      hotkeyWatcher_;
   // Dernier mode de reformulation utilisé — le prochain Ctrl+Alt+R repart de
   // là (partagé entre les contextes : préférence de session, pas de champ).
   int lastReformMode_ = 0;

@@ -93,13 +93,17 @@ bare proclitic `j'` (rarely the intended final word). `proclisisDemote`
 
 **Emoji picker.** Always on, opened with **Super+;** at any point: empty
 buffer, mid-word (the word in progress is committed as typed), or with the
-next-word bar open; pressing it again closes the picker. It is a Material 3
-surface with its own search field, so the query stays in the picker and is
-never typed into your document. Type a CLDR keyword (`coeur`, `soleil`,
-`fire`…) to filter the 3×8 grid, or pick straight from your recently-used
-favourites. Arrows move cell by cell, up/down by row, Home/End jump to either
-end, Enter inserts, Escape closes without inserting anything. A typed `:` is a
-plain character everywhere (`10:30`).
+next-word bar open; pressing it again closes the picker. It works **even when
+the predictive input method is not the active one** (the addon watches the
+shortcut before any input method, switches to `predict` and opens the picker),
+so no Ctrl+Space first. It is a Material 3 surface with its own search field,
+so the query stays in the picker and is never typed into your document. Type a
+CLDR keyword (`coeur`, `soleil`, `fire`…) to filter the grid, or pick straight
+from your recently-used favourites. Up to 96 results, **24 per page**: arrows
+move cell by cell and by row, spilling over to the next/previous page at the
+edges, PgDn/PgUp jump a page, Home/End go to either end, and the current page
+shows as `2/4` in the search field. Enter inserts, Escape closes without
+inserting anything. A typed `:` is a plain character everywhere (`10:30`).
 
 **French typography (opt-in).** `frenchSpacing` (default `false`) inserts a
 narrow no-break space (U+202F) before `;` `:` `!` `?` and the closing guillemet
