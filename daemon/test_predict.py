@@ -615,6 +615,19 @@ try:
              "mode": "rephrase", "nonce": 0})
     check("reformulate: 401 → error 'auth', aucune variante",
           r.get("error") == "auth" and r.get("variants") == [], str(r))
+    # Le header Authorization ne doit jamais partir en clair : un reformBaseUrl
+    # http:// hors boucle locale est refusé avant même la lecture de la clé.
+    # (127.0.0.1 reste autorisé — c'est ce que fait le mock ci-dessus.)
+    before = len(hits)
+    set_config({"reformBaseUrl": "http://api.groq.com/openai/v1/chat/completions",
+                "reformTimeoutMs": 3000}, 11)
+    r = req({"reformulate": "phrase envoyée en clair", "n": 2,
+             "mode": "rephrase", "nonce": 0})
+    check("reformulate: baseUrl http:// distant → error 'bad_url', aucun appel",
+          r.get("error") == "bad_url" and r.get("variants") == [] and
+          len(hits) == before, str(r))
+    set_config({"reformBaseUrl": f"http://127.0.0.1:{httpd.server_port}",
+                "reformTimeoutMs": 3000}, 12)
     # reformCheck : validation de clé (dialogue --groq-key). Clé refusée…
     r = req({"reformCheck": True})
     check("reformCheck: clé refusée → keyValid false, error auth",

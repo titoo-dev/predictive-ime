@@ -66,6 +66,30 @@ std::string readKey(const std::string &cfgDir) {
   return {};
 }
 
+// Le token Groq part dans un header Authorization, et reformBaseUrl est
+// rechargé à chaud depuis config.json : un baseUrl en clair enverrait la clé en
+// cleartext. On exige donc https, sauf sur la boucle locale (le mock HTTP des
+// tests écoute sur 127.0.0.1). Le parsing est délégué à curl — même analyseur
+// que celui qui fera la requête, donc pas de divergence exploitable entre le
+// host qu'on valide et celui qu'on contacte.
+bool urlSafeForToken(const std::string &url) {
+  CURLU *h = curl_url();
+  if (!h) return false;
+  bool ok = false;
+  if (curl_url_set(h, CURLUPART_URL, url.c_str(), 0) == CURLUE_OK) {
+    char *scheme = nullptr, *host = nullptr;
+    curl_url_get(h, CURLUPART_SCHEME, &scheme, 0);
+    curl_url_get(h, CURLUPART_HOST, &host, 0);
+    std::string s = scheme ? scheme : "", ho = host ? host : "";
+    ok = s == "https" || (s == "http" && (ho == "127.0.0.1" ||
+                                          ho == "localhost" || ho == "::1"));
+    curl_free(scheme);
+    curl_free(host);
+  }
+  curl_url_cleanup(h);
+  return ok;
+}
+
 size_t writeCb(char *ptr, size_t size, size_t nmemb, void *userdata) {
   static_cast<std::string *>(userdata)->append(ptr, size * nmemb);
   return size * nmemb;
@@ -99,15 +123,25 @@ std::vector<std::string> reformulateHttp(const std::string &sentence, int n,
     *errKind = "ok";
   if (sentence.empty()) return fail("empty");
   if (n < 1) n = 3;
+
+  static std::once_flag once;
+  std::call_once(once, [] { curl_global_init(CURL_GLOBAL_DEFAULT); });
+
+  // Vérifié AVANT de lire la clé : une URL non fiable ne doit même pas faire
+  // toucher au secret sur le disque.
+  if (!urlSafeForToken(baseUrl)) {
+    if (getenv("IME_DEBUG"))
+      fprintf(stderr, "[reform-http] baseUrl refusé (https requis hors "
+                      "boucle locale) : %.200s\n", baseUrl.c_str());
+    return fail("bad_url");
+  }
+
   std::string key = readKey(cfgDir);
   if (key.empty()) {
     if (getenv("IME_DEBUG"))
       fprintf(stderr, "[reform-http] pas de clé (GROQ_API_KEY / groq.key)\n");
     return fail("no_key");
   }
-
-  static std::once_flag once;
-  std::call_once(once, [] { curl_global_init(CURL_GLOBAL_DEFAULT); });
 
   // Prompt partagé avec le neural (reform_prompts.h) : mode + épinglage de
   // langue (translate inverse la langue). La langue CHOISIE (cfg.lang
@@ -143,6 +177,9 @@ std::vector<std::string> reformulateHttp(const std::string &sentence, int n,
   curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp);
   curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, timeoutMs > 0 ? timeoutMs : 20000);
   curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L); // sûr en contexte multi-thread
+  // FOLLOWLOCATION reste à 0 (défaut) : une redirection pourrait rejouer le
+  // header Authorization vers un autre hôte/schéma. Si on l'active un jour,
+  // ajouter CURLOPT_REDIR_PROTOCOLS_STR "https".
   CURLcode rc = curl_easy_perform(curl);
   long http = 0;
   curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http);

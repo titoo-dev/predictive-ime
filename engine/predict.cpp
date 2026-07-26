@@ -1794,6 +1794,8 @@ private:
       msg = "Clé API refusée — Entrée : reconfigurer · Échap";
     else if (state->reformNotice == "no_text")
       msg = "Rien à reformuler — sélectionnez du texte";
+    else if (state->reformNotice == "bad_url")
+      msg = "reformBaseUrl refusé — https requis (voir config.json)";
     else
       msg = "⚠ Reformulation indisponible (réseau/API)";
     state->cands = {msg};
