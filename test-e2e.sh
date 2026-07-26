@@ -11,15 +11,15 @@
 # mortes après quelques mots) et la mutilation des contractions (j'ai → jail).
 #
 # Prérequis (téléchargés par nix au besoin) : sway, zenity, wtype, dbus.
-# Usage : ./ime/test-e2e.sh   (depuis la racine du repo)
+# Usage : ./test-e2e.sh   (depuis le repo)
 set -uo pipefail
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" # le repo lui-même (son NOM ne compte pas)
 WT=/tmp/ime-e2e; rm -rf "$WT"; mkdir -p "$WT/config/fcitx5" "$WT/cache" "$WT/xdg"
 
 echo "==> build paquets + modèle + outils"
-ENGINE=$(nix build "$REPO/ime#fcitx5-predict" --no-link --print-out-paths 2>/dev/null)
-DAEMON=$(nix build "$REPO/ime#predictord" --no-link --print-out-paths 2>/dev/null)
-MODEL=$(nix build  "$REPO/ime#model" --no-link --print-out-paths 2>/dev/null)
+ENGINE=$(nix build "$REPO#fcitx5-predict" --no-link --print-out-paths 2>/dev/null)
+DAEMON=$(nix build "$REPO#predictord" --no-link --print-out-paths 2>/dev/null)
+MODEL=$(nix build  "$REPO#model" --no-link --print-out-paths 2>/dev/null)
 FCITX5=$(nix build nixpkgs#fcitx5 --no-link --print-out-paths 2>/dev/null)
 SWAY=$(nix build  nixpkgs#sway   --no-link --print-out-paths 2>/dev/null)
 ZENITY=$(nix build nixpkgs#zenity --no-link --print-out-paths 2>/dev/null)

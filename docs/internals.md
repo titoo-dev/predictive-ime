@@ -287,6 +287,30 @@ P1(w)    = 0.7·Pcont(w) + 0.3·Pfreq(w)
   respecte (pas de re-correction). La fenêtre survit aux modificateurs.
 - **Ctrl+Backspace en composition** : ABANDONNE le mot en cours — rien n'est
   committé, rien n'est appris.
+
+### Éditer le texte déjà écrit : `canEditSurrounding` (crash client)
+
+Tout ce qui touche au texte DÉJÀ dans l'application (revert, recomposition,
+fine insécable, reformulation) passe par `canEditSurrounding()`, qui exige que
+**ce client** ait publié un texte environnant depuis qu'il a le focus
+(événement `InputContextSurroundingTextUpdated`, drapeau `sawSurrounding`
+remis à zéro au changement de focus).
+
+La capacité annoncée par fcitx ne suffit pas, et ça se paie cher : un terminal
+GTK4 (**ghostty**) active text-input-v3 sans jamais appeler
+`set_surrounding_text`, donc son tampon côté GTK reste `NULL` — mais le cache
+de fcitx, lui, peut contenir le texte d'un AUTRE contexte. La suppression
+passait alors la validation de fcitx
+(`waylandimserverv2.cpp`, bornes vérifiées contre CE cache), arrivait chez un
+client sans tampon, et `text_input_delete_surrounding_text` déréférençait
+`NULL` dans `g_utf8_pointer_to_offset` : **SIGSEGV du client**. Symptôme vu :
+ghostty disparaît au premier Backspace après avoir tapé un mot, IME actif.
+Trace protocole du bug : `delete_surrounding_text(3, 0)` alors que le client
+n'avait envoyé aucun `set_surrounding_text`.
+
+`deleteSurroundingBefore` vérifie en plus ses bornes AVANT d'émettre (l'ordre
+comptait : la vérification ne protégeait que la copie locale, la requête
+partait quand même). GTK4 ne valide rien de son côté, d'où la prudence ici.
 - **Échap** : ANNULE la suggestion (en composition le littéral est committé
   tel quel, rien n'est appris — annuler ≠ valider) ou ferme la barre
   mot-suivant, puis la touche **file à l'application** (vim sort du mode

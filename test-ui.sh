@@ -11,16 +11,16 @@
 # Vérifie aussi (assertions) que les mid-frames diffèrent des états stables —
 # preuve que la boucle de frames Wayland anime réellement.
 set -uo pipefail
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" # le repo lui-même (son NOM ne compte pas)
 OUT=/tmp/ime-ui; rm -rf "$OUT"; mkdir -p "$OUT"
 WT="$OUT/wt"; mkdir -p "$WT/config/fcitx5" "$WT/cache" "$WT/xdg"
 
 echo "==> build paquets + outils"
-ENGINE=$(nix build "$REPO/ime#fcitx5-predict" --no-link --print-out-paths 2>/dev/null)
-QMLUI=$(nix build "$REPO/ime#qmlpanel" --no-link --print-out-paths 2>/dev/null)
-FCITX5=$(nix build "$REPO/ime#fcitx5-patched" --no-link --print-out-paths 2>/dev/null)
-DAEMON=$(nix build "$REPO/ime#predictord" --no-link --print-out-paths 2>/dev/null)
-MODEL=$(nix build  "$REPO/ime#model" --no-link --print-out-paths 2>/dev/null)
+ENGINE=$(nix build "$REPO#fcitx5-predict" --no-link --print-out-paths 2>/dev/null)
+QMLUI=$(nix build "$REPO#qmlpanel" --no-link --print-out-paths 2>/dev/null)
+FCITX5=$(nix build "$REPO#fcitx5-patched" --no-link --print-out-paths 2>/dev/null)
+DAEMON=$(nix build "$REPO#predictord" --no-link --print-out-paths 2>/dev/null)
+MODEL=$(nix build  "$REPO#model" --no-link --print-out-paths 2>/dev/null)
 SWAY=$(nix build  nixpkgs#sway   --no-link --print-out-paths 2>/dev/null)
 ZENITY=$(nix build nixpkgs#zenity --no-link --print-out-paths 2>/dev/null)
 WTYPE=$(nix build nixpkgs#wtype --no-link --print-out-paths 2>/dev/null)/bin/wtype

@@ -193,6 +193,12 @@ struct Harness {
     ic->surroundingText().setText(text, cursor, anchor);
     ic->updateSurroundingText();
   }
+  // Cache de texte environnant que le client n'a JAMAIS publié (pas
+  // d'événement) : c'est l'état d'un terminal GTK4 comme ghostty, où le cache
+  // de fcitx décrit une autre fenêtre. Éditer là-dessus tue le client.
+  void setSurroundingStale(const std::string &text, unsigned cursor) {
+    ic->surroundingText().setText(text, cursor, cursor);
+  }
   void key(const char *sym) {
     tf->call<fcitx::ITestFrontend::keyEvent>(uuid, fcitx::Key(sym), false);
   }
@@ -534,6 +540,25 @@ void recomposeTests(Harness &h) {
   h.key("BackSpace");
   check("recompose: sans SurroundingText, Backspace file à l'app",
         h.preedit().empty(), h.preedit());
+
+  // RÉGRESSION « ghostty meurt en tapant puis effaçant » : la capacité est
+  // annoncée et le cache de fcitx contient du texte, mais CE client ne l'a
+  // jamais publié (terminal GTK4 : aucun tampon en face). Toute suppression
+  // le fait déréférencer NULL et le TUE → on ne recompose pas.
+  h.reset();
+  h.setCaps(fcitx::CapabilityFlags{fcitx::CapabilityFlag::Preedit,
+                                   fcitx::CapabilityFlag::SurroundingText});
+  h.setSurroundingStale("bonjour ", 8);
+  h.key("BackSpace");
+  check("surrounding jamais publié : aucune édition du texte écrit",
+        h.preedit().empty(), h.preedit());
+
+  // …et dès que le client publie vraiment, la recomposition revient.
+  h.daemon->setReply({"bonjour"}, "", false);
+  h.setSurrounding("bonjour ", 8);
+  h.key("BackSpace");
+  check("surrounding publié : la recomposition marche de nouveau",
+        h.preedit() == "bonjour", h.preedit());
 }
 
 void multiWordTests(Harness &h) {

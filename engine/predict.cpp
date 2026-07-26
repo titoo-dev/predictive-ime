@@ -417,13 +417,18 @@ std::vector<std::string> lastWords(const std::vector<uint32_t> &cps,
 // SurroundingText : l'app ne renvoie son update qu'après un aller-retour,
 // et une complétion relancée juste derrière lirait sinon l'ancien texte
 // (le mot supprimé polluerait son propre contexte).
+//
+// Les bornes sont vérifiées AVANT d'envoyer quoi que ce soit : demander plus
+// que ce que le client détient fait déréférencer hors chaîne côté GTK4
+// (text_input_delete_surrounding_text → g_utf8_pointer_to_offset) et TUE le
+// client. Les appelants doivent en plus passer par canEditSurrounding().
 void deleteSurroundingBefore(fcitx::InputContext *ic, unsigned n) {
-  ic->deleteSurroundingText(-int(n), n);
   auto &st = ic->surroundingText();
   auto cps = decodeUtf8(st.text());
   size_t cur = st.cursor();
   if (n == 0 || n > cur || cur > cps.size())
     return;
+  ic->deleteSurroundingText(-int(n), n);
   std::string out;
   for (size_t i = 0; i < cps.size(); i++)
     if (i < cur - n || i >= cur)
@@ -658,6 +663,12 @@ struct PredictState : public fcitx::InputContextProperty {
   // Génération de la barre mot-suivant (E5) : un refresh neural arrivé APRÈS
   // que l'état a changé (frappe, commit, reset) est jeté (gen différente).
   uint64_t nextWordGen = 0;
+  // Ce client a-t-il PUBLIÉ un texte environnant depuis qu'il a le focus ?
+  // La capacité annoncée ne suffit pas : le cache de fcitx peut dater d'un
+  // AUTRE contexte, et un client qui n'implémente pas set_surrounding_text
+  // (ghostty et les terminaux GTK4 en général) n'a rien en face — une
+  // suppression le fait déréférencer NULL et il MEURT. Cf canEditSurrounding.
+  bool sawSurrounding = false;
 };
 
 class PredictCandidate : public fcitx::CandidateWord {
@@ -774,9 +785,37 @@ public:
     // Instance::eventDispatcher() n'existe pas sur le fcitx5 des vieilles
     // distros (Ubuntu 24.04 livre 5.1.7). Cf postToMain.
     dispatcher_.attach(&instance_->eventLoop());
+    // Le SEUL signal fiable qu'un client gère vraiment le texte environnant :
+    // il vient d'en publier un. Tout ce qui édite du texte déjà écrit
+    // (revert, recomposition, reformulation) l'exige — cf canEditSurrounding.
+    surroundingWatcher_ = instance_->watchEvent(
+        fcitx::EventType::InputContextSurroundingTextUpdated,
+        fcitx::EventWatcherPhase::Default, [this](fcitx::Event &event) {
+          auto &e = static_cast<fcitx::InputContextEvent &>(event);
+          e.inputContext()->propertyFor(&factory_)->sawSurrounding = true;
+        });
   }
 
   ~PredictEngine() override { disarmRefresh(); }
+
+  // Le texte environnant de CE client est-il utilisable (lecture du contexte,
+  // et surtout SUPPRESSION de texte déjà écrit) ?
+  //
+  // La capacité annoncée par fcitx ne suffit PAS. Un terminal GTK4 (ghostty)
+  // active text-input-v3 sans jamais appeler set_surrounding_text : côté GTK
+  // le tampon reste NULL, mais le cache de fcitx, lui, peut contenir le texte
+  // d'un AUTRE contexte. La suppression passait alors la validation de fcitx,
+  // arrivait chez un client sans tampon, et
+  // text_input_delete_surrounding_text déréférençait NULL → SIGSEGV DU
+  // CLIENT (ghostty qui disparaît en tapant puis effaçant).
+  // On exige donc la seule preuve fiable : ce client a publié un texte
+  // environnant depuis qu'il a le focus.
+  bool canEditSurrounding(fcitx::InputContext *ic) {
+    auto *state = ic->propertyFor(&factory_);
+    return state->sawSurrounding &&
+           ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText) &&
+           ic->surroundingText().isValid();
+  }
 
   void keyEvent(const fcitx::InputMethodEntry &,
                 fcitx::KeyEvent &event) override {
@@ -977,9 +1016,7 @@ public:
     uint32_t reformRevCps = state->reformRevertCps;
     state->reformRevertCps = 0;
     if (sym == FcitxKey_BackSpace && !mod && state->buffer.empty() &&
-        reformRevCps > 0 &&
-        ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText) &&
-        ic->surroundingText().isValid()) {
+        reformRevCps > 0 && canEditSurrounding(ic)) {
       ic->deleteSurroundingText(-int(reformRevCps), reformRevCps);
       ic->commitString(state->reformRevertOrig);
       event.filterAndAccept();
@@ -1028,9 +1065,7 @@ public:
     uint32_t autoCps = state->lastAutoCps;
     state->lastAutoCps = 0; // la fenêtre ne dure qu'une touche
     if (sym == FcitxKey_BackSpace && !mod && state->buffer.empty() &&
-        autoCps > 0 &&
-        ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText) &&
-        ic->surroundingText().isValid()) {
+        autoCps > 0 && canEditSurrounding(ic)) {
       deleteSurroundingBefore(ic, autoCps);
       state->buffer = state->lastAutoLit;
       state->vetoAuto = true;
@@ -1095,8 +1130,7 @@ public:
     //        proposait plus rien. Même patron que le revert (0) :
     //        deleteSurroundingText + buffer + updateCompletion.
     if (sym == FcitxKey_BackSpace && !mod && state->buffer.empty() &&
-        ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText) &&
-        ic->surroundingText().isValid()) {
+        canEditSurrounding(ic)) {
       const auto &st = ic->surroundingText();
       auto cps = decodeUtf8(st.text());
       size_t cur = st.cursor();
@@ -1377,6 +1411,9 @@ public:
     state->ghost.clear();
     state->accentOnly = false;
     state->nextWordGen++; // un refresh neural en vol devient périmé
+    // Changement de focus : ce que le PRÉCÉDENT client avait publié ne dit
+    // rien du suivant. On réexige une publication avant de toucher au texte.
+    state->sawSurrounding = false;
     clearPanel(ic);
   }
 
@@ -1461,8 +1498,7 @@ private:
   // C). Absorbe une espace ORDINAIRE déjà tapée (sinon « mot  ! » double espace)
   // et ne fait rien si une fine est déjà là — best-effort via SurroundingText.
   void frenchThinBefore(fcitx::InputContext *ic) {
-    if (ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText) &&
-        ic->surroundingText().isValid()) {
+    if (canEditSurrounding(ic)) {
       auto cps = decodeUtf8(ic->surroundingText().text());
       unsigned int cur = ic->surroundingText().cursor();
       if (cur > 0 && cur <= cps.size()) {
@@ -1484,8 +1520,9 @@ private:
   // tout le groupe nominal (déterminant + adjectifs intercalés).
   std::vector<std::string> contextFor(fcitx::InputContext *ic,
                                       PredictState *state) {
-    if (ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText) &&
-        ic->surroundingText().isValid()) {
+    // Pas de sawSurrounding = le cache peut décrire une AUTRE fenêtre : on
+    // retombe sur notre propre contexte plutôt que de lire à côté.
+    if (canEditSurrounding(ic)) {
       auto cps = decodeUtf8(ic->surroundingText().text());
       unsigned int cur = ic->surroundingText().cursor();
       if (cur < cps.size())
@@ -1503,8 +1540,7 @@ private:
   // caractères, coupés à un début de mot. Repli sans SurroundingText : les
   // derniers mots committés.
   std::string wideTextFor(fcitx::InputContext *ic, PredictState *state) {
-    if (ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText) &&
-        ic->surroundingText().isValid()) {
+    if (canEditSurrounding(ic)) {
       auto cps = decodeUtf8(ic->surroundingText().text());
       unsigned int cur = ic->surroundingText().cursor();
       if (cur < cps.size())
@@ -1721,8 +1757,7 @@ private:
     // Tab choisit). Les déclencheurs ':'/';' restent explicites.
     // Opt-out : autoApplyNeedsRevert=false.
     if (engineCfg().autoApplyNeedsRevert && !isTriggerBuffer(state->buffer) &&
-        !(ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText) &&
-          ic->surroundingText().isValid())) {
+        !canEditSurrounding(ic)) {
       state->autocomplete.clear();
       state->accentOnly = false;
       // le fantôme reste : → est un accept EXPLICITE, pas besoin de revert.
@@ -1927,7 +1962,7 @@ private:
 
   void enterReformulation(fcitx::InputContext *ic, PredictState *state) {
     bool cap = ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText);
-    bool valid = cap && ic->surroundingText().isValid();
+    bool valid = canEditSurrounding(ic);
     std::string sel = valid ? ic->surroundingText().selectedText() : std::string{};
     // Texte à reformuler :
     //  - sélection rapportée (souris) → la sélection.
@@ -2064,9 +2099,7 @@ private:
     // supprimée == la sélection : le résultat reste correct.
     if (idx >= 0 && idx < (int)state->cands.size()) {
       const std::string &variant = state->cands[idx];
-      if (!state->reformFromSelection &&
-          ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText) &&
-          ic->surroundingText().isValid()) {
+      if (!state->reformFromSelection && canEditSurrounding(ic)) {
         auto &st = ic->surroundingText();
         auto cps = decodeUtf8(st.text());
         size_t cur = std::min(size_t(st.cursor()), cps.size());
@@ -2115,6 +2148,11 @@ private:
   }
 
   fcitx::EventDispatcher dispatcher_;
+  // Abonnement à « ce client vient de publier son texte environnant »
+  // (seule preuve qu'on peut toucher au texte déjà écrit — cf
+  // canEditSurrounding).
+  std::unique_ptr<fcitx::HandlerTableEntry<fcitx::EventHandler>>
+      surroundingWatcher_;
   // Dernier mode de reformulation utilisé — le prochain Ctrl+Alt+R repart de
   // là (partagé entre les contextes : préférence de session, pas de champ).
   int lastReformMode_ = 0;
