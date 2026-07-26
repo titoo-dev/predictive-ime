@@ -26,6 +26,7 @@ ime/
     CMakeLists.txt
   ui/                    # barre de candidats Qt Quick (cf section UI QML)
   test-e2e.sh            # e2e assertif headless (sway + fcitx5 + wtype)
+  test-hotkey.sh         # e2e : picker sans activer l'IME, et méthode rendue après
   test-ui.sh             # captures visuelles headless (grim) + assertions d'animation
 ```
 
@@ -186,7 +187,13 @@ P1(w)    = 0.7·Pcont(w) + 0.3·Pfreq(w)
   `PreInputMethod` (`InputContextKeyEvent`, avant toute méthode) : si le
   raccourci tombe alors qu'une autre méthode est active, il bascule sur
   `predict` (`setCurrentInputMethod(ic, …, local=true)`) puis ouvre le picker.
-  Testable en headless avec un profil à deux méthodes (clavier par défaut).
+- **C'est un EMPRUNT, pas une bascule** : la méthode d'origine est mémorisée
+  (`imBeforePicker`) et RENDUE dès que le picker se referme — emoji committé,
+  Échap, re-appui sur le raccourci, perte de focus (`releaseBorrowedIm`, posté
+  au dispatcher : basculer d'IME en pleine main de touche rappellerait
+  `reset()`). Sans ça, choisir un emoji allumait la prédiction de texte pour
+  toute la frappe suivante. Couvert par `./test-hotkey.sh` (profil à deux
+  méthodes, attendu « ok❤️ bonjou » : le mot d'après reste littéral).
   **Piège de test** : sous Hyprland, `wtype` téléverse son PROPRE keymap et le
   compositeur résout le keycode dans le sien — le raccourci injecté arrive
   sous une autre touche (ici `Super+Escape`, donc le menu d'alimentation DMS).
@@ -437,6 +444,7 @@ nix build ./ime#model            # modèle KN + emoji (corpus épinglés)
 # tests comportementaux du cerveau (27 cas : accents, fautes, contexte, KN, emoji) :
 python3 ime/daemon/test_predict.py "$(nix build ./ime#predictord --no-link --print-out-paths)/bin/predictord"
 ./ime/test-e2e.sh                # e2e assertif (sway headless, AZERTY, 15 cas)
+./ime/test-hotkey.sh             # picker sans activer l'IME + méthode d'entrée rendue
 ./ime/test-ui.sh                 # captures visuelles + assertions d'animation
 # rendu hors ligne de la barre (états QML → PNG, sans compositeur) : le résultat
 # est le dossier de captures, à ouvrir pour relire le design.

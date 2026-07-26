@@ -663,6 +663,11 @@ struct PredictState : public fcitx::InputContextProperty {
   // Génération de la barre mot-suivant (E5) : un refresh neural arrivé APRÈS
   // que l'état a changé (frappe, commit, reset) est jeté (gen différente).
   uint64_t nextWordGen = 0;
+  // Méthode d'entrée d'AVANT l'ouverture du picker par raccourci (vide si on
+  // n'a rien basculé). Le picker emprunte l'IME le temps de choisir un emoji,
+  // puis on rend la main : sans ça, ouvrir le picker allumait la PRÉDICTION
+  // de texte pour la suite de la frappe, ce que l'utilisateur n'a pas demandé.
+  std::string imBeforePicker;
   // Picker emoji : la grille montre une PAGE de 24 (3×8) ; `pageStart` est
   // l'index absolu du premier emoji affiché. Les flèches débordent d'une page
   // à l'autre, la barre de recherche affiche « 2/4 ».
@@ -819,10 +824,13 @@ public:
           auto *ic = ke.inputContext();
           if (instance_->inputMethod(ic) == "predict")
             return; // notre keyEvent s'en charge (et gère la fermeture)
+          auto *state = ic->propertyFor(&factory_);
+          std::string previous = instance_->inputMethod(ic);
           instance_->setCurrentInputMethod(ic, "predict", /*local=*/true);
           // la bascule passe par reset() : on ouvre APRÈS, sinon le picker
-          // serait effacé dans la foulée.
-          toggleEmojiPicker(ic, ic->propertyFor(&factory_));
+          // serait effacé dans la foulée (et reset() vide `imBeforePicker`).
+          toggleEmojiPicker(ic, state);
+          state->imBeforePicker = previous; // à rendre en refermant
           ke.filterAndAccept();
         });
   }
@@ -836,6 +844,21 @@ public:
            key.states().test(fcitx::KeyState::Super);
   }
 
+  // Rend la méthode d'entrée empruntée par le picker. Le picker n'est qu'un
+  // sélecteur d'emoji : une fois refermé, la frappe doit retrouver EXACTEMENT
+  // ce qu'elle était avant (pas de prédiction de texte allumée au passage).
+  // Le changement passe par le dispatcher : on est au milieu du traitement
+  // d'une touche, basculer d'IME ici rappellerait reset() en pleine main.
+  void releaseBorrowedIm(fcitx::InputContext *ic, PredictState *state) {
+    if (state->imBeforePicker.empty())
+      return;
+    std::string previous;
+    previous.swap(state->imBeforePicker);
+    postToMain(ic->watch(), [this, ic, previous]() {
+      instance_->setCurrentInputMethod(ic, previous, /*local=*/true);
+    });
+  }
+
   // Ouvre le picker (ou le referme s'il est déjà ouvert). Le mot en cours est
   // committé tel quel, SANS apprendre : c'est un fragment tapé, pas un mot
   // validé.
@@ -845,6 +868,7 @@ public:
       state->navigating = false;
       state->pageStart = 0;
       clearPanel(ic);
+      releaseBorrowedIm(ic, state);
       return;
     }
     if (!state->buffer.empty())
@@ -1493,7 +1517,11 @@ public:
     // Changement de focus : ce que le PRÉCÉDENT client avait publié ne dit
     // rien du suivant. On réexige une publication avant de toucher au texte.
     state->sawSurrounding = false;
+    state->pageStart = 0;
     clearPanel(ic);
+    // Picker abandonné (focus perdu, bascule manuelle…) : rendre la méthode
+    // d'entrée empruntée, sinon la prédiction resterait allumée.
+    releaseBorrowedIm(ic, state);
   }
 
 private:
@@ -1793,11 +1821,14 @@ private:
       state->buffer.clear();
       state->cands.clear();
       state->navigating = false;
+      state->pageStart = 0;
       clearPanel(ic);
+      releaseBorrowedIm(ic, state);
       return;
     }
     state->nextWordGen++; // le commit invalide tout refresh en vol
     bool trigger = isTriggerBuffer(state->buffer); // emoji ':' / snippet ';'
+    bool wasPicker = isEmojiBuffer(state->buffer); // emoji choisi → on referme
     std::string word = applyCase(raw, state->buffer);
     // Auto-majuscule (amélioration D) en DÉBUT DE PHRASE : on s'appuie sur le
     // contexte EFFECTIF (contextFor → SurroundingText prioritaire). lastWords
@@ -1841,6 +1872,8 @@ private:
       showNextWord(ic, state);
     else
       clearPanel(ic);
+    if (wasPicker)
+      releaseBorrowedIm(ic, state);
   }
 
   // Mode complétion : candidats commençant par le buffer (avec autocorrection).

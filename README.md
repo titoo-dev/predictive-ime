@@ -96,7 +96,10 @@ buffer, mid-word (the word in progress is committed as typed), or with the
 next-word bar open; pressing it again closes the picker. It works **even when
 the predictive input method is not the active one** (the addon watches the
 shortcut before any input method, switches to `predict` and opens the picker),
-so no Ctrl+Space first. It is a Material 3 surface with its own search field,
+so no Ctrl+Space first. The switch is a **loan**: as soon as the picker closes
+(emoji inserted, Escape, shortcut pressed again, focus lost) your previous
+input method is restored, so picking an emoji never leaves text prediction
+turned on. It is a Material 3 surface with its own search field,
 so the query stays in the picker and is never typed into your document. Type a
 CLDR keyword (`coeur`, `soleil`, `fire`…) to filter the grid, or pick straight
 from your recently-used favourites. Up to 96 results, **24 per page**: arrows
