@@ -32,6 +32,32 @@ bool validUtf8(const std::string &s) {
   return true;
 }
 
+// Retire le bruit de tête d'une variante : espaces, guillemets, numérotation et
+// puces. Le jeu de caractères ne contient QUE de l'ASCII — y glisser "•" y
+// injecterait ses octets (E2 80 A2), et une ligne commençant par "…" (E2 80 A6)
+// ou "—" (E2 80 94) se ferait alors couper au milieu du caractère : validUtf8
+// rejetterait la ligne entière et la variante disparaîtrait en silence. Les
+// puces multi-octets sont donc retirées comme des chaînes entières.
+std::string trimLeadNoise(std::string s) {
+  static const char *kBullets[] = {"•", "‣", "▪", "–", "—", "·"};
+  for (bool again = true; again;) {
+    again = false;
+    size_t a = s.find_first_not_of(" \t\r\"'-*0123456789.)(");
+    if (a == std::string::npos) return {};
+    if (a > 0) {
+      s.erase(0, a);
+      again = true;
+    }
+    for (const char *b : kBullets)
+      if (s.rfind(b, 0) == 0) {
+        s.erase(0, std::string(b).size());
+        again = true;
+        break;
+      }
+  }
+  return s;
+}
+
 std::string trimmed(const std::string &s) {
   size_t a = s.find_first_not_of(" \t\r\n");
   if (a == std::string::npos) return {};
@@ -217,10 +243,10 @@ std::vector<std::string> reformulateHttp(const std::string &sentence, int n,
   std::stringstream ss(content);
   std::string line;
   while (std::getline(ss, line) && (int)variants.size() < n) {
-    size_t a = line.find_first_not_of(" \t\r\"'-*•0123456789.)(");
-    if (a == std::string::npos) continue;
-    size_t z = line.find_last_not_of(" \t\r\"");
-    std::string v = line.substr(a, z - a + 1);
+    std::string v = trimLeadNoise(line);
+    size_t z = v.find_last_not_of(" \t\r\"");
+    if (z == std::string::npos) continue;
+    v.erase(z + 1);
     if (v.empty() || !validUtf8(v)) continue;
     std::string vN = norm(v);
     if (vN == srcN) continue;

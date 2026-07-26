@@ -539,6 +539,7 @@ try:
     slow = [False]
 
     unauth = [False]
+    bullets = [False]
 
     class Mock(http.server.BaseHTTPRequestHandler):
         def do_POST(self):
@@ -553,6 +554,14 @@ try:
             if unauth[0]:
                 body = b'{"error":{"message":"Invalid API Key"}}'
                 self.send_response(401)
+            elif bullets[0]:
+                # Puces/ponctuation multi-octets en tête de ligne : le trim ne
+                # doit pas couper un caractère UTF-8 en deux.
+                body = json.dumps({"choices": [{"message": {"content":
+                    "• Variante à puce.\n"
+                    "— Variante à tiret cadratin.\n"
+                    "… Variante à points de suspension."}}]}).encode()
+                self.send_response(200)
             else:
                 body = json.dumps({"choices": [{"message": {"content":
                     "Variante numéro un.\nVariante numéro deux.\n"
@@ -608,6 +617,19 @@ try:
     check("reformulate: la reformulation lente aboutit quand même",
           len(got["r"].get("variants", [])) == 2, str(got.get("r")))
     slow[0] = False
+    # Le trim de tête ne travaille qu'en ASCII : les puces multi-octets sont
+    # retirées ENTIÈRES ("•", "—"), et un caractère qui n'est pas une puce ("…")
+    # est conservé intact. Avant, le jeu de caractères contenait les octets de
+    # "•", donc "…" (E2 80 A6) perdait E2 80 et l'octet A6 orphelin faisait
+    # rejeter toute la ligne par validUtf8 — variante perdue en silence.
+    bullets[0] = True
+    r = req({"reformulate": "phrase avec des puces typographiques", "n": 3,
+             "mode": "rephrase", "nonce": 0})
+    check("reformulate: puces multi-octets retirées entières, pas d'UTF-8 coupé",
+          r.get("variants") == ["Variante à puce.",
+                                "Variante à tiret cadratin.",
+                                "… Variante à points de suspension."], str(r))
+    bullets[0] = False
     # Groq-only + kinds d'erreur : 401 → error "auth" (l'engine affiche le
     # panneau « clé refusée — Entrée : reconfigurer »), jamais mis en cache.
     unauth[0] = True
