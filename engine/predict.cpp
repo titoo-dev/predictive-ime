@@ -762,6 +762,10 @@ public:
         factory_([](fcitx::InputContext &) { return new PredictState; }) {
     instance_->inputContextManager().registerProperty("predictState",
                                                        &factory_);
+    // Notre propre dispatcher, greffé sur l'event loop de l'instance :
+    // Instance::eventDispatcher() n'existe pas sur le fcitx5 des vieilles
+    // distros (Ubuntu 24.04 livre 5.1.7). Cf postToMain.
+    dispatcher_.attach(&instance_->eventLoop());
   }
 
   ~PredictEngine() override { disarmRefresh(); }
@@ -1898,7 +1902,7 @@ private:
       // variantes déjà prêtes — navigables tout de suite, la liste se
       // complète au fil des lignes. La position de navigation est préservée.
       auto onPartial = [this, ref, gen](std::vector<std::string> vars) {
-        instance_->eventDispatcher().scheduleWithContext(
+        postToMain(
             ref, [this, ref, vars = std::move(vars), gen]() {
               fcitx::InputContext *ic = ref.get();
               if (!ic)
@@ -1920,7 +1924,7 @@ private:
       };
       ReformResult r =
           reformulateDaemon(text, mode, nonce, n, onPartial); // bloque DANS le thread
-      instance_->eventDispatcher().scheduleWithContext(ref, [this, ref, r, gen]() {
+      postToMain(ref, [this, ref, r, gen]() {
         fcitx::InputContext *ic = ref.get();
         if (!ic)
           return;
@@ -2011,6 +2015,22 @@ private:
   }
 
   fcitx::Instance *instance_;
+  // Poste un travail depuis un thread de reformulation vers le thread principal,
+  // en n'exécutant que si le contexte d'entrée est toujours vivant. C'est ce que
+  // fait EventDispatcher::scheduleWithContext, mais celui-ci n'existe que depuis
+  // fcitx5 5.1.8 : on le refait à la main pour rester buildable sur le fcitx5
+  // stock des distros plus anciennes (Ubuntu 24.04 → 5.1.7).
+  void postToMain(fcitx::TrackableObjectReference<fcitx::InputContext> ref,
+                  std::function<void()> fn) {
+    if (!ref.isValid())
+      return;
+    dispatcher_.schedule([ref, fn = std::move(fn)]() {
+      if (ref.isValid())
+        fn();
+    });
+  }
+
+  fcitx::EventDispatcher dispatcher_;
   // Dernier mode de reformulation utilisé — le prochain Ctrl+Alt+R repart de
   // là (partagé entre les contextes : préférence de session, pas de champ).
   int lastReformMode_ = 0;
