@@ -21,6 +21,17 @@ WORDS = {
     "pc": 3000, "soleil": 3000, "solar": 3500,
     # élisions : proclitique nu (j') vs formes pleines (j'ai/j'aime) — pour B.
     "j'": 12000, "j'ai": 50000, "j'aime": 8000,
+    # restitution d'accent : homographe DOMINANT (être ≫ etre → restitue) et
+    # homographe NON dominant (mûr < accentDom×mur → garde le littéral).
+    "etre": 50, "mur": 1000, "mûr": 2000,
+    # apostrophe oubliée (canal élision) : jai→j'ai, dici→d'ici, cest→c'est,
+    # temener→t'emmener (élision + lettre oubliée, canaux composés). « jai »
+    # est AUSSI un mot-poubelle du corpus (comme dans le vrai modèle) : la
+    # restauration doit passer outre literalIsWord (accentOnly).
+    "d'ici": 6000, "c'est": 60000, "t'emmener": 800, "jai": 300,
+    # restauration d'accents : graphie brute AUSSI au corpus (dominance
+    # accentDom), homographe légitime (cote/côté), ligature (coeur/cœur).
+    "francais": 1500, "cote": 5000, "côté": 6000, "coeur": 9000, "cœur": 4000,
 }
 # 3e colonne de words.tsv : langue (boost selon la langue du contexte)
 LANGS = {"bonjour": "fr", "soleil": "fr", "solar": "en", "the": "en"}
@@ -58,7 +69,11 @@ with open(f"{tmp}/pcont.tsv", "w", encoding="utf-8") as f:
 # Index emoji (clé repliée -> emoji, poids), cf build_emoji.py.
 EMOJI = [("coeur", "❤️", 3), ("heart", "❤️", 3), ("etoile", "⭐", 3),
          ("star", "⭐", 3), ("sourire", "😊", 3), ("souris", "🐭", 3),
-         ("feu", "🔥", 3), ("fire", "🔥", 3)]
+         ("feu", "🔥", 3), ("fire", "🔥", 3),
+         # 7 emojis DISTINCTS au total → la grille ':' en renvoie >5. Sert à
+         # prouver que la grille emoji n'est PAS soumise au plafond de 5 mots
+         # de la barre de suggestion (cf. section « barre » plus bas).
+         ("eau", "💧", 3), ("water", "💧", 3), ("chat", "🐱", 3), ("cat", "🐱", 3)]
 with open(f"{tmp}/emoji.tsv", "w", encoding="utf-8") as f:
     for k, e, w in EMOJI:
         f.write(f"{k}\t{e}\t{w}\n")
@@ -72,7 +87,8 @@ with open(f"{cfgdir}/dict.txt", "w", encoding="utf-8") as f:
     f.write("# dico perso\nzzcustom 7000\n")
 
 env = dict(os.environ, XDG_DATA_HOME=f"{tmp}/xdg",
-           XDG_CONFIG_HOME=f"{tmp}/cfg")
+           XDG_CONFIG_HOME=f"{tmp}/cfg",
+           GROQ_API_KEY="clef-de-test")  # cf section reformulation (mock HTTP)
 proc = subprocess.Popen([BIN, f"{tmp}/words.tsv", sock], env=env)
 for _ in range(100):
     if os.path.exists(sock):
@@ -129,6 +145,33 @@ try:
     c = cands("bonjpur")
     check("typo adjacence AZERTY: bonjpur → bonjour", "bonjour" in c, str(c))
 
+    # 2bis) lettre OUBLIÉE + espace oublié (E8)
+    c = cands("bonjor")
+    check("typo omission: bonjor → bonjour", "bonjour" in c, str(c))
+    c = cands("travil")
+    check("typo omission: travil → travail", "travail" in c, str(c))
+    c = cands("nepas")
+    check("espace oublié: nepas → « ne pas »", "ne pas" in c, str(c))
+    a = auto("nepas")
+    check("espace oublié: jamais auto-appliqué", " " not in a, repr(a))
+
+    # 2ter) APOSTROPHE OUBLIÉE (canal élision, repli sans apostrophe)
+    c = cands("jai")
+    check("élision: jai → j'ai", "j'ai" in c, str(c))
+    r = req({"prefix": "jai", "context": []})
+    check("élision: jai → j'ai auto-appliqué (dominant)",
+          r.get("autocomplete") == "j'ai", str(r))
+    check("élision: restauration pure → accentOnly (malgré « jai » au vocab)",
+          r.get("accentOnly") is True and r.get("literalIsWord") is True,
+          str(r))
+    c = cands("dici")
+    check("élision: dici → d'ici", "d'ici" in c, str(c))
+    c = cands("cest")
+    check("élision: cest → c'est", "c'est" in c, str(c))
+    c = cands("temener")
+    check("élision composée: temener → t'emmener (apostrophe + lettre)",
+          "t'emmener" in c, str(c))
+
     # 3) complétion re-classée par le contexte
     base = cands("v")
     check("sans contexte: 'va' avant 'vais'",
@@ -148,6 +191,18 @@ try:
     check("trigramme: 'je ne' → 'sais' en tête", c and c[0] == "sais", str(c))
     c = cands("", ["ne"])
     check("bigramme: 'ne' → 'pas' en tête", c and c[0] == "pas", str(c))
+
+    # 5bis) LONGUEUR DE LA BARRE : la barre de mots n'affiche JAMAIS plus de 5
+    #       suggestions (UX : seul le top-5 le plus pertinent ; le modèle, trié
+    #       par score, garantit que ce sont bien les 5 plus pertinents). Vaut
+    #       pour le mot-suivant, l'amorce de phrase et la complétion intra-mot.
+    #       La grille emoji (préfixe ':') N'EST PAS concernée (testée plus bas).
+    c = cands("", ["ne"])  # bigramme + remplissage topUni → barre pleine
+    check("barre: mot-suivant plafonné à 5", len(c) <= 5, str(c))
+    c = cands("", [])      # amorce <s> + remplissage → barre pleine
+    check("barre: amorce de phrase plafonnée à 5", len(c) <= 5, str(c))
+    c = cands("", ["je", "ne"])  # trigramme + multi-mots → barre pleine
+    check("barre: contexte riche (+ multi-mots) plafonné à 5", len(c) <= 5, str(c))
 
     # 6) apprentissage utilisateur (priorité)
     req({"learn": {"prev": "je", "word": "code"}})
@@ -330,6 +385,28 @@ try:
           c.index("j'") > c.index("j'ai") and c.index("j'") > c.index("j'aime"),
           str(c))
 
+    # 7terdecies-bis) RESTITUTION D'ACCENT SUR ESPACE, INDÉPENDANTE de autoApply.
+    #   La config promet : `accentRestore` restaure les accents/ligatures même
+    #   quand autoApply=false — on n'AJOUTE que des accents (mêmes lettres), on
+    #   ne change/complète/corrige jamais le mot. Homographe (la graphie nue est
+    #   AUSSI au corpus) : restitue seulement si la forme accentuée DOMINE par
+    #   `accentDom`. Régression : avec autoApply=false l'autocomplete restait vide.
+    set_config({"autoApply": False, "accentRestore": True})
+    check("accent (autoApply off): hors-corpus restitué — 'developpement'→'développement'",
+          auto("developpement") == "développement", repr(auto("developpement")))
+    check("accent (autoApply off): homographe DOMINANT restitué — 'etre'→'être'",
+          auto("etre") == "être", repr(auto("etre")))
+    check("accent: forme accentuée PAS assez dominante → garde le littéral ('mur'↛'mûr')",
+          auto("mur") == "", repr(auto("mur")))
+    check("accent: mot DÉJÀ accentué jamais touché ('français'→'')",
+          auto("français") == "", repr(auto("français")))
+    check("accent: complétion (lettres en +) n'est PAS un accent-restore ('bonjou'↛auto)",
+          auto("bonjou") == "", repr(auto("bonjou")))
+    set_config({"autoApply": False, "accentRestore": False})
+    check("accent: accentRestore=false → désactivé ('developpement'→'')",
+          auto("developpement") == "", repr(auto("developpement")))
+    set_config({})  # restaure les defaults
+
     # 7quaterdecies) TRIGRAMMES APPRIS : le contexte 2-mots prime sur le bigramme.
     #   Même mot précédent ('vais') mais deux contextes différents → deux suites.
     #   Reconstruit côté daemon depuis la chaîne de commits (aucun prev2 envoyé).
@@ -364,18 +441,249 @@ try:
           str(c))
     check("emoji: ':' seul → pas d'autocomplete (Espace garde le littéral)",
           auto(":") == "", repr(auto(":")))
+    # tolérance aux fautes : transposition et lettre en trop, seulement quand
+    # le préfixe exact ne matche rien.
+    c = cands(":ceour")
+    check("emoji typo: ':ceour' (transposition) → ❤️", "❤️" in c, str(c))
+    c = cands(":coeurr")
+    check("emoji typo: ':coeurr' (lettre en trop) → ❤️", "❤️" in c, str(c))
     req({"learn": {"prev": "", "word": "⭐"}})
     req({"learn": {"prev": "", "word": "⭐"}})
     c = cands(":")
     check("emoji: favoris — ':' liste ⭐ après usage", c and c[0] == "⭐", str(c))
-    check("emoji: grille — ':' remplit avec les populaires (tout le set)",
-          len(c) == 5, str(c))
+    check("emoji: grille NON plafonnée à 5 — ':' renvoie tout le set (7 distincts)",
+          len(c) == 7, str(c))
     c = cands(":s")
     check("emoji: favori remonte — ':s' → ⭐ (star) avant 😊", c and c[0] == "⭐",
           str(c))
     c = cands("coeur")
     check("emoji: hint — 'coeur' (mot normal) propose ❤️ en fin de barre",
           "❤️" in c, str(c))
+
+    # 8bis) RESTAURATION D'ACCENTS (fold-equal) + ghost découplé + barWords
+    r = req({"prefix": "etre", "context": []})
+    check("accent: etre → être (accentOnly)",
+          r.get("autocomplete") == "être" and r.get("accentOnly") is True,
+          str(r))
+    r = req({"prefix": "francais", "context": []})
+    check("accent: francais → français malgré le corpus (dominance ≥ accentDom)",
+          r.get("autocomplete") == "français" and r.get("accentOnly") is True,
+          str(r))
+    r = req({"prefix": "cote", "context": []})
+    check("accent: cote intouché (homographe sous accentDom)",
+          r.get("autocomplete", "") in ("", "cote"), str(r))
+    r = req({"prefix": "coeur", "context": []})
+    check("accent: coeur → cœur (ligature, sans seuil de dominance)",
+          r.get("autocomplete") == "cœur" and r.get("accentOnly") is True,
+          str(r))
+
+    cfgpath = f"{cfgdir}/config.json"
+    def set_config(obj, bump):
+        with open(cfgpath, "w", encoding="utf-8") as f:
+            json.dump(obj, f)
+        t = time.time() + bump  # mtime distinct → rechargement à chaud garanti
+        os.utime(cfgpath, (t, t))
+
+    set_config({"autoApply": False}, 2)
+    r = req({"prefix": "bonjou", "context": []})
+    check("autoApply off: l'Espace garde le littéral (pas d'autocomplete)",
+          r.get("autocomplete", "") == "", str(r))
+    check("autoApply off: le GHOST reste calculé (→ l'accepte)",
+          r.get("ghost") == "bonjour", str(r))
+    r = req({"prefix": "etre", "context": []})
+    check("autoApply off: l'accent est restauré quand même (accentRestore)",
+          r.get("autocomplete") == "être" and r.get("accentOnly") is True,
+          str(r))
+    # régression : un mot APPRIS (score plancher learnedFloor) ne doit pas
+    # tuer sa propre restauration (garde `credible` auto-comparée).
+    req({"learn": {"prev": "", "word": "être"}})
+    r = req({"prefix": "etre", "context": []})
+    check("autoApply off: l'accent survit à l'apprentissage du mot",
+          r.get("autocomplete") == "être" and r.get("accentOnly") is True,
+          str(r))
+    req({"forget": {"word": "être"}})
+
+    set_config({"autoApply": False, "accentRestore": False}, 4)
+    r = req({"prefix": "etre", "context": []})
+    check("autoApply off + accentRestore off: plus rien ne s'applique",
+          r.get("autocomplete", "") == "", str(r))
+
+    set_config({"barWords": 3}, 6)
+    c = cands("v")
+    check("barWords: la barre est tronquée aux 3 meilleurs", len(c) <= 3, str(c))
+    set_config({}, 8)  # retour aux défauts pour la suite
+
+    # 8bis) CACHE DE RÉCENCE : un mot déjà présent dans le texte avant le
+    #       curseur (`wide`) est boosté (recencyBoost, défaut 1.3). Contexte
+    #       VIDE ou neutre pour ne pas mélanger avec le boost de langue.
+    c = cands("sol")
+    check("récence: sans wide, solar (3500) devant soleil (3000)",
+          c.index("solar") < c.index("soleil"), str(c))
+    c = req({"prefix": "sol", "context": [],
+             "wide": "le soleil brille"})["candidates"]
+    check("récence: 'soleil' dans wide → passe devant solar",
+          c.index("soleil") < c.index("solar"), str(c))
+    req({"forget": {"word": "vais"}})  # appris plus haut (7) — repartir du modèle
+    c = req({"prefix": "", "context": ["je"],
+             "wide": "tu veux quoi je"})["candidates"]
+    check("récence: mot-suivant, 'veux' (0.30) dans wide → devant vais (0.35)",
+          c.index("veux") < c.index("vais"), str(c))
+
+    # 8ter) REFORMULATION — worker différé (A1), cache LRU (A3), non-blocage.
+    #       Mock HTTP OpenAI-compatible local ; la clé vient de l'env
+    #       (GROQ_API_KEY, cf lancement du daemon).
+    import http.server
+    import threading
+    hits = []
+    bodies = []  # corps des requêtes → vérifie le prompt système (langue)
+    slow = [False]
+
+    unauth = [False]
+    bullets = [False]
+
+    class Mock(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            raw = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            try:
+                bodies.append(json.loads(raw))
+            except ValueError:
+                pass
+            hits.append(1)
+            if slow[0]:
+                time.sleep(1.2)
+            if unauth[0]:
+                body = b'{"error":{"message":"Invalid API Key"}}'
+                self.send_response(401)
+            elif bullets[0]:
+                # Puces/ponctuation multi-octets en tête de ligne : le trim ne
+                # doit pas couper un caractère UTF-8 en deux.
+                body = json.dumps({"choices": [{"message": {"content":
+                    "• Variante à puce.\n"
+                    "— Variante à tiret cadratin.\n"
+                    "… Variante à points de suspension."}}]}).encode()
+                self.send_response(200)
+            else:
+                body = json.dumps({"choices": [{"message": {"content":
+                    "Variante numéro un.\nVariante numéro deux.\n"
+                    "Variante numéro trois.\nVariante numéro quatre."}}]}
+                    ).encode()
+                self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    httpd = http.server.HTTPServer(("127.0.0.1", 0), Mock)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    set_config({"reformBaseUrl": f"http://127.0.0.1:{httpd.server_port}",
+                "reformTimeoutMs": 3000}, 10)
+    r = req({"reformulate": "bonjour tout le monde", "n": 2,
+             "mode": "rephrase", "nonce": 0})
+    check("reformulate: 2 variantes via worker (réponse différée)",
+          len(r.get("variants", [])) == 2 and r.get("source") == "groq",
+          str(r))
+    r2 = req({"reformulate": "bonjour tout le monde", "n": 2,
+              "mode": "rephrase", "nonce": 0})
+    check("reformulate: cache LRU — même demande servie sans nouvel appel HTTP",
+          r2.get("variants") == r.get("variants") and len(hits) == 1,
+          f"hits={len(hits)}")
+    r3 = req({"reformulate": "bonjour tout le monde", "n": 2,
+              "mode": "rephrase", "nonce": 1})
+    check("reformulate: nonce différent → régénère",
+          len(hits) == 2 and len(r3.get("variants", [])) == 2,
+          f"hits={len(hits)}")
+    # NON-BLOCAGE (le cœur de A1) : pendant une reformulation LENTE (mock
+    # 1,2 s), la complétion répond en millisecondes sur une autre connexion.
+    slow[0] = True
+    got = {}
+
+    def bg():
+        got["r"] = req({"reformulate": "une autre phrase pour le test",
+                        "n": 2, "mode": "rephrase", "nonce": 0})
+
+    t = threading.Thread(target=bg)
+    t.start()
+    time.sleep(0.15)  # la demande est partie, le worker dort dans le mock
+    t0 = time.monotonic()
+    c = cands("bonjou")
+    dt = time.monotonic() - t0
+    check("reformulate: le poll loop ne gèle pas (complétion < 300 ms pendant "
+          "une reformulation lente)", "bonjour" in c and dt < 0.3,
+          f"dt={dt:.3f}s {c}")
+    t.join()
+    check("reformulate: la reformulation lente aboutit quand même",
+          len(got["r"].get("variants", [])) == 2, str(got.get("r")))
+    slow[0] = False
+    # Le trim de tête ne travaille qu'en ASCII : les puces multi-octets sont
+    # retirées ENTIÈRES ("•", "—"), et un caractère qui n'est pas une puce ("…")
+    # est conservé intact. Avant, le jeu de caractères contenait les octets de
+    # "•", donc "…" (E2 80 A6) perdait E2 80 et l'octet A6 orphelin faisait
+    # rejeter toute la ligne par validUtf8 — variante perdue en silence.
+    bullets[0] = True
+    r = req({"reformulate": "phrase avec des puces typographiques", "n": 3,
+             "mode": "rephrase", "nonce": 0})
+    check("reformulate: puces multi-octets retirées entières, pas d'UTF-8 coupé",
+          r.get("variants") == ["Variante à puce.",
+                                "Variante à tiret cadratin.",
+                                "… Variante à points de suspension."], str(r))
+    bullets[0] = False
+    # Groq-only + kinds d'erreur : 401 → error "auth" (l'engine affiche le
+    # panneau « clé refusée — Entrée : reconfigurer »), jamais mis en cache.
+    unauth[0] = True
+    r = req({"reformulate": "phrase pour tester l'auth", "n": 2,
+             "mode": "rephrase", "nonce": 0})
+    check("reformulate: 401 → error 'auth', aucune variante",
+          r.get("error") == "auth" and r.get("variants") == [], str(r))
+    # Le header Authorization ne doit jamais partir en clair : un reformBaseUrl
+    # http:// hors boucle locale est refusé avant même la lecture de la clé.
+    # (127.0.0.1 reste autorisé — c'est ce que fait le mock ci-dessus.)
+    before = len(hits)
+    set_config({"reformBaseUrl": "http://api.groq.com/openai/v1/chat/completions",
+                "reformTimeoutMs": 3000}, 11)
+    r = req({"reformulate": "phrase envoyée en clair", "n": 2,
+             "mode": "rephrase", "nonce": 0})
+    check("reformulate: baseUrl http:// distant → error 'bad_url', aucun appel",
+          r.get("error") == "bad_url" and r.get("variants") == [] and
+          len(hits) == before, str(r))
+    set_config({"reformBaseUrl": f"http://127.0.0.1:{httpd.server_port}",
+                "reformTimeoutMs": 3000}, 12)
+    # reformCheck : validation de clé (dialogue --groq-key). Clé refusée…
+    r = req({"reformCheck": True})
+    check("reformCheck: clé refusée → keyValid false, error auth",
+          r.get("keyPresent") is True and r.get("keyValid") is False and
+          r.get("error") == "auth", str(r))
+    # …puis acceptée (l'API répond 200) : keyValid true.
+    unauth[0] = False
+    r = req({"reformCheck": True})
+    check("reformCheck: clé acceptée → keyValid true",
+          r.get("keyValid") is True and r.get("keyPresent") is True, str(r))
+    # ÉPINGLAGE DE LANGUE : cfg.lang choisi ("fr"/"en") PRIME sur l'heuristique
+    # de détection de la phrase ; "auto" (défaut) garde l'heuristique.
+    base = {"reformBaseUrl": f"http://127.0.0.1:{httpd.server_port}",
+            "reformTimeoutMs": 3000}
+    set_config({**base, "lang": "en"}, 13)
+    req({"reformulate": "bonjour à tous les amis", "n": 2,
+         "mode": "rephrase", "nonce": 0})
+    sysp = bodies[-1]["messages"][0]["content"]
+    check("reformulate: lang=en épingle l'anglais malgré une phrase FR",
+          "English" in sysp, sysp[:70])
+    set_config({**base, "lang": "fr"}, 14)
+    req({"reformulate": "the quick brown fox jumps over the fence", "n": 2,
+         "mode": "rephrase", "nonce": 0})
+    sysp = bodies[-1]["messages"][0]["content"]
+    check("reformulate: lang=fr épingle le français malgré une phrase EN",
+          "français" in sysp, sysp[:70])
+    set_config({**base, "lang": "auto"}, 15)
+    req({"reformulate": "the quick brown fox jumps over the fence", "n": 2,
+         "mode": "rephrase", "nonce": 1})
+    sysp = bodies[-1]["messages"][0]["content"]
+    check("reformulate: lang=auto garde l'heuristique (EN détecté)",
+          "English" in sysp, sysp[:70])
+    httpd.shutdown()
+    set_config({}, 16)
 
     # 9) ROBUSTESSE SIGPIPE : l'engine envoie "learn" en fire-and-forget (écrit
     #    puis ferme SANS lire la réponse). Sans SIG_IGN, le write du daemon sur

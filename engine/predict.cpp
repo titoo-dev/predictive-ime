@@ -17,8 +17,10 @@
 //
 // Sélection : Tab / ⇧Tab navigue, Espace ou Entrée valide le candidat surligné.
 #include <fcitx-utils/capabilityflags.h>
+#include <fcitx-utils/event.h>
 #include <fcitx-utils/key.h>
 #include <fcitx-utils/keysym.h>
+#include <fcitx-utils/eventdispatcher.h>
 #include <fcitx/addonfactory.h>
 #include <fcitx/addonmanager.h>
 #include <fcitx/candidatelist.h>
@@ -37,6 +39,7 @@
 #include <fstream>
 #include <functional>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <fcntl.h>
@@ -44,6 +47,7 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/un.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include <nlohmann/json.hpp>
@@ -69,6 +73,20 @@ struct EngineCfg {
   bool nextWordBar = true;
   bool autoApplyNeedsRevert = true;
   bool escapeForward = true;
+  // Timeout socket (ms). La complétion intra-mot (n-gram, <1 ms) garde
+  // socketTimeoutMs → jamais de gel clavier. Le MOT-SUIVANT peut être neural
+  // (~120-200 ms) : nextWordTimeoutMs le borne SÉPARÉMENT (à relever, ex. 300,
+  // quand neural est activé ; au prix d'un léger hitch après Espace).
+  int socketTimeoutMs = 150;
+  int nextWordTimeoutMs = 150;
+  // Deux phases (E5) : la barre mot-suivant s'affiche TOUT DE SUITE (n-gram),
+  // puis se met à jour quand le neural aboutit (2e ligne sur la même
+  // connexion, lue depuis la boucle d'événements fcitx — zéro blocage).
+  // Sans neural côté daemon la réponse n'est jamais "pending" → aucun effet.
+  bool asyncNextWord = true;
+  // Nombre de variantes de reformulation demandées (borné 1-6 : sélection
+  // aux chiffres 1-6 et bulle compacte).
+  int reformCount = 3;
   // Programmes (sous-chaînes de ic->program(), ex. "ghostty") où la barre
   // SPÉCULATIVE mot-suivant est supprimée : dans un terminal elle n'a pas de
   // preedit pour s'ancrer au curseur et « traîne » derrière lui. La complétion
@@ -76,9 +94,7 @@ struct EngineCfg {
   std::vector<std::string> nextWordBarExclude;
 };
 
-const EngineCfg &engineCfg() {
-  static EngineCfg cfg;
-  static time_t stamp = -1;
+const std::string &configPath() {
   static const std::string path = [] {
     const char *x = ::getenv("XDG_CONFIG_HOME");
     const char *h = ::getenv("HOME");
@@ -86,6 +102,13 @@ const EngineCfg &engineCfg() {
               : std::string(h ? h : "/tmp") + "/.config") +
            "/ime-predictord/config.json";
   }();
+  return path;
+}
+
+const EngineCfg &engineCfg() {
+  static EngineCfg cfg;
+  static time_t stamp = -1;
+  const std::string &path = configPath();
   struct stat st {};
   time_t t = ::stat(path.c_str(), &st) == 0 ? st.st_mtime : 0;
   if (t != stamp) {
@@ -102,6 +125,12 @@ const EngineCfg &engineCfg() {
         fresh.autoApplyNeedsRevert =
             j.value("autoApplyNeedsRevert", fresh.autoApplyNeedsRevert);
         fresh.escapeForward = j.value("escapeForward", fresh.escapeForward);
+        fresh.socketTimeoutMs = j.value("socketTimeoutMs", fresh.socketTimeoutMs);
+        fresh.nextWordTimeoutMs =
+            j.value("nextWordTimeoutMs", fresh.nextWordTimeoutMs);
+        fresh.asyncNextWord = j.value("asyncNextWord", fresh.asyncNextWord);
+        fresh.reformCount = std::min(
+            6, std::max(1, j.value("reformCount", fresh.reformCount)));
         for (const auto &e :
              j.value("nextWordBarExclude", nlohmann::json::array()))
           if (e.is_string())
@@ -112,6 +141,71 @@ const EngineCfg &engineCfg() {
     cfg = fresh;
   }
   return cfg;
+}
+
+// Lecture/écriture de la VALEUR de "lang" dans le TEXTE de config.json —
+// formatage et clés-commentaires préservés (pas de re-sérialisation). On
+// écrit sur la CIBLE réelle (realpath : le fichier peut être un lien stow
+// vers les dotfiles), de façon atomique (tmp + rename). Le daemon recharge
+// sur mtime (granularité seconde) : si le rename retombe dans la même
+// seconde, on pousse le mtime d'une seconde pour que la bascule soit vue.
+// Localise la valeur de "lang" dans `text` → [q1+1, q2) ; false si absente.
+bool langValueSpan(const std::string &text, size_t &q1, size_t &q2) {
+  size_t k = text.find("\"lang\"");
+  if (k == std::string::npos)
+    return false;
+  size_t colon = text.find(':', k + 6);
+  q1 = colon == std::string::npos ? colon : text.find('"', colon + 1);
+  q2 = q1 == std::string::npos ? q1 : text.find('"', q1 + 1);
+  return q2 != std::string::npos;
+}
+
+std::string readLang() {
+  std::ifstream in(configPath());
+  if (!in)
+    return "";
+  std::string text((std::istreambuf_iterator<char>(in)),
+                   std::istreambuf_iterator<char>());
+  size_t q1, q2;
+  return langValueSpan(text, q1, q2) ? text.substr(q1 + 1, q2 - q1 - 1)
+                                     : std::string{};
+}
+
+bool writeLang(const std::string &next) {
+  char *rp = ::realpath(configPath().c_str(), nullptr);
+  if (!rp)
+    return false;
+  const std::string path = rp;
+  ::free(rp);
+  struct stat before {};
+  ::stat(path.c_str(), &before);
+  std::ifstream in(path);
+  if (!in)
+    return false;
+  std::string text((std::istreambuf_iterator<char>(in)),
+                   std::istreambuf_iterator<char>());
+  in.close();
+  size_t q1, q2;
+  if (!langValueSpan(text, q1, q2))
+    return false;
+  text.replace(q1 + 1, q2 - q1 - 1, next);
+  const std::string tmp = path + ".tmp";
+  std::ofstream out(tmp, std::ios::trunc);
+  if (!out)
+    return false;
+  out << text;
+  out.close();
+  if (!out || ::rename(tmp.c_str(), path.c_str()) != 0) {
+    ::unlink(tmp.c_str());
+    return false;
+  }
+  struct stat after {};
+  if (::stat(path.c_str(), &after) == 0 &&
+      after.st_mtime <= before.st_mtime) {
+    struct timespec ts[2] = {{0, UTIME_OMIT}, {before.st_mtime + 1, 0}};
+    ::utimensat(AT_FDCWD, path.c_str(), ts, 0);
+  }
+  return true;
 }
 
 // ----------------------------------------------------------------- UTF-8 ----
@@ -234,7 +328,13 @@ std::string capFirst(const std::string &w) {
 
 // Reporte la casse du `buffer` tapé sur un candidat (minuscule du modèle).
 // "Bonjou" → "Bonjour" ; "FRAN" → "FRANÇAIS" ; "le" → inchangé.
-std::string applyCase(const std::string &cand, const std::string &buffer) {
+// Anglais : « i » seul et les contractions « i'… » (i'm, i'll, i've, i'd)
+// prennent TOUJOURS la majuscule — aucun mot français n'est « i » ni ne
+// commence par « i' », la règle est donc sûre sans condition de langue.
+std::string applyCase(const std::string &cand_, const std::string &buffer) {
+  std::string cand = cand_;
+  if (cand == "i" || cand.rfind("i'", 0) == 0)
+    cand[0] = 'I';
   auto bcps = decodeUtf8(buffer);
   bool firstUpper = false, allUpper = true;
   int letters = 0;
@@ -305,11 +405,32 @@ std::vector<std::string> lastWords(const std::vector<uint32_t> &cps,
   return out;
 }
 
+// Supprime `n` cp avant le curseur ET répercute sur la copie LOCALE du
+// SurroundingText : l'app ne renvoie son update qu'après un aller-retour,
+// et une complétion relancée juste derrière lirait sinon l'ancien texte
+// (le mot supprimé polluerait son propre contexte).
+void deleteSurroundingBefore(fcitx::InputContext *ic, unsigned n) {
+  ic->deleteSurroundingText(-int(n), n);
+  auto &st = ic->surroundingText();
+  auto cps = decodeUtf8(st.text());
+  size_t cur = st.cursor();
+  if (n == 0 || n > cur || cur > cps.size())
+    return;
+  std::string out;
+  for (size_t i = 0; i < cps.size(); i++)
+    if (i < cur - n || i >= cur)
+      appendCp(out, cps[i]);
+  st.setText(out, cur - n, cur - n);
+}
+
 // ----------------------------------------------------------- daemon IPC -----
 struct DaemonReply {
   std::vector<std::string> candidates;
   bool literalIsWord = false;
   std::string autocomplete; // mot à appliquer sur Espace (haute confiance), ou ""
+  std::string ghost;        // complétion affichée en fantôme (→ l'accepte)
+  bool accentOnly = false;  // autocomplete = pure restauration d'accents
+  bool pending = false;     // un refresh neural suivra sur la même connexion
 };
 
 // Connexion au daemon BORNÉE dans le temps : on tourne sur le thread principal
@@ -319,7 +440,7 @@ struct DaemonReply {
 // frappe continue sans candidats.
 constexpr int kDaemonTimeoutMs = 150;
 
-int connectDaemon() {
+int connectDaemon(int timeoutMs = kDaemonTimeoutMs) {
   const char *envSock = ::getenv("IME_PREDICTORD_SOCK");
   std::string path = envSock ? envSock : "/tmp/ime-predictord.sock";
   int fd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0);
@@ -335,21 +456,40 @@ int connectDaemon() {
   int fl = ::fcntl(fd, F_GETFL);
   if (fl >= 0)
     ::fcntl(fd, F_SETFL, fl & ~O_NONBLOCK);
-  timeval tv{0, kDaemonTimeoutMs * 1000};
+  timeval tv{timeoutMs / 1000, (timeoutMs % 1000) * 1000};
   ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
   ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
   return fd;
 }
 
+// pendingFd (E5) : si non-nul et que le daemon annonce un refresh à venir
+// ("pending":true), la connexion reste OUVERTE et son fd est rendu à
+// l'appelant (qui la surveille depuis la boucle d'événements fcitx) ; sinon
+// elle est fermée comme avant.
 DaemonReply queryDaemon(const std::vector<std::string> &context,
-                        const std::string &prefix) {
+                        const std::string &prefix,
+                        const std::string &wide = {},
+                        int *pendingFd = nullptr) {
   DaemonReply out;
-  int fd = connectDaemon();
+  // Mot-suivant (prefix vide) = peut être neural → budget séparé, relevable.
+  // Complétion intra-mot (prefix non vide) = n-gram rapide → timeout court, le
+  // clavier ne gèle jamais derrière le daemon.
+  int timeoutMs = prefix.empty() ? engineCfg().nextWordTimeoutMs
+                                  : engineCfg().socketTimeoutMs;
+  int fd = connectDaemon(timeoutMs);
   if (fd < 0)
     return out;
   json req;
   req["context"] = context;
   req["prefix"] = prefix;
+  // Contexte LARGE (texte brut avant le curseur, phrases précédentes et
+  // ponctuation comprises) : réservé au prédicteur neuronal côté daemon — son
+  // avantage mesuré EXIGE le contexte long. Le n-gram garde `context` (borné
+  // à la phrase).
+  if (!wide.empty())
+    req["wide"] = wide;
+  if (pendingFd)
+    req["async"] = true; // deux phases : n-gram immédiat + refresh neural
   std::string line = req.dump() + "\n";
   if (::send(fd, line.data(), line.size(), MSG_NOSIGNAL) < 0) {
     ::close(fd);
@@ -360,18 +500,26 @@ DaemonReply queryDaemon(const std::vector<std::string> &context,
   ssize_t n;
   while ((n = ::read(fd, tmp, sizeof(tmp))) > 0) {
     buf.append(tmp, n);
-    if (!buf.empty() && buf.back() == '\n')
+    if (buf.find('\n') != std::string::npos)
       break;
   }
-  ::close(fd);
   try {
-    json resp = json::parse(buf);
+    json resp = json::parse(buf.substr(0, buf.find('\n')));
     for (auto &c : resp.value("candidates", json::array()))
       out.candidates.push_back(c.get<std::string>());
     out.literalIsWord = resp.value("literalIsWord", false);
     out.autocomplete = resp.value("autocomplete", std::string{});
+    // repli vieux daemon (pas de champ ghost) : le fantôme suit l'autocomplete
+    out.ghost = resp.value("ghost", out.autocomplete);
+    out.accentOnly = resp.value("accentOnly", false);
+    out.pending = resp.value("pending", false);
   } catch (...) {
   }
+  if (out.pending && pendingFd) {
+    *pendingFd = fd; // la 2e ligne arrivera ici — surveillée par l'event loop
+    return out;
+  }
+  ::close(fd);
   return out;
 }
 
@@ -403,6 +551,71 @@ void vetoDaemon(const std::string &typed, const std::string &applied) {
   ::close(fd);
 }
 
+// Reformulation : on envoie le texte + le MODE + un NONCE (pour régénérer), le
+// daemon GÉNÈRE les variantes (Groq <1s, ou neural local quelques s). Timeout
+// long (≠ prédiction par-frappe) — action explicite, exécutée dans un thread.
+struct ReformResult {
+  std::vector<std::string> variants;
+  std::string source; // "groq" / "none" → badge du header
+  // pourquoi c'est vide : no_key / auth / network / http / empty / superseded
+  // (cf reformulate_http.h) — l'engine en fait un panneau compact.
+  std::string error;
+};
+// La réponse peut arriver en PLUSIEURS lignes : des lignes
+// {"variants":[...],"partial":true} (STREAMING local — la 1re variante
+// s'affiche pendant que les suivantes se génèrent encore), puis la ligne
+// FINALE {"variants":[...],"source":...} qui clôt l'échange. `onPartial` est
+// appelé depuis le thread appelant pour chaque ligne partielle.
+ReformResult reformulateDaemon(
+    const std::string &sentence, const std::string &mode, uint32_t nonce,
+    int nWant,
+    const std::function<void(std::vector<std::string>)> &onPartial = nullptr) {
+  ReformResult out;
+  int fd = connectDaemon(/*timeoutMs=*/12000);
+  if (fd < 0)
+    return out;
+  json req;
+  req["reformulate"] = sentence;
+  req["n"] = nWant;
+  req["mode"] = mode;
+  req["nonce"] = nonce;
+  std::string line = req.dump() + "\n";
+  if (::send(fd, line.data(), line.size(), MSG_NOSIGNAL) < 0) {
+    ::close(fd);
+    return out;
+  }
+  std::string buf;
+  char tmp[8192];
+  ssize_t n;
+  while ((n = ::read(fd, tmp, sizeof(tmp))) > 0) {
+    buf.append(tmp, n);
+    size_t nl;
+    while ((nl = buf.find('\n')) != std::string::npos) {
+      std::string one = buf.substr(0, nl);
+      buf.erase(0, nl + 1);
+      try {
+        json resp = json::parse(one);
+        std::vector<std::string> vars;
+        for (auto &v : resp.value("variants", json::array()))
+          vars.push_back(v.get<std::string>());
+        if (resp.value("partial", false)) {
+          if (onPartial)
+            onPartial(std::move(vars));
+          continue;
+        }
+        out.variants = std::move(vars);
+        out.source = resp.value("source", std::string{"none"});
+        out.error = resp.value("error", std::string{});
+        ::close(fd);
+        return out;
+      } catch (...) {
+      }
+    }
+  }
+  ::close(fd);
+  return out;
+}
+
 // État par contexte d'entrée.
 struct PredictState : public fcitx::InputContextProperty {
   std::string buffer;                // mot en cours (préfixe, UTF-8)
@@ -412,11 +625,31 @@ struct PredictState : public fcitx::InputContextProperty {
   bool navigating = false;           // l'utilisateur a commencé à choisir (Tab)
   bool literalIsWord = false;        // le préfixe tapé est-il déjà un vrai mot ?
   std::string autocomplete;          // mot appliqué sur Espace (haute confiance)
+  std::string ghost;                 // complétion fantôme (→ l'accepte)
+  bool accentOnly = false;           // autocomplete = restauration d'accents pure
   // Fenêtre de REVERT d'une auto-application (Backspace juste après) :
   std::string lastAutoLit;           // le littéral qui a été remplacé
   std::string lastAutoWord;          // le mot qui avait été appliqué
   uint32_t lastAutoCps = 0;          // points de code committés à effacer
   bool vetoAuto = false;             // l'utilisateur a refusé : Espace garde le littéral
+  bool langMenu = false;             // panneau de langue ouvert (Ctrl+Shift+L)
+  int langIndex = 0;                 // choix surligné dans kLangChoices
+  bool reformulating = false;        // mode reformulation : cands = variantes de la sélection
+  bool reformLoading = false;        // génération en cours (placeholder « ⟳ »)
+  std::string reformNotice;          // panneau d'échec (no_key/auth/network/…)
+  std::string reformText;            // texte source (sélection / surrounding) — regen + revert
+  bool reformFromSelection = false;  // false = repli « champ entier » : le
+                                     // commit doit SUPPRIMER le champ lui-même
+  int reformMode = 0;                // index dans kReformModes (←/→ pour changer)
+  uint32_t reformNonce = 0;          // varie le seed → « régénérer » (Ctrl+Alt+R)
+  uint32_t reformGen = 0;            // n° de génération : ignore les résultats obsolètes
+  std::string reformSource;          // "groq"/"local"/"none" → badge du header
+  // Revert (Backspace juste après remplacement → restaure l'original). One-shot.
+  std::string reformRevertOrig;
+  uint32_t reformRevertCps = 0;      // points de code de la variante committée à effacer
+  // Génération de la barre mot-suivant (E5) : un refresh neural arrivé APRÈS
+  // que l'état a changé (frappe, commit, reset) est jeté (gen différente).
+  uint64_t nextWordGen = 0;
 };
 
 class PredictCandidate : public fcitx::CandidateWord {
@@ -447,10 +680,22 @@ public:
   void append(std::string text, bool autoApply) {
     cands_.push_back(
         std::make_unique<PredictCandidate>(std::move(text), autoApply));
+    labels_.emplace_back(); // pas de label (chips de mots/emoji)
+  }
+  // Candidat AVEC label (numéro) : mode reformulation → l'UI passe en liste
+  // verticale numérotée (le label non vide est le signal lu par qmlui).
+  void appendLabeled(std::string text, const std::string &label) {
+    cands_.push_back(
+        std::make_unique<PredictCandidate>(std::move(text), /*autoApply=*/false));
+    fcitx::Text t;
+    t.append(label);
+    labels_.push_back(std::move(t));
   }
   void setCursorIndex(int i) { cursor_ = i; }
 
-  const fcitx::Text &label(int) const override { return emptyLabel_; }
+  const fcitx::Text &label(int idx) const override {
+    return (idx >= 0 && idx < (int)labels_.size()) ? labels_[idx] : emptyLabel_;
+  }
   const fcitx::CandidateWord &candidate(int idx) const override {
     return *cands_[idx];
   }
@@ -462,9 +707,51 @@ public:
 
 private:
   std::vector<std::unique_ptr<PredictCandidate>> cands_;
+  std::vector<fcitx::Text> labels_;
   fcitx::Text emptyLabel_;
   int cursor_ = -1;
 };
+
+// Chiffre « physique » 0-based d'une touche pour la SÉLECTION dans les
+// panneaux MODAUX (langue, reformulation) : '1'-'9' directs, sinon la rangée
+// AZERTY non shiftée (&é"'(-è_ç — sur AZERTY les chiffres exigent Shift, et
+// « autre touche » fermait le panneau EN SILENCE : bascule de langue perdue),
+// sinon le keycode évdev 10-18 (rangée physique, indépendant de la
+// disposition — couvre BÉPO & co en session réelle ; les tests headless ne
+// portent pas de keycode). Ne PAS utiliser pendant la composition : é/è/ç/-
+// y sont des lettres.
+int panelDigit(const fcitx::Key &key, uint32_t cp) {
+  if (cp >= '1' && cp <= '9')
+    return int(cp - '1');
+  static const uint32_t az[] = {'&', 0xE9, '"', '\'', '(', '-', 0xE8, '_', 0xE7};
+  for (int i = 0; i < 9; i++)
+    if (cp && cp == az[i])
+      return i;
+  if (key.code() >= 10 && key.code() <= 18)
+    return key.code() - 10;
+  return -1;
+}
+
+// Panneau de LANGUE (Ctrl+Shift+L) : valeur écrite dans config.json + libellé
+// des chips. Extensible : ajouter une langue = une ligne ici (une fois le
+// support daemon/modèle en place).
+struct LangChoice { const char *value; const char *label; };
+static const LangChoice kLangChoices[] = {
+    {"fr", "Français"}, {"en", "English"},
+    {"auto", "Auto"},   {"off", "Libre"},
+};
+static const int kNumLangChoices =
+    int(sizeof(kLangChoices) / sizeof(kLangChoices[0]));
+
+// Modes de reformulation : clé envoyée au daemon (cf reform_prompts.h) + libellé
+// affiché dans le header de la bulle. ←/→ cyclent dans cette liste.
+struct ReformMode { const char *key; const char *label; };
+static const ReformMode kReformModes[] = {
+    {"rephrase", "Reformuler"}, {"formal", "Formel"}, {"simple", "Simple"},
+    {"short", "Court"},         {"correct", "Corriger"}, {"translate", "Traduire"},
+};
+static const int kNumReformModes =
+    int(sizeof(kReformModes) / sizeof(kReformModes[0]));
 
 } // namespace
 
@@ -475,7 +762,13 @@ public:
         factory_([](fcitx::InputContext &) { return new PredictState; }) {
     instance_->inputContextManager().registerProperty("predictState",
                                                        &factory_);
+    // Notre propre dispatcher, greffé sur l'event loop de l'instance :
+    // Instance::eventDispatcher() n'existe pas sur le fcitx5 des vieilles
+    // distros (Ubuntu 24.04 livre 5.1.7). Cf postToMain.
+    dispatcher_.attach(&instance_->eventLoop());
   }
+
+  ~PredictEngine() override { disarmRefresh(); }
 
   void keyEvent(const fcitx::InputMethodEntry &,
                 fcitx::KeyEvent &event) override {
@@ -503,9 +796,197 @@ public:
                states.test(fcitx::KeyState::Super);
     uint32_t cp = fcitx::Key::keySymToUnicode(sym);
     if (::getenv("IME_DEBUG"))
-      fprintf(stderr, "[predict] sym=0x%x cp=0x%x buf='%s' nav=%d cands=%zu\n",
-              sym, cp, state->buffer.c_str(), int(state->navigating),
-              state->cands.size());
+      fprintf(stderr,
+              "[predict] sym=0x%x cp=0x%x C=%d A=%d S=%d Su=%d buf='%s' nav=%d reform=%d\n",
+              sym, cp, int(states.test(fcitx::KeyState::Ctrl)),
+              int(states.test(fcitx::KeyState::Alt)),
+              int(states.test(fcitx::KeyState::Shift)),
+              int(states.test(fcitx::KeyState::Super)), state->buffer.c_str(),
+              int(state->navigating), int(state->reformulating));
+
+    // (L) PANNEAU DE LANGUE : chips [Français|English|Auto|Libre], le choix
+    // courant surligné. Toute touche gérée est CONSOMMÉE (cf mode
+    // reformulation : sinon fcitx la réinjecte dans l'appli).
+    if (state->langMenu) {
+      if (sym == FcitxKey_Escape) {
+        exitLangMenu(ic, state);
+        event.filterAndAccept();
+        return;
+      }
+      int ld = panelDigit(key, cp);
+      if (!mod && ld >= 0 && ld < kNumLangChoices) {
+        applyLangChoice(ic, state, ld);
+        event.filterAndAccept();
+        return;
+      }
+      // ←/→/Tab (et Ctrl+Shift+L à nouveau) : déplacer le surlignage.
+      bool again = (sym == FcitxKey_l || sym == FcitxKey_L) &&
+                   states.test(fcitx::KeyState::Ctrl) &&
+                   states.test(fcitx::KeyState::Shift);
+      if ((!mod && (sym == FcitxKey_Right || sym == FcitxKey_Tab)) || again) {
+        state->langIndex = (state->langIndex + 1) % kNumLangChoices;
+        setLangMenuCandidates(ic, state);
+        event.filterAndAccept();
+        return;
+      }
+      if (!mod && (sym == FcitxKey_Left || sym == FcitxKey_ISO_Left_Tab)) {
+        state->langIndex =
+            (state->langIndex - 1 + kNumLangChoices) % kNumLangChoices;
+        setLangMenuCandidates(ic, state);
+        event.filterAndAccept();
+        return;
+      }
+      if (!mod && (sym == FcitxKey_Return || sym == FcitxKey_KP_Enter ||
+                   sym == FcitxKey_space)) {
+        applyLangChoice(ic, state, state->langIndex);
+        event.filterAndAccept();
+        return;
+      }
+      exitLangMenu(ic, state); // autre touche → on sort et on continue
+    }
+
+    // (R-notice) PANNEAU D'ÉCHEC de reformulation (clé manquante/refusée,
+    // API indisponible) : Entrée ouvre le dialogue de clé quand c'est une
+    // affaire de clé ; Échap/Entrée sont avalées, toute autre touche ferme
+    // le panneau puis continue sa vie normale.
+    if (state->reformulating && !state->reformNotice.empty()) {
+      bool keyIssue =
+          state->reformNotice == "no_key" || state->reformNotice == "auth";
+      bool enter = !mod &&
+                   (sym == FcitxKey_Return || sym == FcitxKey_KP_Enter);
+      if (keyIssue && enter)
+        spawnKeyDialog();
+      exitReformulation(ic, state);
+      if (enter || sym == FcitxKey_Escape) {
+        event.filterAndAccept();
+        return;
+      }
+      // fall-through : la touche est traitée normalement ci-dessous
+    }
+
+    // (R) MODE REFORMULATION : la barre montre les variantes de la sélection ;
+    // 1-9 ou Tab/flèches+Entrée REMPLACE la sélection, ←/→ ou r/f/s/c/t change
+    // de mode, Échap annule. Toute autre touche quitte le mode et retombe
+    // dans la saisie normale.
+    if (state->reformulating) {
+      // IMPORTANT : toute touche qu'on GÈRE doit être CONSOMMÉE
+      // (filterAndAccept), sinon fcitx la réinjecte dans l'appli — Tab tapait
+      // une tabulation PAR-DESSUS la sélection (« grand blanc qui écrase le
+      // texte »), les chiffres/Entrée fuyaient aussi.
+      if (sym == FcitxKey_Escape) {
+        exitReformulation(ic, state);
+        event.filterAndAccept();
+        return;
+      }
+      if (state->reformLoading) { // génération en cours → on avale tout (sauf Échap)
+        event.filterAndAccept();
+        return;
+      }
+      // RÉGÉNÉRER : re-presser Ctrl+Alt+R → nouvelles variantes (même mode).
+      if (states.test(fcitx::KeyState::Ctrl) &&
+          states.test(fcitx::KeyState::Alt) &&
+          (sym == FcitxKey_r || sym == FcitxKey_R)) {
+        state->reformNonce++;
+        runReformulation(ic, state);
+        event.filterAndAccept();
+        return;
+      }
+      int n = (int)state->cands.size();
+      int rd = panelDigit(key, cp);
+      if (!mod && rd >= 0 && rd < n) {
+        commitReformulation(ic, state, rd);
+        event.filterAndAccept();
+        return;
+      }
+      // Raccourcis DIRECTS de mode : r/f/s/c/t sautent au mode (Reformuler/
+      // Formel/Simple/Corriger/Traduire ; « Court » reste accessible aux
+      // ←/→ — 'c' est pris par Corriger). Même mode → no-op (avalé).
+      if (!mod && cp) {
+        uint32_t lc = cp | 0x20; // tolère la majuscule
+        const char *k = lc == 'r'   ? "rephrase"
+                        : lc == 'f' ? "formal"
+                        : lc == 's' ? "simple"
+                        : lc == 'c' ? "correct"
+                        : lc == 't' ? "translate"
+                                    : nullptr;
+        if (k) {
+          for (int m = 0; m < kNumReformModes; m++)
+            if (std::string(kReformModes[m].key) == k && m != state->reformMode) {
+              state->reformMode = m;
+              state->reformNonce = 0; // nouveau mode → repart du 1er tirage
+              runReformulation(ic, state);
+              break;
+            }
+          event.filterAndAccept();
+          return;
+        }
+      }
+      // ←/→ : changer de MODE (régénère dans le nouveau mode).
+      if (!mod && (sym == FcitxKey_Right || sym == FcitxKey_Left)) {
+        int d = (sym == FcitxKey_Right) ? 1 : -1;
+        state->reformMode =
+            (state->reformMode + d + kNumReformModes) % kNumReformModes;
+        state->reformNonce = 0; // nouveau mode → repart du 1er tirage
+        runReformulation(ic, state);
+        event.filterAndAccept();
+        return;
+      }
+      // bulle VERTICALE → ↓/Tab = variante suivante, ↑/⇧Tab = précédente.
+      if (!mod && (sym == FcitxKey_Tab || sym == FcitxKey_Down) && n) {
+        state->navIndex = (state->navIndex + 1) % n;
+        setReformulationCandidates(ic, state);
+        event.filterAndAccept();
+        return;
+      }
+      if (!mod && (sym == FcitxKey_ISO_Left_Tab || sym == FcitxKey_Up) && n) {
+        state->navIndex = (state->navIndex - 1 + n) % n;
+        setReformulationCandidates(ic, state);
+        event.filterAndAccept();
+        return;
+      }
+      if (!mod && (sym == FcitxKey_Return || sym == FcitxKey_KP_Enter)) {
+        commitReformulation(ic, state, state->navIndex);
+        event.filterAndAccept();
+        return;
+      }
+      exitReformulation(ic, state); // autre touche → on sort et on continue
+    }
+
+    // (R-trig) DÉCLENCHEUR : Ctrl+Alt+R sur une SÉLECTION → 3 reformulations.
+    // NB: sur AZERTY/Wayland, Ctrl+lettre remonte le keysym en MAJUSCULE
+    // (FcitxKey_R, pas FcitxKey_r) → on accepte les deux casses.
+    if (states.test(fcitx::KeyState::Ctrl) &&
+        states.test(fcitx::KeyState::Alt) &&
+        (sym == FcitxKey_r || sym == FcitxKey_R)) {
+      enterReformulation(ic, state); // si pas de sélection/variantes : no-op
+      event.filterAndAccept();       // consomme le raccourci dans tous les cas
+      return;
+    }
+
+    // (0-bis) REVERT REFORMULATION : Backspace IMMÉDIATEMENT après avoir choisi
+    // une reformulation efface la variante committée et restaure le texte
+    // original. One-shot (ne dure qu'une touche), façon undo.
+    uint32_t reformRevCps = state->reformRevertCps;
+    state->reformRevertCps = 0;
+    if (sym == FcitxKey_BackSpace && !mod && state->buffer.empty() &&
+        reformRevCps > 0 &&
+        ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText) &&
+        ic->surroundingText().isValid()) {
+      ic->deleteSurroundingText(-int(reformRevCps), reformRevCps);
+      ic->commitString(state->reformRevertOrig);
+      event.filterAndAccept();
+      return;
+    }
+
+    // (0-) Ctrl+Shift+L : ouvre le PANNEAU DE LANGUE (chips compactes, choix
+    //      courant surligné — cf bloc (L) plus haut pour la navigation).
+    if ((sym == FcitxKey_l || sym == FcitxKey_L) &&
+        states.test(fcitx::KeyState::Ctrl) &&
+        states.test(fcitx::KeyState::Shift)) {
+      enterLangMenu(ic, state);
+      event.filterAndAccept();
+      return;
+    }
 
     // (0) Fenêtre de REVERT : Backspace IMMÉDIATEMENT après une
     // auto-application efface le mot appliqué, restaure le littéral tapé et
@@ -517,7 +998,7 @@ public:
         autoCps > 0 &&
         ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText) &&
         ic->surroundingText().isValid()) {
-      ic->deleteSurroundingText(-int(autoCps), autoCps);
+      deleteSurroundingBefore(ic, autoCps);
       state->buffer = state->lastAutoLit;
       state->vetoAuto = true;
       // veto PERSISTANT : cette paire tapé→appliqué ne sera plus jamais
@@ -573,12 +1054,57 @@ public:
       return;
     }
 
-    // (2bis) Backspace AVEC BUFFER VIDE : on supprime du texte DÉJÀ committé
-    //        — Backspace simple (un caractère) ou Ctrl+Backspace (un MOT). La
-    //        barre mot-suivant est spéculative : on la FERME et on laisse la
-    //        touche filer à l'application (pas de filterAndAccept). Sans cette
-    //        branche, Ctrl+Backspace (mod) tombait dans « (4) if (mod) return »
-    //        et la barre restait ouverte même une fois l'input entièrement vidé.
+    // (2bis) Backspace AVEC BUFFER VIDE : on supprime du texte DÉJÀ committé.
+    //        Si la suppression « rentre » dans un mot (fin de mot juste avant
+    //        le curseur — cas typique : « deman ␣ » puis ⌫ efface l'espace),
+    //        on RECOMPOSE : le mot repasse en préedit et la barre revient,
+    //        contexte intact — sinon revenir sur un mot déjà committé ne
+    //        proposait plus rien. Même patron que le revert (0) :
+    //        deleteSurroundingText + buffer + updateCompletion.
+    if (sym == FcitxKey_BackSpace && !mod && state->buffer.empty() &&
+        ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText) &&
+        ic->surroundingText().isValid()) {
+      const auto &st = ic->surroundingText();
+      auto cps = decodeUtf8(st.text());
+      size_t cur = st.cursor();
+      auto isWordCp = [](uint32_t c) {
+        return isLetterCp(c) || c == '\'' || c == 0x2019 || c == '-';
+      };
+      // pas de sélection, curseur en FIN de mot (jamais en plein milieu —
+      // recomposer la moitié gauche corromprait le texte au commit suivant)
+      if (st.anchor() == cur && cur > 0 && cur <= cps.size() &&
+          (cur == cps.size() || !isWordCp(cps[cur]))) {
+        size_t end = cur - 1; // état après le Backspace simulé
+        size_t start = end;
+        while (start > 0 && isWordCp(cps[start - 1]))
+          --start;
+        bool hasLetter = false;
+        for (size_t i = start; i < end; i++)
+          hasLetter = hasLetter || isLetterCp(cps[i]);
+        // ponytail: cap à 32 cp — un token géant (URL…) ne se recompose pas
+        if (hasLetter && end - start <= 32) {
+          std::string word;
+          for (size_t i = start; i < end; i++)
+            appendCp(word, cps[i]);
+          deleteSurroundingBefore(ic, cur - start);
+          state->buffer = word;
+          // le mot recomposé n'est plus committé — mais seulement s'il est
+          // bien le dernier du contexte (on peut backspacer un VIEUX mot)
+          if (!state->ctx.empty() && state->ctx.back().rfind(word, 0) == 0)
+            state->ctx.pop_back();
+          state->navigating = false;
+          updateCompletion(ic, state);
+          event.filterAndAccept();
+          return;
+        }
+      }
+    }
+    //        Sinon : Backspace simple (un caractère) ou Ctrl+Backspace (un
+    //        MOT). La barre mot-suivant est spéculative : on la FERME et on
+    //        laisse la touche filer à l'application (pas de filterAndAccept).
+    //        Sans cette branche, Ctrl+Backspace (mod) tombait dans « (4) if
+    //        (mod) return » et la barre restait ouverte même une fois l'input
+    //        entièrement vidé.
     if (sym == FcitxKey_BackSpace && state->buffer.empty()) {
       state->navigating = false;
       if (ic->inputPanel().candidateList())
@@ -618,9 +1144,26 @@ public:
         event.filterAndAccept();
         return;
       }
-      if (!mod && state->navigating &&
+      // ←/→ naviguent aussi ; en GRILLE emoji ils ENTRENT directement (pas
+      // besoin de Tab d'abord — sans ça ils committaient le littéral ':xyz'
+      // et la touche fuyait vers l'application).
+      if (!mod && (state->navigating || emojiGrid) &&
           (sym == FcitxKey_Left || sym == FcitxKey_Right)) {
         navigate(ic, state, sym == FcitxKey_Right ? +1 : -1);
+        event.filterAndAccept();
+        return;
+      }
+      // → ACCEPTE le texte fantôme (accept explicite, façon Copilot/fish) :
+      // committe la complétion SANS espace — la frappe continue naturellement.
+      // Seulement quand le fantôme est réellement AFFICHÉ (mêmes conditions
+      // que updateCompletion) ; sinon → committe le littéral et file à l'app
+      // (branche « toute autre touche » plus bas), comme avant.
+      if (!mod && sym == FcitxKey_Right && !state->navigating &&
+          engineCfg().ghostText && !state->literalIsWord &&
+          !state->vetoAuto &&
+          state->ghost.size() > state->buffer.size() &&
+          state->ghost.compare(0, state->buffer.size(), state->buffer) == 0) {
+        commitWord(ic, state, state->ghost, /*trailingSpace=*/false);
         event.filterAndAccept();
         return;
       }
@@ -642,6 +1185,13 @@ public:
         if (state->navigating) {
           commitWord(ic, state, highlighted(state), /*space=*/false);
           event.filterAndAccept(); // suggestion prise → on avale Entrée
+        } else if (isTriggerBuffer(state->buffer) && state->buffer.size() > 1 &&
+                   !state->cands.empty()) {
+          // Picker emoji / snippet AVEC requête : Entrée prend le 1er candidat
+          // (comme l'Espace, mais sans espace final). Le déclencheur nu
+          // (':' seul) garde le comportement littéral — Entrée = retour-ligne.
+          commitWord(ic, state, state->cands[0], /*space=*/false);
+          event.filterAndAccept();
         } else {
           commitWord(ic, state, state->buffer, /*space=*/false);
           // littéral validé → on LAISSE passer Entrée (retour-ligne / envoi).
@@ -786,10 +1336,83 @@ public:
     state->vetoAuto = false;
     state->lastAutoCps = 0;
     state->lastAutoLit.clear();
+    state->ghost.clear();
+    state->accentOnly = false;
+    state->nextWordGen++; // un refresh neural en vol devient périmé
     clearPanel(ic);
   }
 
 private:
+  // ---- Refresh mot-suivant asynchrone (E5) --------------------------------
+  // Une seule connexion en attente à la fois (un clavier, un curseur) : armer
+  // remplace/ferme la précédente. Le fd est surveillé depuis la boucle
+  // d'événements de fcitx — rien ne bloque jamais le thread clavier.
+  void disarmRefresh() {
+    if (refreshWatch_)
+      refreshWatch_->setEnabled(false);
+    if (refreshFd_ >= 0) {
+      ::close(refreshFd_);
+      refreshFd_ = -1;
+    }
+    refreshBuf_.clear();
+  }
+
+  void armRefresh(int fd, fcitx::InputContext *ic, PredictState *state) {
+    disarmRefresh();
+    refreshWatch_.reset(); // l'ancienne source (désactivée) peut mourir ici
+    refreshFd_ = fd;
+    refreshUUID_ = ic->uuid();
+    refreshGen_ = state->nextWordGen;
+    refreshWatch_ = instance_->eventLoop().addIOEvent(
+        fd, fcitx::IOEventFlags{fcitx::IOEventFlag::In},
+        [this](fcitx::EventSourceIO *, int, fcitx::IOEventFlags) {
+          onRefreshReadable();
+          return true;
+        });
+  }
+
+  void onRefreshReadable() {
+    if (refreshFd_ < 0)
+      return;
+    char tmp[4096];
+    ssize_t n;
+    while ((n = ::read(refreshFd_, tmp, sizeof(tmp))) > 0)
+      refreshBuf_.append(tmp, n);
+    size_t nl = refreshBuf_.find('\n');
+    if (nl == std::string::npos) {
+      // EOF/erreur sans ligne complète (daemon redémarré…) : on désarme.
+      if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK))
+        disarmRefresh();
+      return;
+    }
+    std::string line = refreshBuf_.substr(0, nl);
+    disarmRefresh(); // single-shot : une ligne = un refresh
+    std::vector<std::string> cands;
+    try {
+      json resp = json::parse(line);
+      if (!resp.value("refresh", false))
+        return;
+      for (auto &c : resp.value("candidates", json::array()))
+        cands.push_back(c.get<std::string>());
+    } catch (...) {
+      return;
+    }
+    if (cands.empty())
+      return;
+    auto *ic = instance_->inputContextManager().findByUUID(refreshUUID_);
+    if (!ic || !ic->hasFocus())
+      return;
+    auto *state = ic->propertyFor(&factory_);
+    // Périmé si quoi que ce soit a bougé depuis l'armement (frappe, commit,
+    // navigation, reset) — la barre affichée doit toujours refléter l'état.
+    if (state->nextWordGen != refreshGen_ || !state->buffer.empty() ||
+        state->navigating)
+      return;
+    state->cands = std::move(cands);
+    state->navIndex = 0;
+    setCandidates(ic, state);
+    ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
+  }
   void clearPanel(fcitx::InputContext *ic) {
     ic->inputPanel().reset();
     ic->updatePreedit();
@@ -836,6 +1459,37 @@ private:
     return state->ctx;
   }
 
+  // Contexte LARGE pour le prédicteur neuronal : le texte BRUT avant le
+  // curseur (casse, ponctuation, phrases précédentes — tout ce qu'un LLM
+  // exploite et que le contexte n-gram borné à la phrase jette). ~240
+  // caractères, coupés à un début de mot. Repli sans SurroundingText : les
+  // derniers mots committés.
+  std::string wideTextFor(fcitx::InputContext *ic, PredictState *state) {
+    if (ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText) &&
+        ic->surroundingText().isValid()) {
+      auto cps = decodeUtf8(ic->surroundingText().text());
+      unsigned int cur = ic->surroundingText().cursor();
+      if (cur < cps.size())
+        cps.resize(cur);
+      size_t from = cps.size() > 240 ? cps.size() - 240 : 0;
+      if (from > 0) // ne pas démarrer en plein mot
+        while (from < cps.size() && isLetterCp(cps[from]))
+          ++from;
+      std::string out;
+      for (size_t i = from; i < cps.size(); i++)
+        appendCp(out, cps[i]);
+      if (!out.empty())
+        return out;
+    }
+    std::string out;
+    for (const auto &w : state->ctx) {
+      if (!out.empty())
+        out += ' ';
+      out += w;
+    }
+    return out;
+  }
+
   // 8 mots de contexte (repli quand pas de SurroundingText) : le daemon
   // n'utilise que les 2 derniers pour les n-grammes, mais tout le contexte sert
   // à la DÉTECTION DE LANGUE et à l'ACCORD (déterminant gouverneur du SN).
@@ -867,7 +1521,10 @@ private:
       return state->buffer;
     // auto-application haute confiance seulement (complétion de préfixe, ou
     // faute simple) ; sinon on garde le littéral — jamais "j'ai" → "jail".
-    if (!state->literalIsWord && !state->autocomplete.empty())
+    // Une RESTAURATION D'ACCENTS (fold-equal : francais→français) s'applique
+    // même si le tapé est un vrai mot du corpus — elle ne change jamais le mot.
+    if (!state->autocomplete.empty() &&
+        (!state->literalIsWord || state->accentOnly))
       return state->autocomplete;
     return state->buffer;
   }
@@ -909,6 +1566,7 @@ private:
   void commitWord(fcitx::InputContext *ic, PredictState *state,
                   const std::string &raw, bool trailingSpace,
                   bool learn = true) {
+    state->nextWordGen++; // le commit invalide tout refresh en vol
     bool trigger = isTriggerBuffer(state->buffer); // emoji ':' / snippet ';'
     std::string word = applyCase(raw, state->buffer);
     // Auto-majuscule (amélioration D) en DÉBUT DE PHRASE : on s'appuie sur le
@@ -957,15 +1615,19 @@ private:
 
   // Mode complétion : candidats commençant par le buffer (avec autocorrection).
   void updateCompletion(fcitx::InputContext *ic, PredictState *state) {
+    state->nextWordGen++; // la frappe invalide tout refresh mot-suivant en vol
     ic->inputPanel().reset();
     if (state->buffer.empty()) {
       showNextWord(ic, state);
       return;
     }
-    auto reply = queryDaemon(contextFor(ic, state), state->buffer);
+    auto reply = queryDaemon(contextFor(ic, state), state->buffer,
+                             wideTextFor(ic, state));
     state->cands = reply.candidates;
     state->literalIsWord = reply.literalIsWord;
     state->autocomplete = reply.autocomplete;
+    state->ghost = reply.ghost;
+    state->accentOnly = reply.accentOnly;
     if (state->cands.empty())
       state->cands.push_back(state->buffer); // repli : le brut
 
@@ -976,19 +1638,22 @@ private:
     // Opt-out : autoApplyNeedsRevert=false.
     if (engineCfg().autoApplyNeedsRevert && !isTriggerBuffer(state->buffer) &&
         !(ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText) &&
-          ic->surroundingText().isValid()))
+          ic->surroundingText().isValid())) {
       state->autocomplete.clear();
+      state->accentOnly = false;
+      // le fantôme reste : → est un accept EXPLICITE, pas besoin de revert.
+    }
 
-    // GHOST TEXT : si l'Espace va compléter le mot, le reste s'affiche déjà
-    // dans le préedit, curseur entre le tapé et le fantôme ("bonjou‸r") —
-    // uniquement quand l'auto-complétion PROLONGE octet-à-octet la frappe
+    // GHOST TEXT : le reste de la complétion haute-confiance s'affiche dans
+    // le préedit, curseur entre le tapé et le fantôme ("bonjou‸r") — que
+    // l'Espace l'applique (autoApply) ou non : → l'accepte EXPLICITEMENT.
+    // Uniquement quand la complétion PROLONGE octet-à-octet la frappe
     // (jamais pour une correction floue : la barre + liseré s'en chargent).
     std::string ghost;
     if (engineCfg().ghostText && !state->literalIsWord && !state->vetoAuto &&
-        state->autocomplete.size() > state->buffer.size() &&
-        state->autocomplete.compare(0, state->buffer.size(), state->buffer) ==
-            0)
-      ghost = state->autocomplete.substr(state->buffer.size());
+        state->ghost.size() > state->buffer.size() &&
+        state->ghost.compare(0, state->buffer.size(), state->buffer) == 0)
+      ghost = state->ghost.substr(state->buffer.size());
 
     fcitx::Text preedit;
     preedit.append(state->buffer,
@@ -1010,6 +1675,8 @@ private:
   void showNextWord(fcitx::InputContext *ic, PredictState *state) {
     ic->inputPanel().reset();
     state->autocomplete.clear(); // pas de marquage « auto » en mot-suivant
+    state->ghost.clear();
+    state->accentOnly = false;
     state->literalIsWord = false;
     if (!engineCfg().nextWordBar) { // mode calme : pas de barre spéculative
       state->cands.clear();
@@ -1033,7 +1700,16 @@ private:
         return;
       }
     auto ctx = contextFor(ic, state);
-    auto reply = queryDaemon(ctx, "");
+    state->nextWordGen++; // nouvelle barre → tout refresh antérieur est périmé
+    int pendingFd = -1;
+    auto reply =
+        queryDaemon(ctx, "", wideTextFor(ic, state),
+                    engineCfg().asyncNextWord ? &pendingFd : nullptr);
+    // Deux phases (E5) : la 1re réponse (n-gram, instantanée) s'affiche tout
+    // de suite ; si le daemon annonce un refresh neural, la connexion reste
+    // ouverte et la barre se mettra à jour depuis la boucle d'événements.
+    if (pendingFd >= 0)
+      armRefresh(pendingFd, ic, state);
     state->cands = reply.candidates;
     if (state->cands.empty()) {
       clearPanel(ic);
@@ -1044,13 +1720,293 @@ private:
     ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
   }
 
+  // --- Panneau de LANGUE (Ctrl+Shift+L) : chips horizontales compactes, le
+  //     choix courant surligné. 1-9/←→/Tab naviguent, Entrée/Espace applique
+  //     (écrit `lang` dans config.json, rechargé à chaud), Échap annule. ---
+  void setLangMenuCandidates(fcitx::InputContext *ic, PredictState *state) {
+    auto list = std::make_unique<PredictCandidateList>();
+    for (int i = 0; i < kNumLangChoices; i++)
+      list->append(kLangChoices[i].label, /*autoApply=*/false);
+    list->setCursorIndex(state->langIndex);
+    ic->inputPanel().reset();
+    ic->inputPanel().setAuxUp(fcitx::Text("Langue"));
+    ic->inputPanel().setCandidateList(std::move(list));
+    ic->updatePreedit();
+    ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
+  }
+
+  void enterLangMenu(fcitx::InputContext *ic, PredictState *state) {
+    const std::string cur = readLang();
+    state->langIndex = 0;
+    for (int i = 0; i < kNumLangChoices; i++)
+      if (cur == kLangChoices[i].value)
+        state->langIndex = i;
+    state->langMenu = true;
+    state->navigating = false;
+    setLangMenuCandidates(ic, state);
+  }
+
+  void exitLangMenu(fcitx::InputContext *ic, PredictState *state) {
+    state->langMenu = false;
+    ic->inputPanel().reset();
+    ic->updatePreedit();
+    ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
+    // reprendre là où on en était : complétion du mot en cours, ou barre
+    // mot-suivant (dans la langue active — c'est le retour visuel du choix).
+    if (!state->buffer.empty())
+      updateCompletion(ic, state);
+    else
+      showNextWord(ic, state);
+  }
+
+  void applyLangChoice(fcitx::InputContext *ic, PredictState *state, int idx) {
+    if (idx >= 0 && idx < kNumLangChoices)
+      writeLang(kLangChoices[idx].value); // échec silencieux : le panneau se ferme
+    exitLangMenu(ic, state);
+  }
+
+  // Lance le dialogue de saisie de clé (ime-preferences --groq-key) : une
+  // fenêtre Qt où COLLER la clé fonctionne — un Ctrl+V n'atteint jamais
+  // l'IME, la saisie ne peut donc pas se faire dans le panneau lui-même.
+  // Double fork : pas de zombie, le dialogue survit à l'engine.
+  static void spawnKeyDialog() {
+    pid_t pid = ::fork();
+    if (pid == 0) {
+      if (::fork() == 0) {
+        ::setsid();
+        ::execlp("ime-preferences", "ime-preferences", "--groq-key",
+                 (char *)nullptr);
+        ::_exit(127);
+      }
+      ::_exit(0);
+    }
+    if (pid > 0)
+      ::waitpid(pid, nullptr, 0);
+  }
+
+  // Panneau COMPACT d'échec de reformulation : un seul chip, message clair.
+  // no_key/auth → Entrée ouvre le dialogue de clé ; sinon toute touche ferme.
+  void showReformNotice(fcitx::InputContext *ic, PredictState *state,
+                        const std::string &kind) {
+    state->reformNotice = kind.empty() ? "network" : kind;
+    state->reformLoading = false;
+    state->navigating = false;
+    std::string msg;
+    if (state->reformNotice == "no_key")
+      msg = "Clé API Groq requise — Entrée : configurer · Échap";
+    else if (state->reformNotice == "auth")
+      msg = "Clé API refusée — Entrée : reconfigurer · Échap";
+    else if (state->reformNotice == "no_text")
+      msg = "Rien à reformuler — sélectionnez du texte";
+    else if (state->reformNotice == "bad_url")
+      msg = "reformBaseUrl refusé — https requis (voir config.json)";
+    else
+      msg = "⚠ Reformulation indisponible (réseau/API)";
+    state->cands = {msg};
+    auto list = std::make_unique<PredictCandidateList>();
+    list->append(msg, /*autoApply=*/false);
+    list->setCursorIndex(-1);
+    ic->inputPanel().reset();
+    ic->inputPanel().setCandidateList(std::move(list));
+    ic->updatePreedit();
+    ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
+  }
+
+  // --- Reformulation : sélection → 3 variantes LLM, le choix remplace ---
+  void setReformulationCandidates(fcitx::InputContext *ic, PredictState *state) {
+    auto list = std::make_unique<PredictCandidateList>();
+    // Pendant le chargement, un seul candidat « ⟳ … » SANS numéro (l'UI le
+    // détecte → spinner). Sinon, chaque variante est NUMÉROTÉE (1,2,3…) : le
+    // label non vide fait basculer l'UI en liste verticale lisible.
+    if (state->reformLoading) {
+      for (auto &v : state->cands)
+        list->append(v, /*autoApply=*/false);
+      ic->inputPanel().setAuxUp(fcitx::Text()); // QML affiche « Reformulation… »
+    } else {
+      int i = 1;
+      for (auto &v : state->cands)
+        list->appendLabeled(v, std::to_string(i++)); // verbatim (phrases)
+      // Header de la bulle (auxUp, lu par qmlui) : mode courant + badge source.
+      std::string badge = state->reformSource == "groq"   ? "  ⚡ Groq"
+                          : state->reformSource == "local" ? "  ◆ local"
+                                                           : "";
+      std::string header =
+          std::string(kReformModes[state->reformMode].label) + badge +
+          "   · ←→/rfsct mode";
+      ic->inputPanel().setAuxUp(fcitx::Text(header));
+    }
+    list->setCursorIndex(state->navIndex); // variante surlignée
+    ic->inputPanel().setCandidateList(std::move(list));
+    ic->updatePreedit();
+    ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
+  }
+
+  void enterReformulation(fcitx::InputContext *ic, PredictState *state) {
+    bool cap = ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText);
+    bool valid = cap && ic->surroundingText().isValid();
+    std::string sel = valid ? ic->surroundingText().selectedText() : std::string{};
+    // Texte à reformuler :
+    //  - sélection rapportée (souris) → la sélection.
+    //  - PAS de sélection rapportée mais surrounding text court (ex : Ctrl+A que
+    //    l'app n'expose pas comme sélection à l'IME) → TOUT le surrounding text.
+    //    Le remplacement repose sur commitString (cf commitReformulation) qui
+    //    remplace la sélection active de l'app — active dans les deux cas.
+    std::string sentence;
+    if (!sel.empty()) {
+      sentence = sel;
+    } else if (cap && valid) {
+      std::string full = ic->surroundingText().text();
+      if (!full.empty() && decodeUtf8(full).size() <= 400) // champ court, pas un doc
+        sentence = full;
+    }
+    if (::getenv("IME_DEBUG"))
+      fprintf(stderr,
+              "[reform-enter] cap=%d valid=%d selLen=%zu src='%.60s'\n",
+              int(cap), int(valid), sel.size(), sentence.c_str());
+    if (sentence.empty()) {
+      // FEEDBACK au lieu d'un no-op silencieux : panneau compact fermé par
+      // n'importe quelle touche (patron R-notice).
+      state->reformulating = true;
+      showReformNotice(ic, state, "no_text");
+      return;
+    }
+    state->reformulating = true;
+    state->reformText = sentence;
+    state->reformFromSelection = !sel.empty();
+    state->reformMode = lastReformMode_; // dernier mode utilisé mémorisé
+    state->reformNonce = 0;
+    state->reformSource.clear();
+    runReformulation(ic, state);
+  }
+
+  // Lance (ou relance) la génération pour le texte/mode/nonce courants. Feedback
+  // IMMÉDIAT : placeholder + spinner, génération dans un THREAD, résultat reposté
+  // sur le thread principal via l'eventDispatcher. Un compteur de génération
+  // (reformGen) ignore les résultats obsolètes quand on change vite de mode.
+  void runReformulation(fcitx::InputContext *ic, PredictState *state) {
+    state->reformLoading = true;
+    state->navigating = false;
+    state->navIndex = 0;
+    state->cands = {"⟳ Reformulation…"};
+    setReformulationCandidates(ic, state);
+
+    uint32_t gen = ++state->reformGen;
+    lastReformMode_ = state->reformMode; // mémorise pour le prochain Ctrl+Alt+R
+    auto ref = ic->watch();
+    std::string text = state->reformText;
+    std::string mode = kReformModes[state->reformMode].key;
+    uint32_t nonce = state->reformNonce;
+    int n = engineCfg().reformCount;
+    std::thread([this, ref, text, mode, nonce, n, gen]() mutable {
+      // STREAMING : chaque ligne partielle remplace le spinner par les
+      // variantes déjà prêtes — navigables tout de suite, la liste se
+      // complète au fil des lignes. La position de navigation est préservée.
+      auto onPartial = [this, ref, gen](std::vector<std::string> vars) {
+        postToMain(
+            ref, [this, ref, vars = std::move(vars), gen]() {
+              fcitx::InputContext *ic = ref.get();
+              if (!ic)
+                return;
+              auto *st = ic->propertyFor(&factory_);
+              if (!st->reformulating || st->reformGen != gen || vars.empty())
+                return;
+              bool first = st->reformLoading;
+              st->reformLoading = false;
+              st->cands = vars;
+              if (first) {
+                st->navIndex = 0;
+                st->navigating = true;
+              }
+              if (st->navIndex >= (int)st->cands.size())
+                st->navIndex = 0;
+              setReformulationCandidates(ic, st);
+            });
+      };
+      ReformResult r =
+          reformulateDaemon(text, mode, nonce, n, onPartial); // bloque DANS le thread
+      postToMain(ref, [this, ref, r, gen]() {
+        fcitx::InputContext *ic = ref.get();
+        if (!ic)
+          return;
+        auto *st = ic->propertyFor(&factory_);
+        if (!st->reformulating || st->reformGen != gen)
+          return; // annulé ou résultat obsolète (mode changé entre-temps)
+        bool wasLoading = st->reformLoading;
+        st->reformLoading = false;
+        if (r.variants.empty()) {
+          // une demande plus récente est en route → on laisse sa place
+          if (r.error == "superseded")
+            return;
+          // qualité d'abord (Groq-only) : l'échec s'AFFICHE au lieu de
+          // disparaître en silence — clé manquante/refusée → Entrée ouvre
+          // le dialogue de configuration, sinon message compact.
+          showReformNotice(ic, st, r.error);
+          return;
+        }
+        st->cands = r.variants;
+        st->reformSource = r.source;
+        // streaming : si des partielles étaient déjà affichées, on garde la
+        // position de navigation (l'utilisateur explore peut-être déjà).
+        if (wasLoading || st->navIndex >= (int)st->cands.size())
+          st->navIndex = 0;
+        st->navigating = true;
+        setReformulationCandidates(ic, st);
+      });
+    }).detach();
+  }
+
+  void exitReformulation(fcitx::InputContext *ic, PredictState *state) {
+    state->reformulating = false;
+    state->reformLoading = false;
+    state->navigating = false;
+    state->reformText.clear();
+    state->reformSource.clear();
+    state->reformNotice.clear();
+    // NB : on NE touche PAS à reformRevert* — le revert doit survivre au commit
+    // (il s'arme dans commitReformulation et se consomme au prochain Backspace).
+    state->cands.clear();
+    ic->inputPanel().reset();
+    ic->updatePreedit();
+    ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
+  }
+
+  void commitReformulation(fcitx::InputContext *ic, PredictState *state, int idx) {
+    // Sélection RAPPORTÉE : commitString suffit (commit-over-selection) — pas
+    // de deleteSurroundingText, certains toolkits double-supprimeraient
+    // (sélection effacée puis delete relatif au curseur).
+    // Repli « champ entier » (AUCUNE sélection rapportée) : commitString seul
+    // INSÉRERAIT la variante en plus du texte — on supprime d'abord TOUT le
+    // champ. Si l'app avait en fait un Ctrl+A non rapporté, la plage
+    // supprimée == la sélection : le résultat reste correct.
+    if (idx >= 0 && idx < (int)state->cands.size()) {
+      const std::string &variant = state->cands[idx];
+      if (!state->reformFromSelection &&
+          ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText) &&
+          ic->surroundingText().isValid()) {
+        auto &st = ic->surroundingText();
+        auto cps = decodeUtf8(st.text());
+        size_t cur = std::min(size_t(st.cursor()), cps.size());
+        if (!cps.empty()) {
+          ic->deleteSurroundingText(-int(cur), cps.size());
+          st.setText("", 0, 0); // copie locale (cf deleteSurroundingBefore)
+        }
+      }
+      ic->commitString(variant);
+      // arme le REVERT : Backspace juste après restaure le texte original.
+      state->reformRevertOrig = state->reformText;
+      state->reformRevertCps = (uint32_t)decodeUtf8(variant).size();
+    }
+    exitReformulation(ic, state);
+  }
+
   void setCandidates(fcitx::InputContext *ic, PredictState *state) {
     // liste maison : jusqu'à 24 candidats (grille emoji) sans la limite de
     // 10 labels de CommonCandidateList (qui FATAL-abort fcitx au-delà).
     auto list = std::make_unique<PredictCandidateList>();
     // le candidat que l'Espace appliquera est marqué (gras → liseré dans l'UI)
-    bool willAuto = !state->buffer.empty() && !state->literalIsWord &&
-                    !state->autocomplete.empty() && !state->vetoAuto;
+    bool willAuto = !state->buffer.empty() && !state->autocomplete.empty() &&
+                    !state->vetoAuto &&
+                    (!state->literalIsWord || state->accentOnly);
     for (auto &w : state->cands)
       list->append(applyCase(w, state->buffer),
                    willAuto && w == state->autocomplete);
@@ -1059,6 +2015,31 @@ private:
   }
 
   fcitx::Instance *instance_;
+  // Poste un travail depuis un thread de reformulation vers le thread principal,
+  // en n'exécutant que si le contexte d'entrée est toujours vivant. C'est ce que
+  // fait EventDispatcher::scheduleWithContext, mais celui-ci n'existe que depuis
+  // fcitx5 5.1.8 : on le refait à la main pour rester buildable sur le fcitx5
+  // stock des distros plus anciennes (Ubuntu 24.04 → 5.1.7).
+  void postToMain(fcitx::TrackableObjectReference<fcitx::InputContext> ref,
+                  std::function<void()> fn) {
+    if (!ref.isValid())
+      return;
+    dispatcher_.schedule([ref, fn = std::move(fn)]() {
+      if (ref.isValid())
+        fn();
+    });
+  }
+
+  fcitx::EventDispatcher dispatcher_;
+  // Dernier mode de reformulation utilisé — le prochain Ctrl+Alt+R repart de
+  // là (partagé entre les contextes : préférence de session, pas de champ).
+  int lastReformMode_ = 0;
+  // Refresh asynchrone (E5) — au plus UNE connexion en attente.
+  std::unique_ptr<fcitx::EventSourceIO> refreshWatch_;
+  int refreshFd_ = -1;
+  fcitx::ICUUID refreshUUID_{};
+  uint64_t refreshGen_ = 0;
+  std::string refreshBuf_;
   fcitx::FactoryFor<PredictState> factory_;
 };
 

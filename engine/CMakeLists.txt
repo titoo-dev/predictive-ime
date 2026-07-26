@@ -27,8 +27,16 @@ install(FILES predict.conf
 include(CTest)
 if(BUILD_TESTING)
   find_package(Threads REQUIRED)
-  find_package(Fcitx5ModuleTestFrontend REQUIRED)
-  find_package(Fcitx5ModuleTestIM REQUIRED)
+  # Les addons de test de fcitx5 (testfrontend/testim) ne sont pas packagés
+  # partout : Debian/Ubuntu ne livrent pas leurs configs CMake avec
+  # libfcitx5core-dev. On les cherche donc sans REQUIRED — leur absence saute le
+  # harnais au lieu de casser le configure, parce que le CŒUR PORTABLE
+  # (libpredict.so) doit rester buildable sur ces distros.
+  find_package(Fcitx5ModuleTestFrontend QUIET)
+  find_package(Fcitx5ModuleTestIM QUIET)
+endif()
+
+if(BUILD_TESTING AND Fcitx5ModuleTestFrontend_FOUND AND Fcitx5ModuleTestIM_FOUND)
 
   # Prefix du paquet fcitx5 (déduit du dossier CMake de Fcitx5Core) : addons de
   # test (testfrontend/testim/testui) + leurs .conf.
@@ -54,4 +62,7 @@ if(BUILD_TESTING)
     FCITX_ADDON_DIR="${FCITX5_ADDON_DIR}"
     FCITX_DATA_DIR="${FCITX5_DATA_DIR}")
   add_test(NAME engine COMMAND test_predict_engine)
+elseif(BUILD_TESTING)
+  message(STATUS "fcitx5 test addons (testfrontend/testim) absents — harnais "
+                 "engine sauté ; libpredict.so se construit quand même")
 endif()

@@ -4,6 +4,10 @@ Predictive French/English input method for [fcitx5](https://fcitx-im.org/).
 A small fcitx5 engine queries a local n-gram daemon for completion,
 autocorrection, next-word prediction and an emoji picker. Offline, no telemetry.
 
+![predictive-ime in action: next-word prediction, intra-word completion and the emoji picker](assets/demo.gif)
+
+> Typing `je vais au travail aujourd'`, accepting the `aujourd'hui` completion, then `:coeur` → ❤️. The candidate bar shows at most five ranked suggestions.
+
 The core runs on any stock fcitx5 (using its default candidate bar). The
 optional Qt Quick candidate bar (`qmlpanel`) needs a patched fcitx5 —
 see [docs/patched-fcitx5.md](docs/patched-fcitx5.md).
@@ -12,10 +16,10 @@ see [docs/patched-fcitx5.md](docs/patched-fcitx5.md).
 
 **1. Dependencies**
 
-- Arch: `pacman -S --needed base-devel cmake extra-cmake-modules fcitx5 nlohmann-json qt6-base qt6-declarative`
-- Fedora: `dnf install gcc-c++ cmake extra-cmake-modules pkgconf-pkg-config fcitx5-devel nlohmann-json-devel qt6-qtbase-devel qt6-qtdeclarative-devel`
-- Debian/Ubuntu: `apt install build-essential cmake extra-cmake-modules pkg-config nlohmann-json3-dev qt6-base-dev qt6-declarative-dev libfcitx5core-dev libfcitx5utils-dev libfcitx5config-dev`
-- openSUSE: `zypper install gcc-c++ cmake extra-cmake-modules pkg-config fcitx5-devel nlohmann_json-devel qt6-base-devel qt6-declarative-devel`
+- Arch: `pacman -S --needed base-devel cmake extra-cmake-modules fcitx5 nlohmann-json qt6-base qt6-declarative curl`
+- Fedora: `dnf install gcc-c++ cmake extra-cmake-modules pkgconf-pkg-config fcitx5-devel nlohmann-json-devel qt6-qtbase-devel qt6-qtdeclarative-devel libcurl-devel`
+- Debian/Ubuntu: `apt install build-essential cmake extra-cmake-modules pkg-config nlohmann-json3-dev qt6-base-dev qt6-declarative-dev libfcitx5core-dev libfcitx5utils-dev libfcitx5config-dev libcurl4-openssl-dev`
+- openSUSE: `zypper install gcc-c++ cmake extra-cmake-modules pkg-config fcitx5-devel nlohmann_json-devel qt6-base-devel qt6-declarative-devel libcurl-devel`
 
 **2. Build and install**
 
@@ -46,6 +50,17 @@ Add `Predict` as an input method (e.g. with `fcitx5-configtool`) and restart fci
 Settings live in `~/.config/ime-predictord/` (hot-reloaded): `config.json`,
 `snippets.tsv`, `dict.txt`. The `ime-preferences` app edits `config.json`.
 
+**Language.** `lang` in `config.json` picks the suggestion language: `fr` / `en`
+(deterministic, the other language is strictly excluded), `auto` (context
+vote), `off`. **Ctrl+Shift+L** opens a compact language switcher in the
+candidate bar — [Français|English|Auto|Libre] chips with the current choice
+highlighted; arrows/Tab navigate, `1-4`/Enter/Space apply, Escape cancels.
+The engine rewrites `lang` in place (formatting preserved), the daemon
+hot-reloads it, and the bar restarts in the new language. English
+contractions (`don't`, `i'm`, `you're`…) are first-class vocabulary: completed
+from `don`, restored from `dont`/`im`/`cant`, and `i`/`i'…` are always
+capitalised to `I`/`I'…`.
+
 **Grammatical agreement.** The daemon boosts candidates that agree in number
 and gender with the governing determiner found in the surrounding sentence
 (`les petits chat…` → `chats`), using the Lefff morphological lexicon
@@ -53,6 +68,13 @@ and gender with the governing determiner found in the surrounding sentence
 (higher = more aggressive agreement). The engine feeds the full sentence via the
 toolkit's *surrounding text*; apps that don't expose it degrade to the words the
 IME itself committed.
+
+**Recency cache.** Words already present in the text before the cursor (the
+document you are writing, seen through the toolkit's *surrounding text*) are
+boosted — human text repeats itself (proper nouns, topic vocabulary), so a word
+you already used is likely to come back. `recencyBoost` in `config.json`
+(default `1.3`) tunes the strength; `1.0` disables it. The word immediately
+before the cursor is never boosted (no `the the`).
 
 **Learned words.** Words you commit are learned and ranked **on the model's own
 scale** (no overriding floor): a trusted learned word is treated as having an

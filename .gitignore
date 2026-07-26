@@ -3,3 +3,4 @@
 /daemon/predictord
 result
 result-*
+/daemon/neural_predict

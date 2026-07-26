@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -19,6 +20,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <fcitx-utils/event.h>
 #include <fcitx-utils/eventdispatcher.h>
 #include <fcitx-utils/key.h>
 #include <fcitx-utils/testing.h>
@@ -59,6 +61,11 @@ public:
     autocomplete_ = std::move(autocomplete);
     literalIsWord_ = literalIsWord;
   }
+  void setReformReply(std::vector<std::string> vars) {
+    reformVars_ = std::move(vars);
+  }
+  std::string lastReformMode() const { return lastReformMode_; }
+  int lastReformN() const { return lastReformN_; }
   std::string lastPrefix() const { return lastPrefix_; }
   std::vector<std::string> lastContext() const { return lastContext_; }
 
@@ -114,6 +121,14 @@ private:
           resp["literalIsWord"] = literalIsWord_;
           std::string out = resp.dump() + "\n";
           ::send(c, out.data(), out.size(), MSG_NOSIGNAL);
+        } else if (req.contains("reformulate")) {
+          lastReformMode_ = req.value("mode", "");
+          lastReformN_ = req.value("n", 0);
+          json resp;
+          resp["variants"] = reformVars_;
+          resp["source"] = "groq";
+          std::string out = resp.dump() + "\n";
+          ::send(c, out.data(), out.size(), MSG_NOSIGNAL);
         }
         // learn/forget/veto : fire-and-forget, pas de réponse requise.
       } catch (...) {
@@ -128,6 +143,9 @@ private:
   std::vector<std::string> cands_;
   std::string autocomplete_;
   bool literalIsWord_ = false;
+  std::vector<std::string> reformVars_;
+  std::string lastReformMode_;
+  int lastReformN_ = 0;
   std::string lastPrefix_;
   std::vector<std::string> lastContext_;
 };
@@ -167,7 +185,12 @@ struct Harness {
   void reset() { resetWith("app"); }
   void setCaps(fcitx::CapabilityFlags caps) { ic->setCapabilityFlags(caps); }
   void setSurrounding(const std::string &text, unsigned cursor) {
-    ic->surroundingText().setText(text, cursor, cursor);
+    setSurrounding(text, cursor, cursor);
+  }
+  // anchor != cursor simule une SÉLECTION rapportée par l'app (souris)
+  void setSurrounding(const std::string &text, unsigned cursor,
+                      unsigned anchor) {
+    ic->surroundingText().setText(text, cursor, anchor);
     ic->updateSurroundingText();
   }
   void key(const char *sym) {
@@ -302,6 +325,24 @@ void interactionTests(Harness &h) {
   h.type(" ");
   check("interaction: Tab puis Espace committe le candidat surligné", true);
 
+  // picker emoji : Entrée SANS navigation prend le 1er candidat (sans espace)
+  h.daemon->setReply({"❤️", "💕"}, "❤️", false);
+  h.expectCommit("❤️");
+  h.type(":coeur");
+  h.key("Return");
+  check("emoji: Entrée committe le 1er candidat (sans espace)", true);
+
+  // grille emoji : → entre en navigation sans Tab, ↓ saute une ligne (+8),
+  // Entrée committe le surligné.
+  h.daemon->setReply({"e0", "e1", "e2", "e3", "e4", "e5", "e6", "e7", "e8",
+                      "e9"}, "", false);
+  h.expectCommit("e8");
+  h.type(":x");
+  h.key("Right"); // entre dans la grille (index 0)
+  h.key("Down");  // +8 → index 8
+  h.key("Return");
+  check("emoji: →/↓ naviguent la grille sans Tab, Entrée committe", true);
+
   // ponctuation : committe le mot (sans espace) ; le '.' file à l'application
   h.daemon->setReply({"fin"}, "", true);
   h.expectCommit("fin");
@@ -360,6 +401,60 @@ void revertTests(Harness &h) {
   check("revert: après revert, Espace garde le littéral (veto)", true);
 }
 
+void recomposeTests(Harness &h) {
+  h.reset();
+  h.setCaps(fcitx::CapabilityFlags{fcitx::CapabilityFlag::Preedit,
+                                   fcitx::CapabilityFlag::SurroundingText});
+  h.setSurrounding("", 0);
+
+  // « je deman ␣ » puis Backspace (efface l'espace) : la composition doit se
+  // ROUVRIR sur « deman » — barre re-proposée, contexte « je » conservé.
+  h.daemon->setReply({"demande", "demander"}, "", false);
+  h.expectCommit("je ");
+  h.type("je");
+  h.type(" ");
+  h.expectCommit("deman ");
+  h.type("deman");
+  h.type(" ");
+  // l'app contient « je deman » ; le harnais simule son SurroundingText
+  h.setSurrounding("je deman ", 9);
+  h.key("BackSpace");
+  check("recompose: préedit rouvert sur 'deman'",
+        h.preedit().rfind("deman", 0) == 0, h.preedit());
+  check("recompose: candidats re-proposés", !h.candidates().empty(),
+        h.candidates().empty() ? "vide" : h.candidates()[0]);
+  bool hasJe = false, hasDeman = false;
+  std::string dump;
+  for (auto &w : h.daemon->lastContext()) {
+    if (w == "je")
+      hasJe = true;
+    if (w == "deman")
+      hasDeman = true;
+    dump += w + " ";
+  }
+  check("recompose: contexte 'je' conservé (sans 'deman' résiduel)",
+        hasJe && !hasDeman, dump);
+  h.expectCommit("deman"); // Échap referme proprement (committe le littéral)
+  h.key("Escape");
+
+  // Backspace au MILIEU d'un mot (« dem|an ») : PAS de recomposition — la
+  // touche file à l'app (recomposer la moitié gauche corromprait le texte).
+  h.reset();
+  h.setCaps(fcitx::CapabilityFlags{fcitx::CapabilityFlag::Preedit,
+                                   fcitx::CapabilityFlag::SurroundingText});
+  h.setSurrounding("deman", 3);
+  h.key("BackSpace");
+  check("recompose: pas de recomposition en milieu de mot",
+        h.preedit().empty(), h.preedit());
+
+  // Sans SurroundingText : comportement inchangé (la touche file à l'app).
+  h.reset();
+  h.setCaps(fcitx::CapabilityFlag::Preedit);
+  h.key("BackSpace");
+  check("recompose: sans SurroundingText, Backspace file à l'app",
+        h.preedit().empty(), h.preedit());
+}
+
 void multiWordTests(Harness &h) {
   h.reset();
   h.setCaps(fcitx::CapabilityFlags{fcitx::CapabilityFlag::Preedit,
@@ -376,6 +471,62 @@ void multiWordTests(Harness &h) {
   h.key("Tab"); // surligne 'sais pas'
   h.type(" ");  // committe le candidat surligné
   check("multi-mots: 'sais pas' committé en entier", true);
+}
+
+void englishTests(Harness &h) {
+  h.reset();
+  h.setCaps(fcitx::CapabilityFlags{fcitx::CapabilityFlag::Preedit,
+                                   fcitx::CapabilityFlag::SurroundingText});
+  h.setSurrounding("", 0);
+
+  // casse anglaise : le candidat « i'm » s'affiche ET se committe « I'm »
+  h.daemon->setReply({"i'm"}, "", false);
+  h.type("im");
+  check("anglais: candidat i'm affiché I'm",
+        !h.candidates().empty() && h.candidates()[0] == "I'm",
+        h.candidates().empty() ? "vide" : h.candidates()[0]);
+  h.expectCommit("I'm ");
+  h.key("Tab");
+  h.type(" ");
+  check("anglais: I'm committé avec majuscule", true);
+
+  // panneau de langue Ctrl+Shift+L : chips [Français|English|Auto|Libre],
+  // chiffre/Entrée applique (réécrit "lang" dans config.json, formatage
+  // préservé), Échap annule.
+  auto readCfg = [] {
+    std::ifstream f(g_tmpDir + "/cfg/ime-predictord/config.json");
+    return std::string((std::istreambuf_iterator<char>(f)),
+                       std::istreambuf_iterator<char>());
+  };
+  h.setConfig({{"lang", "fr"}});
+  h.key("Control+Shift+L");
+  auto chips = h.candidates();
+  check("langue: le panneau montre les chips",
+        chips.size() == 4 && chips[0] == "Français" && chips[1] == "English",
+        chips.empty() ? "vide" : chips[0] + "," + chips[1]);
+  h.key("2"); // English
+  check("langue: '2' applique lang=en",
+        readCfg().find("\"lang\":\"en\"") != std::string::npos, readCfg());
+  check("langue: le panneau est fermé après le choix", h.candidates().empty() ||
+        h.candidates()[0] != "Français");
+  h.key("Control+Shift+L");
+  h.key("Escape");
+  check("langue: Échap n'écrit rien (reste en)",
+        readCfg().find("\"lang\":\"en\"") != std::string::npos, readCfg());
+  h.key("Control+Shift+L"); // s'ouvre sur English (langue courante)
+  h.key("Right");           // → Auto
+  h.key("Return");
+  check("langue: →/Entrée applique le choix surligné (auto)",
+        readCfg().find("\"lang\":\"auto\"") != std::string::npos, readCfg());
+  // AZERTY : la rangée de chiffres NON shiftée envoie &é"'(… — le panneau
+  // doit l'accepter comme 1-9 (sinon : fermeture SILENCIEUSE, rien appliqué —
+  // « je bascule en anglais et rien ne change »).
+  h.setConfig({{"lang", "fr"}});
+  h.key("Control+Shift+L");
+  h.key("eacute"); // touche « 2 » AZERTY sans Shift → English
+  check("langue: AZERTY 'é' (rangée 2) applique lang=en",
+        readCfg().find("\"lang\":\"en\"") != std::string::npos, readCfg());
+  h.setConfig(json::object()); // restaure les défauts
 }
 
 void surroundingContextTests(Harness &h) {
@@ -452,6 +603,123 @@ void ghosttyTests(Harness &h) {
   h.setConfig(json::object());
 }
 
+// Reformulation — asynchrone (worker + eventDispatcher) : les asserts vivent
+// dans des timers chaînés, la boucle d'événements tourne entre chaque étape.
+// L1 : Ctrl+Alt+R SANS sélection dans un champ court reformule tout le champ ;
+// le commit doit alors REMPLACER le champ (delete explicite) — commitString
+// seul INSÉRAIT la variante en plus du texte.
+void reformTests(Harness h, fcitx::Instance *instance) {
+  static std::unique_ptr<fcitx::EventSourceTime> t1, t2, t3, t4, t5;
+  h.reset();
+  h.setCaps(fcitx::CapabilityFlags{fcitx::CapabilityFlag::Preedit,
+                                   fcitx::CapabilityFlag::SurroundingText});
+
+  // FEEDBACK : Ctrl+Alt+R sans rien à reformuler → panneau compact (pas un
+  // no-op silencieux) ; n'importe quelle touche le ferme.
+  h.setSurrounding("", 0);
+  h.key("Control+Alt+R");
+  check("reform: sans texte → panneau « Rien à reformuler »",
+        !h.candidates().empty() &&
+            h.candidates()[0].find("Rien à reformuler") != std::string::npos,
+        h.candidates().empty() ? "vide" : h.candidates()[0]);
+  h.key("Escape");
+  check("reform: Échap ferme le panneau « rien à reformuler »",
+        h.candidates().empty(),
+        h.candidates().empty() ? "" : h.candidates()[0]);
+
+  h.setSurrounding("bonjour le monde", 16); // curseur en fin, AUCUNE sélection
+  h.daemon->setReformReply({"salut le monde", "coucou le monde"});
+  h.key("Control+Alt+R");
+  check("reform: panneau ouvert (spinner)", !h.candidates().empty(),
+        h.candidates().empty() ? "vide" : h.candidates()[0]);
+  t1 = instance->eventLoop().addTimeEvent(
+      CLOCK_MONOTONIC, fcitx::now(CLOCK_MONOTONIC) + 500000, 0,
+      [h, instance](fcitx::EventSourceTime *, uint64_t) mutable {
+        check("reform: variantes reçues",
+              h.candidates().size() == 2 &&
+                  h.candidates()[0] == "salut le monde",
+              h.candidates().empty() ? "vide" : h.candidates()[0]);
+        h.expectCommit("salut le monde");
+        h.key("1");
+        check("reform L1: sans sélection, le champ est remplacé",
+              h.ic->surroundingText().text().empty(),
+              "reste: '" + h.ic->surroundingText().text() + "'");
+
+        // cas SÉLECTION rapportée : commit-over-selection, PAS de delete
+        h.reset();
+        h.setCaps(fcitx::CapabilityFlags{fcitx::CapabilityFlag::Preedit,
+                                         fcitx::CapabilityFlag::SurroundingText});
+        h.setSurrounding("bonjour le monde", 16, 8); // « le monde » sélectionné
+        h.daemon->setReformReply({"la planète"});
+        h.key("Control+Alt+R");
+        t2 = instance->eventLoop().addTimeEvent(
+            CLOCK_MONOTONIC, fcitx::now(CLOCK_MONOTONIC) + 500000, 0,
+            [h, instance](fcitx::EventSourceTime *, uint64_t) mutable {
+              check("reform: variantes (sélection)",
+                    h.candidates().size() == 1 &&
+                        h.candidates()[0] == "la planète",
+                    h.candidates().empty() ? "vide" : h.candidates()[0]);
+              h.expectCommit("la planète");
+              h.key("ampersand"); // AZERTY : « 1 » sans Shift = '&'
+              check("reform: avec sélection, pas de delete du champ",
+                    h.ic->surroundingText().text() == "bonjour le monde",
+                    h.ic->surroundingText().text());
+
+              // — raccourci de mode (f = Formel), mémoire du dernier mode,
+              //   et reformCount (config) envoyé au daemon —
+              h.reset();
+              h.setCaps(fcitx::CapabilityFlags{
+                  fcitx::CapabilityFlag::Preedit,
+                  fcitx::CapabilityFlag::SurroundingText});
+              h.setConfig({{"reformCount", 2}});
+              h.setSurrounding("une phrase a reformuler", 23);
+              h.daemon->setReformReply({"variante A", "variante B"});
+              h.key("Control+Alt+R");
+              t3 = instance->eventLoop().addTimeEvent(
+                  CLOCK_MONOTONIC, fcitx::now(CLOCK_MONOTONIC) + 500000, 0,
+                  [h, instance](fcitx::EventSourceTime *, uint64_t) mutable {
+                    check("reform: reformCount=2 envoyé au daemon",
+                          h.daemon->lastReformN() == 2,
+                          std::to_string(h.daemon->lastReformN()));
+                    check("reform: mode initial rephrase",
+                          h.daemon->lastReformMode() == "rephrase",
+                          h.daemon->lastReformMode());
+                    h.key("f"); // raccourci direct → mode Formel, régénère
+                    t4 = instance->eventLoop().addTimeEvent(
+                        CLOCK_MONOTONIC, fcitx::now(CLOCK_MONOTONIC) + 500000,
+                        0,
+                        [h, instance](fcitx::EventSourceTime *,
+                                      uint64_t) mutable {
+                          check("reform: 'f' saute au mode formal",
+                                h.daemon->lastReformMode() == "formal",
+                                h.daemon->lastReformMode());
+                          h.key("Escape"); // sort sans committer
+                          // MÉMOIRE : le prochain Ctrl+Alt+R repart en Formel
+                          h.setSurrounding("encore un autre texte", 21);
+                          h.key("Control+Alt+R");
+                          t5 = instance->eventLoop().addTimeEvent(
+                              CLOCK_MONOTONIC,
+                              fcitx::now(CLOCK_MONOTONIC) + 500000, 0,
+                              [h, instance](fcitx::EventSourceTime *,
+                                            uint64_t) mutable {
+                                check("reform: dernier mode mémorisé (formal)",
+                                      h.daemon->lastReformMode() == "formal",
+                                      h.daemon->lastReformMode());
+                                h.key("Escape");
+                                h.setConfig(json::object());
+                                instance->exit();
+                                return true;
+                              });
+                          return true;
+                        });
+                    return true;
+                  });
+              return true;
+            });
+        return true;
+      });
+}
+
 } // namespace
 
 int main() {
@@ -508,12 +776,13 @@ int main() {
     interactionTests(h);
     optInTests(h);
     revertTests(h);
+    recomposeTests(h);
     multiWordTests(h);
+    englishTests(h);
     surroundingContextTests(h);
     nextWordBarTests(h);
     ghosttyTests(h);
-
-    instance.exit();
+    reformTests(h, &instance); // async — appelle instance.exit() à la fin
   });
 
   instance.exec();

@@ -39,9 +39,18 @@ public:
     // le surlignage a bougé (mêmes candidats). `autoMark[i]` dit si le
     // candidat i sera appliqué par l'Espace (liseré accent) ; `composing` :
     // un mot est en cours (indicateur de mode).
+    // MODE LISTE (`listMode`) : rendu vertical, numéroté, pleine largeur, avec
+    // retour à la ligne — pour la reformulation (les variantes sont des PHRASES,
+    // illisibles dans les chips horizontales élidées). `labels[i]` = numéro
+    // affiché ; `loading` = génération en cours → ligne d'attente + spinner
+    // animé (la rotation tourne tant que `loading`).
+    // `headerText` (mode liste) : libellé du mode + badge source (« Formel ⚡
+    // Groq · ←→ mode »), fourni par l'engine via auxUp. Vide → header par défaut.
     void update(const QStringList &candidates, int highlight,
                 const QVariantList &autoMark = {}, bool composing = false,
-                bool grid = false);
+                bool grid = false, const QStringList &labels = {},
+                bool listMode = false, bool loading = false,
+                const QString &headerText = {});
     // Démarre le FONDU de fermeture ; false si la barre n'était pas visible.
     // Pendant le fondu, animating() reste vrai ; à la fin hideDone() == true
     // et l'appelant démappe la surface.
@@ -76,6 +85,7 @@ private:
     Anim appear_;             // 0→1 à l'apparition de la barre
     Anim hide_;               // →0 au fondu de fermeture
     Anim hl_;                 // position (flottante) du pill de surlignage
+    Anim fade_{1.0, 1.0, {}, 0}; // fondu du CONTENU au refresh passif (async)
     bool shown_ = false;
     bool hiding_ = false;
     int highlight_ = -1;
@@ -84,4 +94,9 @@ private:
     QVariantList emojiMark_;  // candidat emoji (fonte couleur), par index
     bool composing_ = false;  // mot en cours (indicateur de mode)
     bool grid_ = false;       // mode emoji : grille 8 colonnes
+    QStringList labels_;      // mode liste : numéro affiché par candidat
+    bool listMode_ = false;   // rendu liste verticale (reformulation)
+    bool loading_ = false;    // génération en cours → spinner animé
+    QString headerText_;      // mode liste : libellé mode + badge source
+    Clock::time_point spinStart_{}; // origine de la rotation du spinner
 };

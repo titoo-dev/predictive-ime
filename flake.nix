@@ -21,18 +21,18 @@
       };
 
       # Corpus de phrases pour les n-grammes (mot-suivant + complétion) :
-      #  - Leipzig news 2024, 300k phrases/langue (registre écrit, CC BY) ;
+      #  - Leipzig news 2024, 1M phrases/langue (registre écrit, CC BY) ;
       #  - Tatoeba via OPUS (release DATÉE v2023-04-12 → immuable, contrairement
       #    aux exports hebdomadaires de tatoeba.org ; CC BY 2.0 FR) — registre
       #    CONVERSATIONNEL, bien plus proche de la frappe quotidienne que la
       #    presse. Archives stables → hashables.
       fraNews = pkgs.fetchurl {
-        url = "https://downloads.wortschatz-leipzig.de/corpora/fra_news_2024_300K.tar.gz";
-        hash = "sha256-ZumUYu++H+txwCOet5X8QF3iIM3vF0lx2HEEdw9sQQM=";
+        url = "https://downloads.wortschatz-leipzig.de/corpora/fra_news_2024_1M.tar.gz";
+        hash = "sha256-kH7tKXq3tfvg6ocQUISJkVj2YIkOh/EhsqJOuYU6ZGc=";
       };
       engNews = pkgs.fetchurl {
-        url = "https://downloads.wortschatz-leipzig.de/corpora/eng_news_2024_300K.tar.gz";
-        hash = "sha256-NVsRu08GnxeQBElZOM45uhZF6xuG4sPSf/5OA6AR4VQ=";
+        url = "https://downloads.wortschatz-leipzig.de/corpora/eng_news_2024_1M.tar.gz";
+        hash = "sha256-jx1NB7l3H4p/whmtWH1Tguq/UAnvVj8bxMEqRnqOOpc=";
       };
       tatoebaFr = pkgs.fetchurl {
         url = "https://object.pouta.csc.fi/OPUS-Tatoeba/v2023-04-12/mono/fr.txt.gz";
@@ -116,7 +116,7 @@
         python3 ${./scripts/build_morph.py} ${lefff} $out/words.tsv > $out/morph.tsv
         echo "morph.tsv: $(wc -l < $out/morph.tsv) formes" >&2
 
-        # 2) n-grammes Kneser-Ney — news (300K/langue) + Tatoeba conversationnel
+        # 2) n-grammes Kneser-Ney — news (1M/langue) + Tatoeba conversationnel
         #    (l'EN Tatoeba est plafonné pour rester équilibré avec le FR).
         mkdir corpus
         tar xzf ${fraNews} -C corpus
@@ -204,8 +204,42 @@
           pname = "ime-predictord";
           version = "0.1";
           src = ./daemon;
-          nativeBuildInputs = [ pkgs.cmake ];
-          buildInputs = [ pkgs.nlohmann_json ];
+          nativeBuildInputs = [ pkgs.cmake pkgs.pkg-config ];
+          # curl : reformulation via API externe (Groq) — cf reformulate_http.cpp.
+          buildInputs = [ pkgs.nlohmann_json pkgs.curl ];
+        };
+
+        # Prédicteur neuronal (libllama), CLI d'isolation. Build pur via le flake
+        # — valide le câblage llama-cpp (headers dev + libllama + backends CPU).
+        # Wrappé pour pointer GGML_BACKEND_PATH sur les backends ggml-cpu-*.so.
+        neural-predict = pkgs.stdenv.mkDerivation {
+          pname = "neural-predict";
+          version = "0.1";
+          src = ./daemon;
+          nativeBuildInputs = [ pkgs.cmake pkgs.makeWrapper pkgs.pkg-config ];
+          buildInputs = [ pkgs.nlohmann_json pkgs.llama-cpp pkgs.curl ];
+          cmakeFlags = [ "-DWITH_NEURAL=ON" ];
+          postInstall = ''
+            wrapProgram $out/bin/neural_predict \
+              --set GGML_BACKEND_PATH ${pkgs.llama-cpp}/bin
+          '';
+        };
+
+        # Le daemon AVEC la couche neuronale (WITH_NEURAL). `predictord` reste pur
+        # n-gram (service live inchangé, zéro dép lourde) ; on bascule le service
+        # sur celui-ci quand on veut activer le neural (config.json: neural=true).
+        # Wrappé pour que libllama trouve les backends ggml-cpu-*.so.
+        predictord-neural = pkgs.stdenv.mkDerivation {
+          pname = "ime-predictord-neural";
+          version = "0.1";
+          src = ./daemon;
+          nativeBuildInputs = [ pkgs.cmake pkgs.makeWrapper pkgs.pkg-config ];
+          buildInputs = [ pkgs.nlohmann_json pkgs.llama-cpp pkgs.curl ];
+          cmakeFlags = [ "-DWITH_NEURAL=ON" ];
+          postInstall = ''
+            wrapProgram $out/bin/predictord \
+              --set GGML_BACKEND_PATH ${pkgs.llama-cpp}/bin
+          '';
         };
 
         # Track A : l'engine fcitx5 (réutilise le frontend Wayland éprouvé).
@@ -274,7 +308,23 @@
       #   - Pour activer la prédiction en permanence : DefaultIM = "predict".
       nixosModules.default =
         { config, lib, pkgs, ... }:
-        {
+        let neu = config.services.ime-predictord.neural;
+        in {
+          options.services.ime-predictord.neural = {
+            enable = lib.mkEnableOption
+              "le prédicteur neuronal (predictord-neural + libllama, Qwen3 GGUF)";
+            modelPath = lib.mkOption {
+              type = lib.types.str;
+              default = "";
+              example = "/home/u/.cache/huggingface/.../Qwen3-1.7B-Q4_K_M.gguf";
+              description = ''
+                Chemin absolu du GGUF (ex. Qwen3-1.7B Q4_K_M), fourni au daemon via
+                IME_NEURAL_MODEL. Le daemon active alors le neural sans exiger
+                neural:true dans le config.json perso.
+              '';
+            };
+          };
+          config = {
           # fcitx5 patché : expose getInputMethodV2Raw aux addons UI → qmlpanel
           # peut créer la popup-surface placée au caret. Patch minimal (4 lignes).
           nixpkgs.overlays = [
@@ -324,16 +374,25 @@
             self.packages.${system}.ime-preferences
           ];
 
-          # Daemon de prédiction (n-gram), service utilisateur.
+          # Daemon de prédiction (service utilisateur). predictord-neural si le
+          # neural est activé (sinon n-gram pur — service live inchangé par défaut).
           systemd.user.services.ime-predictord = {
-            description = "IME prediction daemon (n-gram)";
+            description = "IME prediction daemon"
+              + (if neu.enable then " (neural + n-gram)" else " (n-gram)");
             wantedBy = [ "graphical-session.target" ];
             partOf = [ "graphical-session.target" ];
             serviceConfig = {
-              ExecStart = "${self.packages.${system}.predictord}/bin/predictord "
-                + "${ime-model}/words.tsv";
+              ExecStart = "${
+                  if neu.enable
+                  then self.packages.${system}.predictord-neural
+                  else self.packages.${system}.predictord
+                }/bin/predictord ${ime-model}/words.tsv";
+              # IME_NEURAL_MODEL → le daemon charge le GGUF et active le neural.
+              Environment = lib.optional (neu.enable && neu.modelPath != "")
+                "IME_NEURAL_MODEL=${neu.modelPath}";
               Restart = "on-failure";
             };
+          };
           };
         };
 

@@ -32,13 +32,32 @@ ime/
 ## Protocole socket (engine ↔ daemon)
 
 ```
--> {"context":["je"],"prefix":"v"}
-<- {"candidates":["veux","vais",...],"literalIsWord":false,"autocomplete":"veux"}
+-> {"context":["je"],"prefix":"v","wide":"Il fait beau. Je"}
+<- {"candidates":["veux","vais",...],"literalIsWord":false,
+    "autocomplete":"veux","ghost":"veux","accentOnly":false}
 -> {"learn":{"prev":"je","word":"code"}}            <- {"ok":true}
+
+# deux phases (mot-suivant neural, E5) :
+-> {"context":["je"],"prefix":"","wide":"...","async":true}
+<- {"candidates":[n-gram...],"pending":true}        # immédiat
+<- {"candidates":[fusion neural...],"refresh":true} # dès que le neural aboutit
 ```
 `literalIsWord` dit si le préfixe tapé est déjà un mot réel — l'engine ne
 remplace alors le mot que sur sélection explicite (jamais d'autocorrection d'un
 mot valide). `autocomplete` est le mot que l'Espace applique (haute confiance).
+`ghost` est la complétion haute-confiance TOUJOURS calculée (mêmes garde-fous),
+même quand `autoApply` est off : l'engine l'affiche en texte fantôme et **→ la
+committe explicitement** (sans espace). `accentOnly` signale que `autocomplete`
+est une pure RESTAURATION D'ACCENTS (fold-equal : francais→français,
+oeuvre→œuvre, c'etait→c'était) — l'engine l'applique alors même si le tapé est
+un vrai mot du corpus (`literalIsWord`), car elle ne change jamais le mot.
+`wide` est le TEXTE BRUT avant le curseur (~240 caractères, phrases précédentes
+et ponctuation comprises, via SurroundingText) : seul le neural le lit — son
+avantage mesuré exige le contexte long ; le n-gram garde `context` (borné à la
+phrase). `async` demande les deux phases : n-gram tout de suite
+(`pending:true`), puis une 2e ligne `refresh:true` sur la même connexion
+(l'engine la lit depuis la boucle d'événements fcitx — zéro blocage clavier, un
+refresh périmé — frappe/commit entre-temps — est jeté).
 Socket par défaut `/tmp/ime-predictord.sock` (`IME_PREDICTORD_SOCK`).
 
 ## Le modèle (v3) — Kneser-Ney interpolé précalculé
@@ -63,8 +82,21 @@ P1(w)    = 0.7·Pcont(w) + 0.3·Pfreq(w)
   (replié accent-insensible : `francais`→français) — plus d'interpolation
   ad-hoc λ. Sans contexte : fréquence brute (bon prior en début de phrase).
 - **Autocorrection en noisy-channel** : `P(w|ctx)·P(frappe|w)`, canal pondéré
-  par type de faute (transposition 0.12 > voisin AZERTY 0.10 > lettre en trop
-  0.07), jamais à travers apostrophe/trait d'union (`j'ai` intouchable).
+  par type de faute (transposition 0.12 > apostrophe oubliée 0.11 > voisin
+  AZERTY 0.10 > lettre oubliée 0.09 > lettre en trop 0.07 — 0.02 seulement en
+  TÊTE de mot : « dici » est une élision, pas un « d » parasite devant
+  « ici »), jamais à travers apostrophe/trait d'union (`j'ai` intouchable).
+  **Espace oublié** : un préfixe qui se coupe en deux vrais mots au bigramme
+  observé propose l'expression (« dela » → « de la », 0.10) — affichée
+  seulement, jamais auto-appliquée. **Apostrophe oubliée** : les élisions sont
+  indexées par repli SANS apostrophe (« jai » → j'ai, « dici » → d'ici,
+  « cetait » → c'était ; correspondance mot-entier = boost 0.5) et SYNTHÉTISÉES
+  au besoin (proclitique j/c/d/l/m/n/s/t/qu + ' + mot à initiale vocalique :
+  « temener » → t'emmener, absent du vocab) — composable avec les autres
+  canaux (élision + lettre oubliée), synthèse coupée quand le tapé a des
+  correspondances exactes (« les » ne fait pas surgir « l'esprit »). Mesuré
+  (held-out 2023, fautes synthétiques 4 types) : récupération top-1
+  75→88,5 %, top-3 80→95,2 %.
 - **Garde-fous d'auto-application** (l'Espace ne remplace que sûr de lui ; les
   candidats restent toujours affichés) : préfixe ≥ 3 lettres (`az` ne devient
   pas « aziz »), le top doit dominer le 2ᵉ ×2 (ambigu → littéral, Tab choisit),
@@ -92,6 +124,11 @@ P1(w)    = 0.7·Pcont(w) + 0.3·Pfreq(w)
   contre-emploi — c'est de la prévisibilité gratuite.
 - **Multi-mots** : si la continuation du meilleur candidat est très sûre
   (P ≥ 0,35), l'expression entière est proposée (« sais pas »).
+- **Cache de récence** (façon cache-LM Gboard) : les mots déjà présents dans
+  le texte avant le curseur (`wide`, ~240 car. via SurroundingText) sont
+  boostés (`recencyBoost`, ≤1.0 = off) dans le même pipeline multiplicatif
+  que langue/accord — le texte humain se répète (noms propres, vocabulaire
+  du sujet). Le dernier mot du contexte est exclu (pas de « le le »).
 - **Apostrophe typographique** `’` normalisée en `'` partout (repli + n-grammes).
 
 ## Personnalisation (`~/.config/ime-predictord/`, rechargé à chaud)
@@ -104,8 +141,12 @@ P1(w)    = 0.7·Pcont(w) + 0.3·Pfreq(w)
   English / Auto / Aucune. CLI scriptable :
   `ime-preferences --set lang=fr --set ghostText=false`.
 - **`config.json`** — daemon : `lang` (`fr`/`en`/`auto`/`off`), `autoApply`,
-  `autoDom`, `autoMinLen`,
-  `langBoost`, `multiWord` ; engine : `ghostText`, `frenchSpacing` (espace
+  `autoDom`, `autoMinLen`, `accentRestore` (restauration d'accents/ligatures
+  fold-equal sur Espace, même avec `autoApply:false`), `accentDom` (seuil de
+  dominance quand la graphie brute est aussi au corpus ; défaut 4.0),
+  `barWords` (taille max de la barre, 1-8),
+  `langBoost`, `recencyBoost` (boost des mots déjà dans le document ;
+  ≤1.0 = off), `multiWord` ; engine : `ghostText`, `frenchSpacing` (espace
   fine insécable U+202F avant `; : ! ?`), `autoCapitalize` (majuscule en
   début de phrase), `nextWordBar` (false = pas de barre spéculative après
   Espace — mode calme), `autoApplyNeedsRevert` (défaut true : l'Espace ne
@@ -122,7 +163,7 @@ P1(w)    = 0.7·Pcont(w) + 0.3·Pfreq(w)
 ### Datasets (épinglés par hash → build pur)
 
 - **words.tsv (~84 000 mots)** — OpenSubtitles 2018 (hermitdave) fr_50k+en_50k.
-- **n-grammes** : Leipzig **news 2024 300K** phrases/langue (CC BY) + **Tatoeba
+- **n-grammes** : Leipzig **news 2024 1M** phrases/langue (CC BY) + **Tatoeba
   conversationnel** (release OPUS datée v2023-04-12, immuable ; CC BY 2.0 FR) —
   le registre dialogue est bien plus proche de la frappe réelle que la presse.
   → ~950k bigrammes + ~1,2M trigrammes stockés (seuil ≥2), modèle 66 Mo,
@@ -139,14 +180,60 @@ P1(w)    = 0.7·Pcont(w) + 0.3·Pfreq(w)
   (accents/ligatures : `:cœur` marche aussi), le nom canonique (tts) domine
   les mots-clés, les **favoris appris remontent** (`learn` à chaque emoji
   committé). `:` seul liste tes favoris puis une sélection courante.
+  **Tolérance aux fautes** : si le préfixe exact ne matche rien (requête ≥3),
+  transpositions et suppressions d'un caractère sont réessayées à score
+  pénalisé — `:ceour`→❤️, `:etoiel`→⭐, `:thumsb`→👍.
 - **Grille 3×8** : le mode emoji affiche jusqu'à 24 candidats en grille —
-  Tab/⇧Tab et ←/→ se déplacent de case en case, **↑/↓ sautent d'une ligne**
-  (wrap), 1-6 sélectionnent sur la première ligne, taper affine en live.
-  `:` seul = tes favoris puis les populaires (recently-used, façon Win+.).
-  Le browsing par catégorie est gratuit : `:animal`, `:fete`, `:main`…
-- Espace committe l'emoji du haut, Entrée le surligné. En complétion normale,
-  un mot qui est exactement un mot-clé (« coeur ») propose l'emoji en fin de
-  barre.
+  Tab/⇧Tab et **←/→ (entrée directe, sans Tab préalable)** se déplacent de
+  case en case, **↑/↓ sautent d'une ligne** (wrap), 1-6 sélectionnent sur la
+  première ligne, taper affine en live. `:` seul = tes favoris puis les
+  populaires (recently-used, façon Win+.). Le browsing par catégorie est
+  gratuit : `:animal`, `:fete`, `:main`…
+- Espace committe l'emoji du haut (avec espace), **Entrée le surligné — ou le
+  premier si on n'a pas encore navigué** (sans espace ; le `:` nu garde son
+  comportement littéral). Vaut aussi pour les snippets (`;mail` + Entrée →
+  expansion). En complétion normale, un mot qui est exactement un mot-clé
+  (« coeur ») propose l'emoji en fin de barre.
+
+## Reformulation (Ctrl+Alt+R sur une sélection)
+
+- **Flux** : sélection (souris ou Ctrl+A) → `Ctrl+Alt+R` → bulle verticale de
+  variantes LLM (1-9/↑↓/Entrée remplace, Backspace juste après = revert,
+  Échap annule). ←/→ **ou les lettres `r/f/s/c/t`** changent de MODE
+  (`reformuler/formel/simple/court/corriger/traduire` — `c` = corriger, court
+  reste aux flèches), re-Ctrl+Alt+R régénère (nonce). Le **dernier mode**
+  utilisé est mémorisé pour le prochain Ctrl+Alt+R (session). Sans sélection
+  ni champ court : panneau « Rien à reformuler » (feedback, pas de no-op).
+  Sans sélection RAPPORTÉE mais champ court (≤400 cp) : le champ entier est
+  reformulé et le commit **remplace le champ** (delete explicite — commitString
+  seul insérerait en plus). `reformCount` (config engine, 1-6, défaut 3) fixe
+  le nombre de variantes demandées. La langue est épinglée par **cfg.lang**
+  (`fr`/`en` ; `auto` = heuristique `reformIsFrench`, partagée
+  reform_prompts.h).
+- **Source : Groq UNIQUEMENT** (`reformModel`, `reformBaseUrl`,
+  `reformTimeoutMs` 8 s ; clé : `$GROQ_API_KEY` ou
+  `~/.local/share/ime-predictord/groq.key` — jamais dans le dépôt stow).
+  La qualité d'abord : le repli local (GGUF Base du mot-suivant) produisait
+  des variantes inutilisables — retiré. **L'échec s'affiche** au lieu de
+  disparaître : la réponse porte `error`
+  (`no_key`/`auth`/`network`/`http`/`empty`) et l'engine montre un panneau
+  compact — clé manquante/refusée → « Entrée : configurer » lance
+  **`ime-preferences --groq-key`** (fenêtre où COLLER la clé fonctionne,
+  écrite en 0600 dans le data dir, puis **validation automatique** via l'op
+  daemon `{"reformCheck":true}` = appel Groq minimal → ✓ et fermeture auto,
+  ou ✗ clé refusée). Réseau/API en panne → « ⚠ Reformulation indisponible ».
+  `neural.reformulate` reste dans neural.cpp mais n'est plus branché.
+- **Architecture (2026-07-04)** : l'endpoint est servi par un **worker
+  dédié** du daemon — le poll loop ne gèle JAMAIS (la complétion continue
+  pendant les secondes de génération ; mesuré au test : complétion en 1 ms
+  pendant une reformulation lente). Réponse **différée** sur la même
+  connexion (lignes déposées via `postLine` + pipe de réveil) ; un job du
+  même client encore en file est remplacé (cycling de modes). **Streaming**
+  local : chaque variante part en `partial:true` dès que sa ligne est
+  générée — la 1re s'affiche pendant que les suivantes se calculent (la
+  génération s'arrête d'ailleurs dès n variantes acceptées). **Cache LRU**
+  (8 entrées, clé texte+mode+nonce+n) : revenir sur un mode déjà visité est
+  instantané et gratuit ; les échecs ne sont jamais cachés.
 
 ## Interactions
 
@@ -158,9 +245,11 @@ P1(w)    = 0.7·Pcont(w) + 0.3·Pfreq(w)
   raccourcis à modificateur (Ctrl+Tab, Ctrl+Entrée…) committent le littéral
   puis **passent** à l'application. Un appui de modificateur seul (Shift…)
   ne touche à rien — ni au mot en cours, ni à la barre, ni au revert.
-- **Ghost text** : quand l'Espace va compléter, le reste du mot s'affiche déjà
-  dans le préedit, curseur entre le tapé et le fantôme (`bonjou‸r`) — jamais
-  pour une correction floue (la barre + liseré s'en chargent).
+- **Ghost text** : le reste de la complétion haute-confiance s'affiche dans le
+  préedit, curseur entre le tapé et le fantôme (`bonjou‸r`) — jamais pour une
+  correction floue (la barre + liseré s'en chargent). **→ l'accepte
+  explicitement** (commit sans espace), que `autoApply` soit actif ou non —
+  le mode prudent (`autoApply:false`) garde ainsi ses complétions.
 - **Espace** : complète/corrige (garde-fous ci-dessus) — le candidat qui sera
   appliqué porte un **liseré accent** dans la barre ; sans marquage, Espace
   garde le littéral. La **ponctuation** (`. , ; : ! ?`) corrige aussi
@@ -176,6 +265,16 @@ P1(w)    = 0.7·Pcont(w) + 0.3·Pfreq(w)
   tel quel, rien n'est appris — annuler ≠ valider) ou ferme la barre
   mot-suivant, puis la touche **file à l'application** (vim sort du mode
   insertion au premier Échap). `escapeForward: false` pour l'avaler.
+- **Ctrl+Shift+L** : PANNEAU DE LANGUE — chips compactes
+  [Français|English|Auto|Libre], le choix courant surligné (liste
+  `kLangChoices`, extensible : ajouter une langue = une ligne). ←/→/Tab (ou
+  re-Ctrl+Shift+L) déplacent, **1-4** ou Entrée/Espace appliquent, Échap
+  annule, toute autre touche sort du mode. L'application réécrit la valeur
+  de `lang` dans le TEXTE de `config.json` (formatage et clés-commentaires
+  préservés, écriture atomique via la cible réelle du lien stow, mtime
+  poussé d'une seconde si le rename retombe dans la même seconde — le
+  daemon recharge sur mtime à la granularité seconde), puis la barre
+  repart dans la nouvelle langue (retour visuel).
 
 ## Résultats mesurés (i5-1335U, CPU-only)
 
@@ -324,10 +423,147 @@ python3 ime/daemon/test_predict.py "$(nix build ./ime#predictord --no-link --pri
       chiffres publiés Gboard (cf section) : in-vocab **16,9/27,0 %** =
       niveau CIFG-LSTM déployé ; forcer la langue ≈ gratuit (−0,3 pt hit@3
       au pire, à contre-emploi).
-- [ ] Rerank neuronal async optionnel (GRU/GPT-2-mini int8 via ONNX, patron
-      SwiftKey 2025 : reranke les candidats n-gram, ~+3-5 pts hit@3), non
-      bloquant. (Toujours pas prioritaire : à reconsidérer seulement si le
-      ressenti de frappe est bon et que la qualité des candidats plafonne.)
+- [x] **Qualité complétion + UI/UX (2026-07-03) — Q1→Q5.** (1) `accentRestore`
+      + `accentDom` : restauration d'accents/ligatures FOLD-EQUAL sur Espace —
+      n'ajoute que les signes, jamais un autre mot, à travers les élisions
+      (c'etait→c'était), avec seuil de dominance quand la graphie brute est
+      aussi au corpus (francais→français ENFIN, ligatures œ/æ sans seuil) —
+      marche même avec `autoApply:false` (les clés de la config perso étaient
+      jusqu'ici… non implémentées). Nouveau champ réponse `accentOnly` :
+      l'engine applique malgré `literalIsWord`. (2) GHOST découplé de
+      autoApply : le champ `ghost` est toujours calculé ; **→ l'accepte
+      explicitement** (commit sans espace, façon Copilot/fish) — le mode
+      prudent garde ses complétions. (3) `barWords` (1-8, défaut 6) : la barre
+      ne montre que les N meilleurs. (4) UI : fondu de contenu 80 ms quand la
+      barre PASSIVE se rafraîchit (swap asynchrone du neural — plus de
+      « pop »). Les indices 1-6 sur les chips (essai) ont été retirés à
+      l'usage — les chiffres sélectionnent toujours en navigation, sans
+      marquage. (5) `ime-preferences` : bascule
+      « Restauration d'accents ». Résout le TODO « auto-accent quand la forme
+      sans accent est au dico ».
+- [x] **Neural v2 (2026-07-03) — E1→E8.** (1) Contexte LARGE : l'engine envoie
+      le texte brut avant le curseur (`wide`, ~240 car., phrases précédentes
+      comprises) — le neural prédit sur SON régime gagnant, y compris en début
+      de phrase. (2) Expansion multi-token bornée : les fragments BPE
+      (« l » → « l'école », élisions françaises) sont complétés jusqu'à la
+      frontière de mot (KV restauré ensuite). (3) Rerank neuronal de la
+      complétion, opportuniste : cache KV chaud pour ce contexte exact →
+      mélange log-linéaire `(1−λ)·log P_KN + λ·logprob` (λ=`rerankWeight`),
+      jamais de prefill sur le chemin chaud, `autocomplete` reste 100 % n-gram.
+      (4) FUSION par score : candidats neuronaux = probabilité softmax ×
+      `neuralBoost`, passés par langFactor/agreeFactor et fusionnés avec
+      modèle + appris (fini le préfixage brut qui court-circuitait langue
+      stricte, accord et apprentissage). (5) Deux phases ASYNC : n-gram
+      instantané + refresh neural poussé (worker thread daemon, event loop
+      fcitx côté engine, générations anti-périmé) — plus de hitch après
+      Espace. (6) `neuralBudgetMs` : budget temps dur de l'appel neuronal.
+      (7) Canal de faute : lettre oubliée + espace oublié (cf plus haut).
+      (8) GGUF *base* épinglé (nix-config vinland, fetchurl + hash).
+      Config daemon : `neuralBudgetMs` 180, `neuralBoost` 2.0, `neuralRerank`
+      true, `rerankWeight` 0.4, `asyncNeural` true ; engine :
+      `asyncNextWord` true. Smoke live (base 1.7B) : « allé à » → l'école ;
+      « film au » + `cin` → cinéma top-1 ; refresh async +280 ms.
+- [x] **Couche NEURONALE (libllama, GGUF) — implémentée 2026-06-23.**
+      `daemon/neural.{h,cpp}` (NeuralPredictor : cache KV incrémental + top-k
+      tokens initiaux de mot), intégrée dans `predictord` derrière `WITH_NEURAL`
+      + config `neural`/`neuralModel`/`neuralThreads`/`neuralTopk`/`neuralOnly`
+      (rechargés à chaud). Le neural mène le MOT-SUIVANT (prefix vide), le n-gram
+      garde la complétion intra-mot + `literalIsWord`/`autocomplete` ;
+      `neuralOnly=true` = mot-suivant 100% neuronal. Paquet flake
+      `predictord-neural` (wrappé `GGML_BACKEND_PATH`) ; `predictord` reste pur
+      n-gram (service live inchangé). Validé : Qwen3-4B Q4, qualité FR+EN très
+      supérieure, liste candidats ~120 ms incrémental ; `test_predict.py` 0
+      régression. Spec + bench : `docs/superpowers/specs/2026-06-23-neural-llm-predictor-design.md`.
+      RESTE (non fait) : timeout engine 150 ms → relever ou passer ASYNC
+      (instant n-gram + refresh neuronal poussé) sinon le 4B (~120-200 ms) est
+      coupé côté engine ; GGUF *base* (vs instruct) ; pin du modèle + bascule du
+      module ; éval hit@k neural vs n-gram ; test live.
+- [x] **Parité anglaise + bascule de langue (2026-07-04).** (1) CONTRACTIONS
+      EN au modèle : `extract_elisions.py` généralisé — en plus des élisions
+      FR, il extrait du corpus les contractions anglaises (`don't`, `i'm`,
+      `it's`, `you're`… — 2,3 % des tokens conversationnels), fréquences
+      redistribuées depuis les tokens-ancre scindés de en50k (`'s` 14M,
+      `'t` 9,6M…), étiquetées `en`. Avant : hors-vocab → intapables ET chaque
+      occurrence cassait ses n-grammes. Après : `don` → don't (complétion),
+      `dont`/`im`/`cant` → don't/i'm/can't top-1 (canal apostrophe existant,
+      zéro changement daemon), n-grammes traversants (« i don't » → you/have/
+      know), 810 bigrammes + 2916 trigrammes via don't. Held-out Tatoeba
+      conversationnel : hit@6 31,9→33,0, hit@3 25,2→25,9, in-vocab 93,4→94,8 %
+      (métrique pourtant durcie : les contractions comptent désormais comme
+      cibles) ; presse 2023 et FR strictement inchangés. (2) CASSE ANGLAISE :
+      `applyCase` capitalise toujours « i » et « i'… » (I, I'm, I'll) — sûr
+      sans condition de langue (aucun mot FR n'est `i` ni `i'…`). (3)
+      **Ctrl+Shift+L** : bascule fr ↔ en à chaud (cf Interactions). Tests :
+      +4 cas engine (I'm affiché/committé, bascule aller-retour).
+- [x] **Corpus ×3 + cache de récence + autotune (2026-07-04).** (1) Leipzig
+      news 2024 passe de 300K à **1M phrases/langue** (URL + hash, rien
+      d'autre) : modèle 74→157 Mo, 2,1M bigrammes / 3,2M trigrammes, RSS
+      daemon ~200 Mo, latence p50 0,08-0,12 ms (p99 < 3 ms). Held-out 2023 :
+      hit@3 FR 24,5→**26,1** (+1,6), EN 25,8→**26,7** (+0,9), auto-KSR FR
+      27,1→28,3, autocorrection +0,5-1 pt — le levier classique des n-grammes.
+      (2) CACHE DE RÉCENCE (façon cache-LM Gboard) : les mots déjà présents
+      dans `wide` (le document en cours) sont boostés (`recencyBoost`) dans le
+      même pipeline multiplicatif que langue/accord, dernier mot du contexte
+      exclu. Branché sur TOUS les chemins (complétion scoreOf, appris uni/bi/
+      tri, suiveurs tri/bi/topUni, fusion neurale, chemins sync/async/non-
+      neural). (3) AUTOTUNE : sweep langBoost {1.6, 2.0} × recencyBoost {1.0,
+      1.3, 1.6, 2.2} sur les 3 held-out (16 évals). Verdict : langBoost 2.0 =
+      bruit (±0,1) → 1.6 conservé ; recencyBoost ~neutre à 1.3, négatif > 2 —
+      défaut **1.3**. LIMITE assumée : le held-out est fait de PHRASES
+      INDÉPENDANTES mélangées — il ne peut pas mesurer la répétition de
+      document (noms propres, vocabulaire du sujet), le vrai bénéfice du
+      cache ; le défaut reste donc doux. Tests : +3 cas daemon (récence
+      complétion/mot-suivant, piège : `forget` nécessaire — la section 7
+      apprend « je→vais » et l'appris re-passe devant).
+- [x] **Panneau de langue (2026-07-04).** Ctrl+Shift+L n'est plus une bascule
+      aveugle : il ouvre un panneau compact dans la barre (chips
+      [Français|English|Auto|Libre], choix courant surligné — mode chips
+      standard de qmlui : candidats SANS label → pas de bulle liste).
+      Navigation ←/→/Tab/re-Ctrl+Shift+L, application 1-4/Entrée/Espace,
+      Échap annule. Liste `kLangChoices` extensible (une langue = une ligne,
+      une fois le support modèle/daemon en place). `toggleLang()` scindé en
+      `readLang()`/`writeLang(v)` (même écriture textuelle atomique). Tests :
+      5 cas engine (chips, chiffre, fermeture, Échap, →+Entrée).
+- [x] **Reformulation — batch architecture (2026-07-04).** (A1) L'endpoint
+      `reformulate` passe sur un **worker dédié** avec réponse différée
+      (postLine + pipe de réveil partagé) : le poll loop ne gèle plus pendant
+      les secondes d'appel Groq / génération locale — testé : complétion en
+      1 ms pendant une reformulation lente (avant : bloquée derrière, jusqu'à
+      20 s). File FIFO, job du même client remplacé s'il attend encore.
+      (A2) **Streaming** : `neural.reformulate` accepte un callback par
+      variante (parsing ligne-à-ligne incrémental + arrêt dès n variantes) ;
+      le daemon pousse des lignes `partial:true`, l'engine met la bulle à
+      jour au fil de l'eau (1re variante navigable immédiatement, position
+      de navigation préservée). Groq reste non-streamé (répond < 2 s).
+      (A3) **Cache LRU** 8 entrées (texte+mode+nonce+n) partagé
+      worker/thread principal : cycling de modes déjà visités instantané.
+      + `reformTimeoutMs` 20 s → 8 s (l'engine abandonne à 12 s) ; includes
+      threading hors du `#ifdef WITH_NEURAL` (le worker existe aussi en
+      build pur n-gram). Tests : +5 cas daemon (mock HTTP OpenAI local —
+      variantes différées, cache, nonce, non-blocage mesuré, aboutissement).
+      Streaming local vérifié en smoke GGUF réel : partial à t+1,1 s, final
+      à t+2,2 s. ATTENTION (préexistant, hors batch) : le repli local partage
+      le modèle du mot-suivant — avec le GGUF *Base* déployé, les variantes
+      locales sont inutilisables (le Base ne suit pas le chat template) ; le
+      repli n'a de valeur qu'avec un GGUF instruct, sinon Groq est la seule
+      vraie source.
+- [x] **Reformulation — Groq-only + UX de panne (2026-07-04).** Le repli
+      local est retiré (qualité d'abord : le GGUF Base rendait du charabia).
+      `reformulateHttp` remonte un KIND (`ok/no_key/auth/network/http/empty`)
+      inclus dans la réponse ; l'engine affiche un panneau COMPACT au lieu
+      d'un échec silencieux : clé manquante/refusée → « Entrée : configurer »
+      lance `ime-preferences --groq-key` (double fork), réseau/API →
+      « ⚠ indisponible ». Le dialogue de clé : champ collable, écrit
+      `groq.key` (0600, data dir), puis VALIDATION AUTOMATIQUE via le nouvel
+      op `{"reformCheck":true}` (appel Groq minimal sur le worker, différé) —
+      ✓ fermeture auto, ✗ message. `no_key` est détecté SANS réseau → le
+      panneau apparaît quasi instantanément au hotkey. Au passage : le
+      remplacement de jobs en file se fait par PHRASE (l'engine ouvre une
+      connexion par demande — l'ancien critère « même client » ne matchait
+      jamais), l'évincé reçoit `superseded` immédiatement ; `reformProvider`
+      supprimé de la config. Tests : +3 cas daemon (401→auth, reformCheck
+      refusée/acceptée) ; smoke offscreen du dialogue. Limite : les panneaux
+      engine (rendu async) ne sont pas couverts par le harnais engine.
 - [ ] (Polish) auto-accent quand la forme sans accent est au dico (ex. `garcon`
       reste `garcon` car présent dans le corpus) — limite de qualité du corpus.
 
@@ -362,6 +598,14 @@ couleur (17 px). Couleurs lues de
 `~/.cache/DankMaterialShell/dms-colors.json` (live-reload au changement de
 thème), override via `~/.config/fcitx5/qmlpanel/colors.json`
 (`{surface,onSurface,accent,onAccent,outline}`).
+
+**Évitement du texte** : le compositeur place la popup au caret ; s'il la pose
+SUR la ligne en cours de frappe (bas d'écran, rect curseur dégénéré côté
+app...), l'addon le détecte via l'événement `text_input_rectangle` (position
+de la ligne de texte dans nos coordonnées de surface) et décale la barre dans
+un canvas transparent — collée au-dessus de la ligne si la place existe, sinon
+juste en dessous. Hystérésis jusqu'au démappage (pas d'oscillation
+compositeur ↔ resize). Le texte reste visible à travers le transparent.
 
 Activer : lancer fcitx5 patché avec `--ui qmlpanel` (sinon classicui reste
 l'UI). Test visuel headless : `./test-ui.sh` (PNG dans `/tmp/ime-ui/`).
