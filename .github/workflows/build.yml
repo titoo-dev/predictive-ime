@@ -24,12 +24,13 @@ jobs:
             image: archlinux:latest
             deps: >-
               pacman -Sy --noconfirm --needed base-devel cmake extra-cmake-modules
-              git fcitx5 nlohmann-json qt6-base qt6-declarative
+              git fcitx5 nlohmann-json qt6-base qt6-declarative curl
           - name: fedora
             image: fedora:41
             deps: >-
               dnf -y install gcc-c++ cmake extra-cmake-modules pkgconf-pkg-config
               git fcitx5-devel nlohmann-json-devel qt6-qtbase-devel qt6-qtdeclarative-devel
+              libcurl-devel
           - name: ubuntu
             image: ubuntu:24.04
             deps: >-
@@ -37,11 +38,13 @@ jobs:
               build-essential cmake extra-cmake-modules pkg-config git
               nlohmann-json3-dev qt6-base-dev qt6-declarative-dev
               libfcitx5core-dev libfcitx5utils-dev libfcitx5config-dev
+              libcurl4-openssl-dev
           - name: opensuse
             image: opensuse/tumbleweed:latest
             deps: >-
               zypper -n install -y gcc-c++ cmake extra-cmake-modules pkg-config
               git fcitx5-devel nlohmann_json-devel qt6-base-devel qt6-declarative-devel
+              libcurl-devel
     steps:
       - name: Install build dependencies
         run: ${{ matrix.deps }}
