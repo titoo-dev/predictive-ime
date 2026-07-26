@@ -101,6 +101,7 @@ expect() {  # $1=libellé  $2=chaîne tapée  $3=résultat attendu
       "<RIGHT>"*) sleep 0.3; inj -k Right;         sleep 0.3; rest="${rest#<RIGHT>}" ;;
       "<BS>"*)    sleep 0.3; inj -k BackSpace;     sleep 0.3; rest="${rest#<BS>}" ;;
       "<SHIFT>"*) sleep 0.3; inj -M shift -m shift; sleep 0.3; rest="${rest#<SHIFT>}" ;;
+      "<EMOJI>"*) sleep 0.3; inj -M logo -k semicolon -m logo; sleep 0.3; rest="${rest#<EMOJI>}" ;;
       *) seg="${rest%%<*}"
          if [ "$seg" = "$rest" ]; then inj -d 70 -- "$rest"; rest=""
          else [ -n "$seg" ] && inj -d 70 -- "$seg"; rest="${rest#"$seg"}"; fi ;;
@@ -128,8 +129,9 @@ expect "autocorrection faute simple"   "teh "                   "the "
 expect "no-clobber d'un vrai mot"      "le "                    "le "
 expect "chiffres NON avalés"           "code 3 "                "code 3 "
 expect "phrase multi-mots + accents"   "je suis allé au café "  "je suis allé au café "
-expect "emoji picker ':coeur'+espace"  ":coeur "                "❤️ "
-expect "':' nu reste littéral"         ": ok "                  ": ok "
+expect "emoji picker Super+;+'coeur'"  "<EMOJI>coeur "          "❤️ "
+expect "':' tapé reste littéral"       ": ok "                  ": ok "
+expect "':' littéral en plein mot"     "10:30 "                 "10:30 "
 expect "Échap annule la suggestion"    "bonjou<ESC> ok "        "bonjou ok "
 expect "Échap ferme la barre (avalé)"  "je <ESC>vais "          "je vais "
 expect "ponctuation corrige aussi"     "teh. ok "               "the. ok "

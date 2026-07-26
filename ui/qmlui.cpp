@@ -83,6 +83,15 @@ wl_buffer *makeImageBuffer(wl_shm *shm, const QImage &img) {
     wl_buffer_add_listener(buf, &kBufferListener, nullptr);
     return buf;
 }
+
+// Le PICKER EMOJI s'annonce par le préedit du PANNEAU (« :requête ») : pendant
+// la recherche l'engine n'écrit plus rien dans l'application (le préedit client
+// reste vide), donc c'est le seul marqueur. Il sert aussi à garder la barre
+// affichée quand la recherche ne rend AUCUN candidat (état vide du picker).
+bool emojiPicker(fcitx::InputContext *ic) {
+    std::string pre = ic->inputPanel().preedit().toString();
+    return !pre.empty() && pre[0] == ':';
+}
 } // namespace
 
 using namespace fcitx;
@@ -99,7 +108,7 @@ public:
         bool show = ic && ic->hasFocus();
         if (show) {
             auto list = ic->inputPanel().candidateList();
-            show = list && list->size() > 0;
+            show = (list && list->size() > 0) || emojiPicker(ic);
         }
         if (show)
             showPanel(ic);
@@ -192,8 +201,14 @@ private:
             }
         }
         std::string pre = ic->inputPanel().clientPreedit().toString();
-        bool composing = !pre.empty();
-        bool grid = !pre.empty() && pre[0] == ':'; // mode emoji → grille
+        // grille = picker emoji (préedit du PANNEAU) ; la requête alimente le
+        // champ de recherche, sans le ':' interne.
+        bool grid = emojiPicker(ic);
+        QString searchText =
+            grid ? QString::fromStdString(
+                       ic->inputPanel().preedit().toString().substr(1))
+                 : QString();
+        bool composing = !pre.empty() || grid;
         // Mode LISTE (reformulation) : des labels numériques sont posés sur les
         // candidats. Le placeholder de génération est un candidat unique
         // commençant par ⟳ (U+27F3) → mode liste + état « loading ».
@@ -210,7 +225,7 @@ private:
         QString headerText =
             QString::fromStdString(ic->inputPanel().auxUp().toString());
         view_->update(cands, highlight, autoMark, composing, grid, labels,
-                      listMode, loading, headerText);
+                      listMode, loading, headerText, searchText);
         if (!renderFrame())
             return;
         mapped_ = true;

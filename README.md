@@ -6,7 +6,7 @@ autocorrection, next-word prediction and an emoji picker. Offline, no telemetry.
 
 ![predictive-ime in action: next-word prediction, intra-word completion and the emoji picker](assets/demo.gif)
 
-> Typing `je vais au travail aujourd'`, accepting the `aujourd'hui` completion, then `:coeur` → ❤️. The candidate bar shows at most five ranked suggestions.
+> Typing `je vais au travail aujourd'`, accepting the `aujourd'hui` completion, then **Super+;** `coeur` → ❤️. The candidate bar shows at most five ranked suggestions.
 
 The core runs on any stock fcitx5 (using its default candidate bar). The
 optional Qt Quick candidate bar (`qmlpanel`) needs a patched fcitx5 —
@@ -90,6 +90,16 @@ learned words feel too weak on your corpus).
 bare proclitic `j'` (rarely the intended final word). `proclisisDemote`
 (default `6.0`) divides the score of a bare proclitic form (`j'`, `c'`, `qu'`,
 `d'`, `n'`, `s'`, `t'`, `m'`, `l'`) when you typed exactly that proclitic.
+
+**Emoji picker.** Always on, opened with **Super+;** at any point: empty
+buffer, mid-word (the word in progress is committed as typed), or with the
+next-word bar open; pressing it again closes the picker. It is a Material 3
+surface with its own search field, so the query stays in the picker and is
+never typed into your document. Type a CLDR keyword (`coeur`, `soleil`,
+`fire`…) to filter the 3×8 grid, or pick straight from your recently-used
+favourites. Arrows move cell by cell, up/down by row, Home/End jump to either
+end, Enter inserts, Escape closes without inserting anything. A typed `:` is a
+plain character everywhere (`10:30`).
 
 **French typography (opt-in).** `frenchSpacing` (default `false`) inserts a
 narrow no-break space (U+202F) before `;` `:` `!` `?` and the closing guillemet

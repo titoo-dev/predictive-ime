@@ -218,6 +218,11 @@ struct Harness {
   std::string preedit() {
     return ic->inputPanel().clientPreedit().toStringForCommit();
   }
+  // Préedit du PANNEAU (pas envoyé à l'application) : c'est là que vit la
+  // requête du picker emoji, et le marqueur de mode grille pour l'UI.
+  std::string panelPreedit() {
+    return ic->inputPanel().preedit().toStringForCommit();
+  }
 };
 
 // --- Tests comportementaux (chacun pousse une expectation pour CHAQUE commit
@@ -325,23 +330,99 @@ void interactionTests(Harness &h) {
   h.type(" ");
   check("interaction: Tab puis Espace committe le candidat surligné", true);
 
-  // picker emoji : Entrée SANS navigation prend le 1er candidat (sans espace)
+  // picker emoji : Super+; ouvre, Entrée SANS navigation prend le 1er candidat
+  // (sans espace)
   h.daemon->setReply({"❤️", "💕"}, "❤️", false);
   h.expectCommit("❤️");
-  h.type(":coeur");
+  h.key("Super+semicolon");
+  h.type("coeur");
   h.key("Return");
-  check("emoji: Entrée committe le 1er candidat (sans espace)", true);
+  check("emoji: Super+; puis Entrée committe le 1er candidat", true);
+
+  // ':' tapé n'ouvre PLUS le picker : caractère normal qui file à l'application
+  h.daemon->setReply({"❤️"}, "", false);
+  h.type(":");
+  check("emoji: ':' tapé ne compose plus (pas de picker)", h.preedit().empty(),
+        h.preedit());
+
+  // Super+; EN PLEIN MOT : le fragment est committé tel quel, le picker s'ouvre
+  h.daemon->setReply({"❤️", "💕"}, "", false);
+  h.expectCommit("bonj");
+  h.key("b"); h.key("o"); h.key("n"); h.key("j");
+  h.key("Super+semicolon");
+  check("emoji: Super+; en plein mot committe le fragment puis ouvre",
+        h.panelPreedit() == ":", h.panelPreedit());
+  h.key("Super+semicolon"); // re-presser referme le picker (rien de committé)
+  check("emoji: Super+; referme le picker", h.panelPreedit().empty(),
+        h.panelPreedit());
+
+  // la RECHERCHE reste dans le panneau : l'application ne voit RIEN (avant, le
+  // préedit client écrivait « :coeur » en plein champ de saisie).
+  h.daemon->setReply({"❤️", "💕"}, "", false);
+  h.key("Super+semicolon");
+  h.type("coeur");
+  check("emoji: la requête vit dans le préedit du panneau",
+        h.panelPreedit() == ":coeur", h.panelPreedit());
+  check("emoji: rien n'est écrit dans l'application", h.preedit().empty(),
+        h.preedit());
+
+  // recherche sans résultat : le picker RESTE ouvert (état vide côté UI), il ne
+  // propose PAS le littéral ':zzz' en candidat.
+  h.daemon->setReply({}, "", false);
+  h.type("zz");
+  check("emoji: aucun résultat → pas de candidat littéral",
+        h.candidates().empty(), std::to_string(h.candidates().size()));
+  check("emoji: aucun résultat → le picker reste ouvert",
+        h.panelPreedit() == ":coeurzz", h.panelPreedit());
+
+  // Échap dans le picker : ferme SANS committer le ':' synthétique ni la
+  // requête (le testfrontend abort sur tout commit non attendu).
+  h.key("Escape");
+  check("emoji: Échap ferme le picker sans rien committer",
+        h.panelPreedit().empty(), h.panelPreedit());
+
+  // picker NU (aucune requête, grille de favoris) : Entrée prend le 1er emoji
+  h.daemon->setReply({"😀", "❤️"}, "", false);
+  h.expectCommit("😀");
+  h.key("Super+semicolon");
+  h.key("Return");
+  check("emoji: Entrée sur le picker nu committe le 1er favori", true);
 
   // grille emoji : → entre en navigation sans Tab, ↓ saute une ligne (+8),
   // Entrée committe le surligné.
   h.daemon->setReply({"e0", "e1", "e2", "e3", "e4", "e5", "e6", "e7", "e8",
                       "e9"}, "", false);
   h.expectCommit("e8");
-  h.type(":x");
+  h.key("Super+semicolon");
+  h.type("x");
   h.key("Right"); // entre dans la grille (index 0)
   h.key("Down");  // +8 → index 8
   h.key("Return");
   check("emoji: →/↓ naviguent la grille sans Tab, Entrée committe", true);
+
+  // BORNAGE de la grille (10 candidats = 1 ligne pleine + 2) : ← sur la 1re
+  // case ne reboucle pas sur la dernière, et ↓ depuis une ligne incomplète
+  // tombe sur la DERNIÈRE case au lieu de repartir en haut.
+  h.daemon->setReply({"e0", "e1", "e2", "e3", "e4", "e5", "e6", "e7", "e8",
+                      "e9"}, "", false);
+  h.expectCommit("e9");
+  h.key("Super+semicolon");
+  h.type("x");
+  h.key("Right"); // index 0
+  h.key("Left");  // borné → reste 0
+  h.key("Down");  // +8 → 8
+  h.key("Down");  // +8 → 16, borné → 9 (dernier)
+  h.key("Return");
+  check("emoji: ←/↓ bornés aux extrémités (pas de wrap en grille)", true);
+
+  // Début / Fin : extrémités directes de la grille
+  h.expectCommit("e0");
+  h.key("Super+semicolon");
+  h.type("x");
+  h.key("End");
+  h.key("Home");
+  h.key("Return");
+  check("emoji: Fin puis Début sautent aux extrémités", true);
 
   // ponctuation : committe le mot (sans espace) ; le '.' file à l'application
   h.daemon->setReply({"fin"}, "", true);

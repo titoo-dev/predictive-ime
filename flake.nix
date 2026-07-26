@@ -290,6 +290,48 @@
           installPhase = "touch $out";
         };
 
+        # Barre QML : rend les états (picker emoji, barre de mots) en PNG dans
+        # $out. Une erreur QML rend le composant nul — donc un panneau muet qui
+        # AVALE les frappes — et sort ici en échec. Les PNG restent consultables
+        # (`nix build .#checks.x86_64-linux.panel`) pour relire le design.
+        panel = pkgs.stdenv.mkDerivation {
+          pname = "fcitx5-qmlpanel-render-test";
+          version = "0.1";
+          src = ./ui;
+          nativeBuildInputs = [
+            pkgs.cmake
+            pkgs.kdePackages.extra-cmake-modules
+            pkgs.pkg-config
+            pkgs.wayland-scanner
+            pkgs.qt6.qtbase
+            pkgs.qt6.qtdeclarative
+          ];
+          buildInputs = [
+            fcitx5-patched
+            pkgs.wayland
+            pkgs.qt6.qtbase
+            pkgs.qt6.qtdeclarative
+            pkgs.noto-fonts-color-emoji
+          ];
+          dontWrapQtApps = true;
+          cmakeFlags = [
+            "-DBUILD_TESTING=ON"
+            "-DQMLPANEL_QT_PLUGIN_PATH=${pkgs.qt6.qtbase}/lib/qt-6/plugins:${pkgs.qt6.qtdeclarative}/lib/qt-6/plugins"
+            "-DQMLPANEL_QML_IMPORT_PATH=${pkgs.qt6.qtdeclarative}/lib/qt-6/qml"
+          ];
+          doCheck = true;
+          checkPhase = ''
+            runHook preCheck
+            export XDG_RUNTIME_DIR=$(mktemp -d) HOME=$(mktemp -d)
+            export FONTCONFIG_FILE=${pkgs.makeFontsConf {
+              fontDirectories = [ pkgs.noto-fonts-color-emoji pkgs.dejavu_fonts ];
+            }}
+            mkdir -p shots && ./panel_preview shots
+            runHook postCheck
+          '';
+          installPhase = "mkdir -p $out && cp shots/*.png $out/";
+        };
+
         # Daemon : la suite comportementale existante (modèle synthétique).
         daemon = pkgs.runCommand "ime-predictord-test"
           { nativeBuildInputs = [ pkgs.python3 ]; } ''

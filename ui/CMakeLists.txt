@@ -52,6 +52,22 @@ if(QMLPANEL_QML_IMPORT_PATH)
         QMLPANEL_QML_IMPORT_PATH="${QMLPANEL_QML_IMPORT_PATH}")
 endif()
 
+# Rendu hors ligne des états de la barre en PNG (test QML + relecture du
+# design) : ne dépend que de Qt, pas de fcitx ni de wayland.
+if(BUILD_TESTING)
+    add_executable(panel_preview panel_preview.cpp panelview.cpp)
+    target_compile_definitions(panel_preview PRIVATE QT_NO_KEYWORDS QT_NO_FOREACH)
+    target_link_libraries(panel_preview Qt6::Gui Qt6::Qml Qt6::Quick)
+    if(QMLPANEL_QT_PLUGIN_PATH)
+        target_compile_definitions(panel_preview PRIVATE
+            QMLPANEL_QT_PLUGIN_PATH="${QMLPANEL_QT_PLUGIN_PATH}")
+    endif()
+    if(QMLPANEL_QML_IMPORT_PATH)
+        target_compile_definitions(panel_preview PRIVATE
+            QMLPANEL_QML_IMPORT_PATH="${QMLPANEL_QML_IMPORT_PATH}")
+    endif()
+endif()
+
 install(TARGETS qmlpanel DESTINATION "${CMAKE_INSTALL_LIBDIR}/fcitx5")
 install(FILES qmlpanel-addon.conf
         RENAME qmlpanel.conf

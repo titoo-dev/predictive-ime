@@ -290,15 +290,15 @@ uint32_t toUpperCp(uint32_t cp) {
 }
 
 // Caractère qui prolonge un mot : lettre toujours ; apostrophe / trait d'union /
-// chiffre seulement si le buffer est déjà entamé (mot en cours). ':' sur buffer
-// VIDE démarre le picker emoji (":coeur" → ❤️), ';' un SNIPPET (";mail" →
-// expansion) — jamais en milieu de mot, donc "10:30" ou "voici :" tapent
-// normalement.
+// chiffre seulement si le buffer est déjà entamé (mot en cours). ';' sur buffer
+// VIDE démarre un SNIPPET (";mail" → expansion) — jamais en milieu de mot. Le
+// picker emoji, lui, n'est PLUS déclenché par ':' tapé mais par Super+; (cf
+// bloc (0-emoji) du keyEvent) : ':' se tape donc littéralement partout.
 bool isWordExtender(uint32_t cp, bool bufferEmpty) {
   if (isLetterCp(cp))
     return true;
   if (bufferEmpty)
-    return cp == ':' || cp == ';';
+    return cp == ';';
   return cp == '\'' || cp == 0x2019 || cp == '-' || (cp >= '0' && cp <= '9');
 }
 
@@ -306,6 +306,14 @@ bool isWordExtender(uint32_t cp, bool bufferEmpty) {
 // bigramme ni de contexte — ce n'est pas de la prose.
 bool isTriggerBuffer(const std::string &buffer) {
   return !buffer.empty() && (buffer[0] == ':' || buffer[0] == ';');
+}
+
+// Buffer du PICKER EMOJI. Son ':' de tête est SYNTHÉTIQUE (posé par Super+;,
+// jamais tapé) : aucun chemin « littéral » ne doit le committer comme texte —
+// cf la garde en tête de commitWord, qui ferme le picker à la place. Le ';'
+// des snippets, lui, est bien tapé et reste littéral.
+bool isEmojiBuffer(const std::string &buffer) {
+  return !buffer.empty() && buffer[0] == ':';
 }
 
 // Majuscule sur la première lettre (auto-capitalisation en début de phrase).
@@ -978,6 +986,31 @@ public:
       return;
     }
 
+    // (0-emoji) Super+; : ouvre le PICKER EMOJI, TOUJOURS disponible — buffer
+    //      vide, en plein mot, barre mot-suivant ouverte. Remplace l'ancien
+    //      déclencheur ':' tapé (qui redevient un caractère normal : « 10:30 »,
+    //      « voici : »). Le mot en cours est committé tel quel, SANS apprendre
+    //      (fragment tapé, pas un mot validé). Re-presser referme le picker.
+    //      NB: sur AZERTY, ';' est en Shift+, → le keysym peut remonter en
+    //      ':' ; on accepte les deux.
+    if ((sym == FcitxKey_semicolon || sym == FcitxKey_colon) &&
+        states.test(fcitx::KeyState::Super)) {
+      if (!state->buffer.empty() && state->buffer[0] == ':') {
+        state->buffer.clear();
+        state->navigating = false;
+        clearPanel(ic);
+      } else {
+        if (!state->buffer.empty())
+          commitWord(ic, state, state->buffer, /*trailingSpace=*/false,
+                     /*learn=*/false);
+        state->buffer = ":";
+        state->navigating = false;
+        updateCompletion(ic, state);
+      }
+      event.filterAndAccept();
+      return;
+    }
+
     // (0-) Ctrl+Shift+L : ouvre le PANNEAU DE LANGUE (chips compactes, choix
     //      courant surligné — cf bloc (L) plus haut pour la navigation).
     if ((sym == FcitxKey_l || sym == FcitxKey_L) &&
@@ -1134,22 +1167,26 @@ public:
         event.filterAndAccept();
         return;
       }
-      if (!mod && emojiGrid && sym == FcitxKey_Down) {
-        navigate(ic, state, +8);
+      if (!mod && emojiGrid && (sym == FcitxKey_Down || sym == FcitxKey_Up)) {
+        navigate(ic, state, sym == FcitxKey_Down ? +8 : -8, /*clamp=*/true);
         event.filterAndAccept();
         return;
       }
-      if (!mod && emojiGrid && sym == FcitxKey_Up) {
-        navigate(ic, state, -8);
+      // Début/Fin : première / dernière case de la grille (sauter au bout sans
+      // marteler la flèche). Hors grille elles filent à l'application.
+      if (!mod && emojiGrid &&
+          (sym == FcitxKey_Home || sym == FcitxKey_End)) {
+        int sz = (int)state->cands.size();
+        navigateTo(ic, state, sym == FcitxKey_Home ? 0 : sz - 1);
         event.filterAndAccept();
         return;
       }
       // ←/→ naviguent aussi ; en GRILLE emoji ils ENTRENT directement (pas
       // besoin de Tab d'abord — sans ça ils committaient le littéral ':xyz'
-      // et la touche fuyait vers l'application).
+      // et la touche fuyait vers l'application) et se BORNENT aux extrémités.
       if (!mod && (state->navigating || emojiGrid) &&
           (sym == FcitxKey_Left || sym == FcitxKey_Right)) {
-        navigate(ic, state, sym == FcitxKey_Right ? +1 : -1);
+        navigate(ic, state, sym == FcitxKey_Right ? +1 : -1, emojiGrid);
         event.filterAndAccept();
         return;
       }
@@ -1185,11 +1222,12 @@ public:
         if (state->navigating) {
           commitWord(ic, state, highlighted(state), /*space=*/false);
           event.filterAndAccept(); // suggestion prise → on avale Entrée
-        } else if (isTriggerBuffer(state->buffer) && state->buffer.size() > 1 &&
-                   !state->cands.empty()) {
-          // Picker emoji / snippet AVEC requête : Entrée prend le 1er candidat
-          // (comme l'Espace, mais sans espace final). Le déclencheur nu
-          // (':' seul) garde le comportement littéral — Entrée = retour-ligne.
+        } else if (isTriggerBuffer(state->buffer) && !state->cands.empty() &&
+                   (state->buffer.size() > 1 || isEmojiBuffer(state->buffer))) {
+          // Picker emoji (même SANS requête : la grille montre les favoris) et
+          // snippet AVEC requête : Entrée prend le 1er candidat (comme
+          // l'Espace, mais sans espace final). Le snippet nu (';' seul) garde
+          // le comportement littéral — Entrée = retour-ligne.
           commitWord(ic, state, state->cands[0], /*space=*/false);
           event.filterAndAccept();
         } else {
@@ -1532,31 +1570,47 @@ private:
   // Surligne un candidat. dir : +1 suivant, -1 précédent, 0 (1er appui) → le
   // 1er. Premier appui en ARRIÈRE (⇧Tab/↑) → on entre par la droite (dernier).
   // On calcule l'index nous-mêmes (robuste, indépendant de nextCandidate()).
-  void navigate(fcitx::InputContext *ic, PredictState *state, int dir) {
+  // `clamp` : borne au lieu de boucler — c'est le mode GRILLE (emoji). Dans une
+  // grille, boucler désoriente : ↓ sur la dernière ligne renvoyait en haut, →
+  // sur la dernière case revenait à la première. Borné, une flèche qui ne peut
+  // plus avancer ne bouge pas ; ↓ depuis une ligne incomplète tombe sur la
+  // DERNIÈRE case (comportement des grilles emoji système).
+  void navigate(fcitx::InputContext *ic, PredictState *state, int dir,
+                bool clamp = false) {
     auto list = ic->inputPanel().candidateList();
     if (!list || list->size() == 0)
       return;
     int sz = list->size();
     int next = state->navigating ? state->navIndex + dir
                                  : (dir < 0 ? sz - 1 : 0);
-    next = ((next % sz) + sz) % sz; // wrap (marche aussi pour ±8 en grille)
+    next = clamp ? std::max(0, std::min(next, sz - 1))
+                 : ((next % sz) + sz) % sz;
     state->navigating = true;
     state->navIndex = next;
     if (auto *cl = dynamic_cast<PredictCandidateList *>(list.get()))
       cl->setCursorIndex(next);
     // reflète le candidat surligné dans la préédition (mode complétion) —
-    // SAUF en mode emoji : le préedit reste ":requête" (le pill de la grille
-    // montre déjà la sélection, et l'UI déduit le mode grille du préfixe ':').
-    if (!state->buffer.empty() && next < (int)state->cands.size()) {
-      std::string shown = state->buffer[0] == ':'
-                              ? state->buffer
-                              : applyCase(state->cands[next], state->buffer);
+    // SAUF en mode emoji : le préedit CLIENT reste vide (la requête vit dans
+    // le champ de recherche du panneau, cf updateCompletion).
+    if (!state->buffer.empty() && !isEmojiBuffer(state->buffer) &&
+        next < (int)state->cands.size()) {
+      std::string shown = applyCase(state->cands[next], state->buffer);
       fcitx::Text preedit(shown, fcitx::TextFormatFlag::Underline);
       preedit.setCursor(shown.size());
       ic->inputPanel().setClientPreedit(preedit);
       ic->updatePreedit();
     }
     ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
+  }
+
+  // Place le surlignage sur un index ABSOLU (Début/Fin de la grille).
+  void navigateTo(fcitx::InputContext *ic, PredictState *state, int index) {
+    auto list = ic->inputPanel().candidateList();
+    if (!list || list->size() == 0)
+      return;
+    state->navigating = true; // → navigate(0) repart de `index` exactement
+    state->navIndex = index;
+    navigate(ic, state, 0, /*clamp=*/true);
   }
 
   // Valide un mot : applique la casse du buffer, committe, apprend (sauf
@@ -1566,6 +1620,17 @@ private:
   void commitWord(fcitx::InputContext *ic, PredictState *state,
                   const std::string &raw, bool trailingSpace,
                   bool learn = true) {
+    // Picker emoji : committer le LITTÉRAL (Échap, Entrée nue, ponctuation,
+    // Espace sans candidat…) cracherait ':requête' dans le texte alors que ce
+    // ':' vient du raccourci Super+;, pas de la frappe. Un picker qu'on annule
+    // se ferme, point — c'est un menu, pas une composition.
+    if (isEmojiBuffer(state->buffer) && raw == state->buffer) {
+      state->buffer.clear();
+      state->cands.clear();
+      state->navigating = false;
+      clearPanel(ic);
+      return;
+    }
     state->nextWordGen++; // le commit invalide tout refresh en vol
     bool trigger = isTriggerBuffer(state->buffer); // emoji ':' / snippet ';'
     std::string word = applyCase(raw, state->buffer);
@@ -1628,8 +1693,27 @@ private:
     state->autocomplete = reply.autocomplete;
     state->ghost = reply.ghost;
     state->accentOnly = reply.accentOnly;
-    if (state->cands.empty())
-      state->cands.push_back(state->buffer); // repli : le brut
+    // Repli « le brut » : le mot tapé reste proposable quand le modèle ne rend
+    // rien. PAS pour le picker emoji — proposer ':zzz' comme candidat n'a aucun
+    // sens ; la grille affiche son état vide (cf panelview).
+    if (state->cands.empty() && !isEmojiBuffer(state->buffer))
+      state->cands.push_back(state->buffer);
+
+    // PICKER EMOJI : la requête n'est PAS du texte en cours de saisie, c'est
+    // une recherche. Elle ne va donc plus dans le préedit CLIENT (qui
+    // l'écrivait dans l'application : « :coeur » visible en plein champ) mais
+    // dans le préedit du PANNEAU — la barre QML en fait un champ de recherche,
+    // et l'UI fcitx classique l'affiche au-dessus des candidats.
+    if (isEmojiBuffer(state->buffer)) {
+      fcitx::Text query(state->buffer);
+      query.setCursor(state->buffer.size());
+      ic->inputPanel().setPreedit(query);
+      ic->inputPanel().setClientPreedit(fcitx::Text{});
+      setCandidates(ic, state);
+      ic->updatePreedit();
+      ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
+      return;
+    }
 
     // Pas de filet, pas de remplacement : si l'app n'expose pas le
     // SurroundingText, le revert Backspace d'une auto-application est

@@ -16,14 +16,20 @@
 #include <QQuickWindow>
 #include <QSGRendererInterface>
 
-// QML : DEUX rendus dans une même surface, choisis par `listMode` —
-//  • COMPACT (mots / emoji) : barre de chips horizontales dense (façon Gboard),
+// QML : TROIS rendus dans une même surface, choisis par `listMode` / `gridMode` —
+//  • COMPACT (mots) : barre de chips horizontales dense (façon Gboard),
 //    PILL accent qui GLISSE entre les candidats (hlPos flottant animé en C++).
+//  • PICKER EMOJI (`gridMode`) : surface Material 3 — champ de recherche en
+//    tête (la requête ne va PLUS dans l'application, cf engine), grille 8
+//    colonnes de cases carrées, case sélectionnée en secondaryContainer, ligne
+//    d'aide clavier en bas, état vide quand la recherche ne rend rien. Largeur
+//    FIXE (8 colonnes) : la grille ne saute plus à chaque frappe.
 //  • LISTE (reformulation) : lignes verticales NUMÉROTÉES pleine largeur, texte
 //    qui passe à la ligne (les variantes sont des phrases — illisibles élidées à
 //    190px). Header de mode + ligne d'attente avec spinner (`spin`) quand
 //    `loading`. Apparition fade + slide-up commune (appear 0→1).
-// Couleurs via la context property `colors` (matugen, cf qmlui.cpp).
+// Couleurs via la context property `colors` (matugen → rôles Material 3, cf
+// qmlui.cpp / loadColors).
 static const char *kPanelQml = R"QML(
 import QtQuick
 
@@ -32,24 +38,33 @@ Item {
     implicitWidth: card.width + 10
     implicitHeight: card.height + 10
 
+    // Métriques Material 3 du picker (dp ≈ px ici : la surface est rendue à 1x)
+    readonly property int cell: 32          // case de la grille
+    readonly property int gap: 4
+    readonly property int pad: 10
+    readonly property int cols: 8
+
     Rectangle {
         id: card
         x: 5
         y: 5 + (1 - appear) * 6        // slide-up à l'apparition
         opacity: appear
-        radius: listMode ? 14 : 11
+        // shape scale M3 : large (16) pour la surface picker, medium sinon
+        radius: gridMode ? 16 : (listMode ? 14 : 11)
         color: colors.surface
         border.width: 1
         border.color: colors.outline
-        width:  listMode ? listLayout.width  : compact.width
-        height: listMode ? listLayout.height : compact.height
+        width:  listMode ? listLayout.width
+                         : (gridMode ? picker.width : compact.width)
+        height: listMode ? listLayout.height
+                         : (gridMode ? picker.height : compact.height)
 
-        // ===================== COMPACT (mots + emoji) =====================
+        // ===================== COMPACT (mots) =====================
         Item {
             id: compact
-            visible: !listMode
+            visible: !listMode && !gridMode
             width: row.width + 18
-            height: row.height + 8     // 1 ligne = 34 ; grille emoji = 3 lignes
+            height: row.height + 8     // une seule ligne de chips : 34
 
             // indicateur de mode : accent = mot en cours (composition),
             // discret = barre passive (mot-suivant / amorce)
@@ -89,11 +104,10 @@ Item {
                 // fondu doux quand la barre PASSIVE se rafraîchit (refresh neural
                 // asynchrone) — la frappe (composition) reste instantanée
                 opacity: contentFade
-                // grille emoji : 8 colonnes ; sinon une seule ligne
-                columns: gridMode ? 8 : Math.max(1, rep.count)
+                columns: Math.max(1, rep.count)
                 Repeater {
                     id: rep
-                    model: listMode ? [] : candidates
+                    model: (listMode || gridMode) ? [] : candidates
                     delegate: Item {
                         required property int index
                         required property string modelData
@@ -103,7 +117,7 @@ Item {
                             index < emojiMark.length && emojiMark[index] === true
                         readonly property bool isAuto:
                             index < autoMark.length && autoMark[index] === true
-                        width: gridMode ? 30 : label.width + 16
+                        width: label.width + 16
                         height: 26
                         // liseré accent = « l'Espace appliquera CE candidat »
                         Rectangle {
@@ -135,6 +149,179 @@ Item {
                         }
                     }
                 }
+            }
+        }
+
+        // ================== PICKER EMOJI (Material 3) ==================
+        // Surface autonome : champ de recherche + grille + aide clavier. La
+        // largeur est FIXE (8 colonnes) — une grille qui rétrécit à chaque
+        // frappe est illisible, et le champ de recherche a besoin d'un rail
+        // stable.
+        Item {
+            id: picker
+            visible: gridMode && !listMode
+            readonly property bool empty: candidates.length === 0
+            width: root.cols * root.cell + (root.cols - 1) * root.gap
+                   + 2 * root.pad
+            height: hint.y + hint.height + root.pad
+
+            // --- champ de recherche (M3 search bar : pleine rondeur) ---
+            Rectangle {
+                id: search
+                x: root.pad
+                y: root.pad
+                width: parent.width - 2 * root.pad
+                height: 30
+                radius: height / 2
+                color: colors.surfaceVariant
+
+                // loupe DESSINÉE : le rendu est software et la fonte du
+                // panneau n'a pas forcément le glyphe (⌕/nerd-font) — deux
+                // rectangles se rendent partout.
+                Item {
+                    id: lens
+                    x: 11
+                    width: 13
+                    height: 13
+                    anchors.verticalCenter: parent.verticalCenter
+                    Rectangle {
+                        width: 9; height: 9; radius: 4.5
+                        color: "transparent"
+                        border.width: 1.4
+                        border.color: colors.onSurfaceVariant
+                    }
+                    Rectangle {              // manche, à 45°
+                        x: 7.5; y: 7.5
+                        width: 5.5; height: 1.4; radius: 0.7
+                        transformOrigin: Item.TopLeft
+                        rotation: 45
+                        color: colors.onSurfaceVariant
+                    }
+                }
+
+                Text {
+                    id: qtext
+                    anchors.left: lens.right
+                    anchors.leftMargin: 8
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: searchText.length ? searchText
+                                            : "Rechercher un emoji"
+                    // requête longue : on élide par la GAUCHE, la fin de la
+                    // frappe (ce qu'on vient de taper) reste visible
+                    width: Math.min(implicitWidth, search.width - 52)
+                    elide: Text.ElideLeft
+                    color: searchText.length ? colors.onSurface
+                                             : colors.onSurfaceVariant
+                    opacity: searchText.length ? 1.0 : 0.75
+                    font.pixelSize: 13
+                    font.family: "Maple Mono NF"
+                }
+                Rectangle {                  // caret : point d'insertion
+                    visible: searchText.length > 0
+                    anchors.left: qtext.right
+                    anchors.leftMargin: 2
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: 1.5
+                    height: 15
+                    radius: 0.75
+                    color: colors.accent
+                }
+            }
+
+            // pill de sélection : même interpolation que la barre compacte
+            // (hlPos flottant animé en C++), en x ET en y — la grille a
+            // plusieurs lignes. M3 : état sélectionné = secondaryContainer.
+            Rectangle {
+                id: gpill
+                visible: hlPos >= 0 && grep.count > 0
+                property real p: Math.max(0, Math.min(hlPos, grep.count - 1))
+                property int i0: Math.floor(p)
+                property real f: p - i0
+                property Item a: grep.count > 0 ? grep.itemAt(i0) : null
+                property Item b: grep.count > 0
+                    ? grep.itemAt(Math.min(i0 + 1, grep.count - 1)) : null
+                x: a ? grid.x + a.x + (b ? (b.x - a.x) * f : 0) : 0
+                y: a ? grid.y + a.y + (b ? (b.y - a.y) * f : 0) : 0
+                width: root.cell
+                height: root.cell
+                radius: 10
+                color: colors.secondaryContainer
+            }
+
+            Grid {
+                id: grid
+                x: root.pad
+                y: search.y + search.height + root.pad
+                visible: !picker.empty
+                opacity: contentFade
+                columns: root.cols
+                spacing: root.gap
+                Repeater {
+                    id: grep
+                    model: gridMode ? candidates : []
+                    delegate: Item {
+                        required property int index
+                        required property string modelData
+                        readonly property bool isAuto:
+                            index < autoMark.length && autoMark[index] === true
+                        width: root.cell
+                        height: root.cell
+                        // liseré = « Entrée/Espace prendra celui-ci » tant
+                        // qu'on n'a pas navigué
+                        Rectangle {
+                            anchors.fill: parent
+                            radius: 10
+                            color: "transparent"
+                            border.width: 1
+                            border.color: colors.accent
+                            opacity: 0.55
+                            visible: isAuto && hlPos < 0
+                        }
+                        Text {
+                            anchors.centerIn: parent
+                            text: modelData
+                            font.pixelSize: 19
+                            font.family: "Noto Color Emoji"
+                        }
+                    }
+                }
+            }
+
+            // état VIDE : la recherche ne rend rien. Le picker reste ouvert
+            // (fermer la barre à la première faute de frappe est brutal) et le
+            // dit — la frappe suivante peut retomber sur des résultats.
+            Text {
+                id: none
+                visible: picker.empty
+                x: root.pad
+                y: grid.y
+                width: parent.width - 2 * root.pad
+                height: 44
+                horizontalAlignment: Text.AlignHCenter
+                verticalAlignment: Text.AlignVCenter
+                elide: Text.ElideMiddle
+                text: searchText.length
+                      ? "Aucun emoji pour « " + searchText + " »"
+                      : "Aucun emoji"
+                color: colors.onSurfaceVariant
+                font.pixelSize: 12
+                font.family: "Maple Mono NF"
+            }
+
+            // aide clavier (M3 supporting text) : le picker vient d'un
+            // raccourci, ses touches ne s'apprennent nulle part ailleurs.
+            Text {
+                id: hint
+                x: root.pad
+                y: (picker.empty ? none.y + none.height
+                                 : grid.y + grid.height) + 7
+                width: parent.width - 2 * root.pad
+                horizontalAlignment: Text.AlignHCenter
+                text: "↑↓←→ naviguer · Entrée insérer · Échap fermer"
+                color: colors.onSurfaceVariant
+                opacity: 0.75
+                font.pixelSize: 10
+                font.family: "Maple Mono NF"
             }
         }
 
@@ -332,6 +519,11 @@ QVariantMap loadColors() {
     c["accent"] = dark ? "#89b4fa" : "#1e66f5";
     c["onAccent"] = dark ? "#11111b" : "#ffffff";
     c["outline"] = dark ? "#45455a" : "#bcc0cc";
+    // rôles Material 3 du picker emoji : fond du champ de recherche, texte
+    // secondaire (placeholder, aide clavier), case sélectionnée.
+    c["surfaceVariant"] = dark ? "#313244" : "#ccd0da";
+    c["onSurfaceVariant"] = dark ? "#a6adc8" : "#6c6f85";
+    c["secondaryContainer"] = dark ? "#585b70" : "#acb0be";
 
     // 1) couleurs DMS/matugen (régénérées à chaque changement de thème)
     QJsonObject d = root.value("colors").toObject()
@@ -349,15 +541,26 @@ QVariantMap loadColors() {
         QString accent = pick({"primary"});
         QString onAccent = pick({"on_primary"});
         QString outline = pick({"outline_variant", "outline"});
+        QString surfaceVariant = pick({"surface_container_highest",
+                                       "surface_variant", "surface_container"});
+        QString onSurfaceVariant = pick({"on_surface_variant"});
+        QString secondaryContainer = pick({"secondary_container",
+                                           "surface_container_highest"});
         if (!surface.isEmpty()) c["surface"] = surface;
         if (!onSurface.isEmpty()) c["onSurface"] = onSurface;
         if (!accent.isEmpty()) c["accent"] = accent;
         if (!onAccent.isEmpty()) c["onAccent"] = onAccent;
         if (!outline.isEmpty()) c["outline"] = outline;
+        if (!surfaceVariant.isEmpty()) c["surfaceVariant"] = surfaceVariant;
+        if (!onSurfaceVariant.isEmpty())
+            c["onSurfaceVariant"] = onSurfaceVariant;
+        if (!secondaryContainer.isEmpty())
+            c["secondaryContainer"] = secondaryContainer;
     }
-    // 2) override explicite {surface,onSurface,accent,onAccent,outline,mode}
+    // 2) override explicite (mêmes clés + "mode")
     for (const QString &k :
-         {"surface", "onSurface", "accent", "onAccent", "outline"})
+         {"surface", "onSurface", "accent", "onAccent", "outline",
+          "surfaceVariant", "onSurfaceVariant", "secondaryContainer"})
         if (ov.contains(k))
             c[k] = ov.value(k).toString();
     return c;
@@ -454,6 +657,7 @@ PanelView::PanelView() {
     ctx->setContextProperty("loading", false);
     ctx->setContextProperty("spin", 0.0);
     ctx->setContextProperty("headerText", QString{});
+    ctx->setContextProperty("searchText", QString{});
 
     component_ = new QQmlComponent(view_->engine());
     component_->setData(kPanelQml, QUrl());
@@ -481,7 +685,8 @@ void PanelView::setColors(const QVariantMap &colors) {
 void PanelView::update(const QStringList &candidates, int highlight,
                        const QVariantList &autoMark, bool composing,
                        bool grid, const QStringList &labels, bool listMode,
-                       bool loading, const QString &headerText) {
+                       bool loading, const QString &headerText,
+                       const QString &searchText) {
     auto now = Clock::now();
     if (loading && !loading_)
         spinStart_ = now; // (re)démarre la rotation du spinner
@@ -522,6 +727,7 @@ void PanelView::update(const QStringList &candidates, int highlight,
     listMode_ = listMode;
     loading_ = loading;
     headerText_ = headerText;
+    searchText_ = searchText;
 }
 
 int PanelView::hideGraceMs() const { return animMs(90) + 80; }
@@ -550,6 +756,7 @@ void PanelView::hidden() {
     listMode_ = false;
     loading_ = false;
     headerText_.clear();
+    searchText_.clear();
     hl_ = {};
     hl_.to = -1.0;
     fade_ = {1.0, 1.0, {}, 0};
@@ -593,6 +800,7 @@ QImage PanelView::render() {
     ctx->setContextProperty("listMode", listMode_);
     ctx->setContextProperty("loading", loading_);
     ctx->setContextProperty("headerText", headerText_);
+    ctx->setContextProperty("searchText", searchText_);
     // rotation du spinner : ~1 tour / 0,9 s tant que loading_
     double spin = 0.0;
     if (loading_) {
