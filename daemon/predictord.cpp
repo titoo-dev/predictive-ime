@@ -501,6 +501,11 @@ struct Model {
   std::unordered_map<std::string, uint32_t> emojiId_;
   std::unordered_map<std::string, uint32_t> emojiExact_; // clé exacte -> meilleur eid
   std::vector<uint32_t> topEmojis_;             // populaires (grille ':' vide)
+  // Récence dans le picker : la grille nue ouvre sur UNE rangée de derniers
+  // choisis (8 = les colonnes de la grille, cf panelview) ; dans une recherche,
+  // la récence n'est qu'un léger départage (cf emojiSearch).
+  static constexpr size_t kRecentRow = 8;
+  static constexpr double kRecencyBonus = 2.0;
 
   void loadEmoji(const std::string &dir) {
     std::ifstream f(dir + "emoji.tsv");
@@ -622,6 +627,13 @@ struct Model {
 
   // --- Apprentissage utilisateur (persistant) ---
   std::unordered_map<std::string, uint64_t> userUni; // mot -> usage
+  // RÉCENCE : mot -> n° du dernier usage (compteur monotone). Sert au picker
+  // emoji, dont la grille nue met les DERNIERS emojis choisis en tête. Pas de
+  // nouveau fichier : le journal user.log est rejoué dans l'ordre, donc le
+  // dernier événement d'un mot lui donne son n° (cf loadUser, et ageUser qui
+  // recompacte EN ORDRE DE RÉCENCE pour que le replay retrouve le même MRU).
+  std::unordered_map<std::string, uint64_t> userSeq;
+  uint64_t userTick_ = 0;
   std::unordered_map<std::string, std::unordered_map<std::string, uint64_t>>
       userBi; // prev -> mot -> usage
   // Trigrammes appris : clé "prev2\tprev1" (repliée) -> mot -> usage. Reconstruit
@@ -644,6 +656,7 @@ struct Model {
       if (word.empty())
         continue;
       userUni[word]++;
+      userSeq[word] = ++userTick_; // ordre du journal = ordre d'usage
       if (!prev.empty())
         userBi[lowerKeep(prev)][word]++;
       n++;
@@ -684,6 +697,7 @@ struct Model {
     if (word.empty())
       return;
     userUni[word]++;
+    userSeq[word] = ++userTick_;
     if (!prev.empty())
       userBi[lowerKeep(prev)][word]++;
     if (!userLog.empty()) {
@@ -742,19 +756,45 @@ struct Model {
             ft << p2 << '\t' << p1 << '\t' << p.first << '\n';
       }
     }
+    // La récence ne survit pas au déclin d'un mot oublié.
+    for (auto it = userSeq.begin(); it != userSeq.end();)
+      it = userUni.count(it->first) ? std::next(it) : userSeq.erase(it);
     if (userLog.empty())
       return;
-    std::ofstream f(userLog, std::ios::trunc);
+    // Journal réécrit EN ORDRE DE RÉCENCE (seq croissante) : le replay du
+    // démarrage reconstruit alors le même MRU. Avec un parcours de
+    // unordered_map, l'ordre était arbitraire — après une compaction, la rangée
+    // « récents » du picker emoji repartait n'importe comment.
+    struct Block {
+      uint64_t seq;
+      std::string lines;
+    };
+    auto seqOf = [&](const std::string &w) -> uint64_t {
+      auto it = userSeq.find(w);
+      return it == userSeq.end() ? 0 : it->second;
+    };
+    std::vector<Block> blocks;
     std::unordered_map<std::string, uint64_t> covered;
     for (auto &kv : userBi)
       for (auto &p : kv.second) {
+        std::string lines;
         for (uint64_t i = 0; i < p.second; i++)
-          f << kv.first << '\t' << p.first << '\n';
+          lines += kv.first + '\t' + p.first + '\n';
         covered[p.first] += p.second;
+        blocks.push_back({seqOf(p.first), std::move(lines)});
       }
-    for (auto &kv : userUni)
+    for (auto &kv : userUni) {
+      std::string lines;
       for (uint64_t i = covered[kv.first]; i < kv.second; i++)
-        f << '\t' << kv.first << '\n';
+        lines += '\t' + kv.first + '\n';
+      if (!lines.empty())
+        blocks.push_back({seqOf(kv.first), std::move(lines)});
+    }
+    std::sort(blocks.begin(), blocks.end(),
+              [](const Block &a, const Block &b) { return a.seq < b.seq; });
+    std::ofstream f(userLog, std::ios::trunc);
+    for (const Block &b : blocks)
+      f << b.lines;
   }
 
   // Un mot appris est « de confiance » s'il est un vrai mot du vocabulaire ou
@@ -912,6 +952,7 @@ struct Model {
   // journaux correspondants.
   size_t forget(const std::string &word) {
     size_t removed = userUni.erase(word);
+    userSeq.erase(word);
     for (auto &kv : userBi)
       removed += kv.second.erase(word);
     for (auto &kv : userTri)
@@ -1361,14 +1402,36 @@ private:
     res.literalIsWord = false;
     const std::string q = foldStr(rawQuery);
     if (q.empty()) {
-      std::vector<std::pair<std::string, uint64_t>> fav;
+      // Grille nue = RÉCENTS, puis favoris, puis populaires.
+      // Les récents tiennent UNE rangée (kRecentRow = les 8 colonnes de la
+      // grille) : c'est ce qu'on vient d'insérer, donc ce qu'on réinsère le plus
+      // souvent — avant, un emoji tout juste choisi pouvait rester en 3e page
+      // parce que le classement était une fréquence pure. Borner à une rangée
+      // garde le RESTE stable (classé par usage) : la mémoire des positions
+      // survit, seule la 1re ligne bouge.
+      struct Fav {
+        std::string glyph;
+        uint64_t count, seq;
+      };
+      std::vector<Fav> fav;
       for (auto &kv : userUni)
-        if (emojiId_.count(kv.first))
-          fav.push_back({kv.first, kv.second});
+        if (emojiId_.count(kv.first)) {
+          auto s = userSeq.find(kv.first);
+          fav.push_back({kv.first, kv.second,
+                         s == userSeq.end() ? 0 : s->second});
+        }
+      std::vector<const Fav *> recent;
+      for (const Fav &f : fav)
+        recent.push_back(&f);
+      std::sort(recent.begin(), recent.end(),
+                [](const Fav *a, const Fav *b) { return a->seq > b->seq; });
+      recent.resize(std::min(recent.size(), kRecentRow));
+      for (const Fav *f : recent)
+        push(f->glyph); // les derniers choisis, du plus récent au moins récent…
       std::sort(fav.begin(), fav.end(),
-                [](auto &a, auto &b) { return a.second > b.second; });
-      for (auto &p : fav)
-        push(p.first); // tes favoris d'abord…
+                [](const Fav &a, const Fav &b) { return a.count > b.count; });
+      for (const Fav &f : fav)
+        push(f.glyph); // …puis tes favoris par usage (push dédoublonne)…
       for (uint32_t eid : topEmojis_)
         push(emojis_[eid]); // …puis les populaires (remplit la grille)
       return; // pas d'autocomplete : Espace après ':' garde le littéral
@@ -1385,8 +1448,16 @@ private:
                     0.05 * double(it->key.size() - p.size())) *
                    mult;
         auto u = userUni.find(emojis_[it->eid]);
-        if (u != userUni.end())
+        if (u != userUni.end()) {
           s += 10.0 + double(u->second);
+          // Départage par RÉCENCE : entre deux emojis déjà utilisés, celui de
+          // tout à l'heure passe devant (bonus ≤ kRecencyBonus, décroissant avec
+          // l'âge). Volontairement faible — dans une RECHERCHE, l'habitude
+          // (compteur d'usage) reste le signal principal.
+          auto r = userSeq.find(emojis_[it->eid]);
+          if (r != userSeq.end() && userTick_)
+            s += kRecencyBonus * double(r->second) / double(userTick_);
+        }
         auto [b, fresh] = bestPer.try_emplace(it->eid, s);
         if (!fresh && s > b->second)
           b->second = s;

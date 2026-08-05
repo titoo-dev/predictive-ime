@@ -234,8 +234,20 @@ P1(w)    = 0.7·Pcont(w) + 0.3·Pfreq(w)
   … » (fermer la barre à la première faute de frappe est brutal, la frappe
   suivante peut retomber sur des résultats). Le littéral `:zzz` n'est jamais
   proposé en candidat.
-- Picker nu = tes favoris puis les populaires (recently-used, façon Win+.). Le
-  browsing par catégorie est gratuit : `animal`, `fete`, `main`…
+- Picker nu = **récents**, puis favoris, puis populaires (façon Win+.). La 1re
+  rangée (`kRecentRow` = 8, les colonnes de la grille) liste les **derniers
+  emojis choisis**, du plus récent au moins récent ; le reste suit l'usage
+  (compteur appris), puis les populaires CLDR remplissent la grille. Borner les
+  récents à une rangée est délibéré : en MRU pur, toute la grille se
+  réorganisait à chaque insertion et la mémoire des positions sautait ; là,
+  seule la 1re ligne bouge. Dans une **recherche**, la récence n'est qu'un
+  départage (`kRecencyBonus`, ≤ 2 points contre 10 + compteur d'usage pour
+  « déjà utilisé ») : l'habitude reste le signal principal.
+  La récence ne coûte **aucun fichier** : `user.log` est rejoué dans l'ordre, donc
+  le dernier événement d'un mot donne son rang (`userSeq`). `ageUser` recompacte
+  le journal **en ordre de récence** — sinon le MRU repartait dans un ordre
+  arbitraire après chaque compaction (tous les 512 commits).
+  Le browsing par catégorie est gratuit : `animal`, `fete`, `main`…
 - Espace committe l'emoji du haut (avec espace), **Entrée le surligné — ou le
   premier si on n'a pas encore navigué** (sans espace), y compris picker nu
   (le 1er favori). Vaut aussi pour les snippets (`;mail` + Entrée →
