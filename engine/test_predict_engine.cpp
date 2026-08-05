@@ -235,6 +235,17 @@ struct Harness {
 // --- Tests comportementaux (chacun pousse une expectation pour CHAQUE commit
 //     que l'engine fait ; le testfrontend abort sur commit inattendu/manquant).
 
+// Le PING DU CARET (cf pingCaretRect, engine) : les panneaux sans préedit
+// client posent brièvement un U+200B zéro-largeur pour forcer le client à
+// publier son rectangle de curseur. Aucun glyphe, le caret ne bouge pas : ça ne
+// compte pas comme « du texte écrit dans l'application ». Tout le reste, si.
+const std::string kZwsp = "\xE2\x80\x8B";
+std::string withoutPing(std::string s) {
+  for (size_t p; (p = s.find(kZwsp)) != std::string::npos;)
+    s.erase(p, kZwsp.size());
+  return s;
+}
+
 void compositionTests(Harness &h) {
   h.setCaps(fcitx::CapabilityFlags{fcitx::CapabilityFlag::Preedit,
                                    fcitx::CapabilityFlag::SurroundingText});
@@ -367,11 +378,17 @@ void interactionTests(Harness &h) {
   // préedit client écrivait « :coeur » en plein champ de saisie).
   h.daemon->setReply({"❤️", "💕"}, "", false);
   h.key("Super+semicolon");
+  // À l'ouverture, le SEUL préedit client est le ping zéro-largeur : c'est lui
+  // qui fait publier au client son rectangle de curseur, sinon les clients
+  // Chromium (Chrome, Discord…) n'en publient jamais et le compositeur pose le
+  // panneau au coin de la fenêtre au lieu du caret (cf pingCaretRect).
+  check("emoji: l'ouverture ping le caret (préedit zéro-largeur)",
+        h.preedit() == kZwsp, h.preedit());
   h.type("coeur");
   check("emoji: la requête vit dans le préedit du panneau",
         h.panelPreedit() == ":coeur", h.panelPreedit());
-  check("emoji: rien n'est écrit dans l'application", h.preedit().empty(),
-        h.preedit());
+  check("emoji: rien de visible n'est écrit dans l'application",
+        withoutPing(h.preedit()).empty(), h.preedit());
 
   // recherche sans résultat : le picker RESTE ouvert (état vide côté UI), il ne
   // propose PAS le littéral ':zzz' en candidat.

@@ -708,6 +708,34 @@ un canvas transparent — collée au-dessus de la ligne si la place existe, sino
 juste en dessous. Hystérésis jusqu'au démappage (pas d'oscillation
 compositeur ↔ resize). Le texte reste visible à travers le transparent.
 
+**Ping du caret** (« le panneau ne suit pas le curseur dans Chrome/Discord ») :
+le compositeur ne place la popup au caret que si le client a publié son
+rectangle de curseur (`text-input-v3`, `set_cursor_rectangle`). Les clients
+Chromium (Chrome, Discord, VS Code…) ne le publient QUE quand une **préédition
+change** — c'est leur moteur de rendu qui remonte la position du caret, et il
+ne le fait que si l'état de saisie a bougé. Trace protocole d'un champ Chrome
+(`--enable-wayland-ime`, `WAYLAND_DEBUG=1`) :
+
+```
+enter / enable / commit                        ← focus : AUCUN rectangle
+preedit_string("b") … 45 ms → set_cursor_rectangle(406, 390, 0, 22)
+```
+
+La barre de mots suit donc le caret (elle pose un préedit client à chaque
+frappe), mais les panneaux qui laissent le préedit client VIDE — picker emoji
+(la requête vit dans le champ de recherche du panneau) et menu de langue —
+ne déclenchaient rien : faute de rectangle, Hyprland ancre la popup sur un bloc
+de **repli** de 500×500 au coin haut-gauche du client
+(`CInputPopup::updateBox`, branche `!cursorRect`) et le panneau restait scotché
+là. D'où `pingCaretRect` (engine) : à l'ouverture de ces panneaux, une
+préédition **zéro-largeur** (U+200B) est posée 200 ms — le temps que le client
+recalcule et publie sa position — puis effacée. Invisible dans l'application
+(aucun glyphe, le caret ne bouge pas), et rien ne peut être committé : la
+composition ne survit pas au ping (un clic ailleurs fait valider par Chromium
+la composition en cours, d'où la durée bornée). Pas de ping quand du texte est
+**sélectionné** : une composition remplace la sélection, et la reformulation en
+dépend.
+
 Activer : lancer fcitx5 patché avec `--ui qmlpanel` (sinon classicui reste
 l'UI). Test visuel headless : `./test-ui.sh` (PNG dans `/tmp/ime-ui/`).
 

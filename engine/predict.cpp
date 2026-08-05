@@ -878,6 +878,74 @@ public:
     state->navigating = false;
     state->pageStart = 0;
     updateCompletion(ic, state);
+    pingCaretRect(ic); // sinon le panneau ne suit pas le caret (cf ci-dessous)
+  }
+
+  // Espace sans chasse (U+200B) du ping, et durée de pose. 200 ms : très
+  // au-delà du délai mesuré entre la préédition et le rectangle publié (~45 ms
+  // sur Chrome), assez court pour qu'aucun clic ne s'y glisse.
+  static constexpr const char *kCaretPing = "\xE2\x80\x8B";
+  static constexpr uint64_t kCaretPingUs = 200 * 1000;
+
+  // « Publie ton caret » — provoque le rectangle de curseur du client.
+  //
+  // Le compositeur place la popup du panneau AU CARET, mais seulement si le
+  // client a publié son rectangle de curseur (text-input-v3,
+  // `set_cursor_rectangle`). Les clients Chromium (Chrome, Discord, VS Code…)
+  // ne le publient QUE quand une PRÉÉDITION change : c'est leur moteur de
+  // rendu qui remonte la position du caret, et il ne le fait que si l'état de
+  // saisie a bougé. Trace protocole d'un champ Chrome, `--enable-wayland-ime` :
+  //
+  //   enter / enable / commit                 ← focus : AUCUN rectangle
+  //   preedit_string("b") … 45 ms plus tard → set_cursor_rectangle(406,390,0,22)
+  //
+  // La barre de mots suit donc bien le caret (elle pose un préedit client à
+  // chaque frappe), mais les panneaux qui laissent le préedit client VIDE —
+  // picker emoji (la requête vit dans le champ de recherche du panneau, pas
+  // dans l'application) et menu de langue — ne déclenchaient rien. Faute de
+  // rectangle, le compositeur ancre la popup sur un bloc de REPLI au coin du
+  // client (Hyprland : 500×500 au coin haut-gauche, cf CInputPopup::updateBox)
+  // et le panneau restait scotché là, loin du curseur.
+  //
+  // D'où ce ping : une préédition ZÉRO-LARGEUR (U+200B) posée le temps que le
+  // client recalcule et publie sa position, puis effacée. Invisible dans
+  // l'application (aucun glyphe, le caret ne bouge pas) et l'effacement
+  // provoque un second rectangle — au même endroit, donc sans saut.
+  void pingCaretRect(fcitx::InputContext *ic) {
+    // Une préédition REMPLACE la sélection courante (comportement standard
+    // d'une composition) : pas de ping quand du texte est sélectionné — on ne
+    // détruit pas la sélection de l'utilisateur pour un détail de placement.
+    if (ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText) &&
+        ic->surroundingText().isValid() &&
+        ic->surroundingText().anchor() != ic->surroundingText().cursor())
+      return;
+    ic->inputPanel().setClientPreedit(caretPingPreedit());
+    ic->updatePreedit();
+    // La composition ne doit pas SURVIVRE au ping : un client qui la valide de
+    // lui-même (clic ailleurs → Chromium committe la composition en cours)
+    // écrirait le caractère invisible dans le texte.
+    caretPing_ = instance_->eventLoop().addTimeEvent(
+        CLOCK_MONOTONIC, fcitx::now(CLOCK_MONOTONIC) + kCaretPingUs, 0,
+        [this, uuid = ic->uuid()](fcitx::EventSourceTime *, uint64_t) {
+          caretPing_.reset();
+          auto *ic = instance_->inputContextManager().findByUUID(uuid);
+          // N'efface QUE notre ping : entre-temps le panneau a pu se fermer et
+          // la frappe reprendre — effacer le préedit du mot en cours ferait
+          // disparaître le texte fantôme sous les doigts.
+          if (!ic || ic->inputPanel().clientPreedit().toString() != kCaretPing)
+            return true;
+          ic->inputPanel().setClientPreedit(fcitx::Text{});
+          ic->updatePreedit();
+          return true;
+        });
+  }
+
+  // Le préedit du ping : l'invisible, curseur APRÈS (le client le place où il
+  // placerait le caret).
+  static fcitx::Text caretPingPreedit() {
+    fcitx::Text t(kCaretPing);
+    t.setCursor(int(std::strlen(kCaretPing)));
+    return t;
   }
 
   // Le texte environnant de CE client est-il utilisable (lecture du contexte,
@@ -1907,7 +1975,11 @@ private:
       fcitx::Text query(state->buffer);
       query.setCursor(state->buffer.size());
       ic->inputPanel().setPreedit(query);
-      ic->inputPanel().setClientPreedit(fcitx::Text{});
+      // Ping du caret encore en vol (cf pingCaretRect) : la préédition
+      // zéro-largeur RESTE posée — la première lettre tapée l'effacerait avant
+      // que le client n'ait publié sa position, et le panneau resterait au coin.
+      ic->inputPanel().setClientPreedit(caretPing_ ? caretPingPreedit()
+                                                   : fcitx::Text{});
       setCandidates(ic, state);
       showPageIndicator(ic, state);
       ic->updatePreedit();
@@ -2012,6 +2084,8 @@ private:
       list->append(kLangChoices[i].label, /*autoApply=*/false);
     list->setCursorIndex(state->langIndex);
     ic->inputPanel().reset();
+    if (caretPing_) // cf pingCaretRect : changer de chip ne coupe pas le ping
+      ic->inputPanel().setClientPreedit(caretPingPreedit());
     ic->inputPanel().setAuxUp(fcitx::Text("Langue"));
     ic->inputPanel().setCandidateList(std::move(list));
     ic->updatePreedit();
@@ -2027,6 +2101,7 @@ private:
     state->langMenu = true;
     state->navigating = false;
     setLangMenuCandidates(ic, state);
+    pingCaretRect(ic); // même panneau sans préedit client, même repli (cf ping)
   }
 
   void exitLangMenu(fcitx::InputContext *ic, PredictState *state) {
@@ -2330,6 +2405,9 @@ private:
   // Dernier mode de reformulation utilisé — le prochain Ctrl+Alt+R repart de
   // là (partagé entre les contextes : préférence de session, pas de champ).
   int lastReformMode_ = 0;
+  // Échéance d'effacement du ping « publie ton caret » (cf pingCaretRect) ;
+  // non nulle = ping en vol, les rafraîchissements de panneau le préservent.
+  std::unique_ptr<fcitx::EventSourceTime> caretPing_;
   // Refresh asynchrone (E5) — au plus UNE connexion en attente.
   std::unique_ptr<fcitx::EventSourceIO> refreshWatch_;
   int refreshFd_ = -1;
