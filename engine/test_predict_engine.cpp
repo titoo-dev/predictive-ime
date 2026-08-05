@@ -299,6 +299,35 @@ void backspaceTests(Harness &h) {
   h.key("Control+BackSpace");
   check("backspace: Ctrl+Backspace ferme la barre (input vidé)",
         h.candidates().empty(), h.candidates().empty() ? "" : h.candidates()[0]);
+
+  // EFFACER NE DOIT PAS RE-APPLIQUER. Le fantôme complétait le préfixe RACCOURCI
+  // par le Backspace : effacer la dernière lettre la remettait aussitôt (⌫ sur
+  // « bonjour » réaffichait « bonjour »), et l'Espace committait la complétion
+  // qu'on venait d'enlever. Effacer est un geste de correction : plus de fantôme
+  // ni d'auto-application tant qu'on n'a pas retapé.
+  h.reset();
+  h.setCaps(fcitx::CapabilityFlags{fcitx::CapabilityFlag::Preedit,
+                                   fcitx::CapabilityFlag::SurroundingText});
+  h.setSurrounding("", 0);
+  h.daemon->setReply({"bonjour", "bonsoir"}, "bonjour", false);
+  h.type("bonjour");
+  check("effacer: pré — le fantôme s'affiche pendant la frappe",
+        h.preedit() == "bonjour", h.preedit());
+  h.key("BackSpace");
+  check("effacer: le fantôme ne remet PAS la lettre effacée",
+        h.preedit() == "bonjou", h.preedit());
+  check("effacer: les candidats restent (Tab choisit encore)",
+        !h.candidates().empty(),
+        h.candidates().empty() ? "vide" : h.candidates()[0]);
+  h.expectCommit("bonjou "); // et l'Espace garde le littéral
+  h.type(" ");
+  check("effacer: l'Espace n'auto-applique plus la complétion refusée", true);
+  // …mais retaper un caractère réarme la proposition.
+  h.type("bonjou");
+  check("effacer: retaper réarme le fantôme", h.preedit() == "bonjour",
+        h.preedit());
+  h.expectCommit("bonjour ");
+  h.type(" ");
 }
 
 void capabilityTests(Harness &h) {
@@ -619,6 +648,28 @@ void recomposeTests(Harness &h) {
   h.key("BackSpace");
   check("surrounding publié : la recomposition marche de nouveau",
         h.preedit() == "bonjour", h.preedit());
+
+  // RECOMPOSER N'APPLIQUE RIEN. Le mot revient TEL QUEL : reculer sur du texte
+  // déjà écrit est une correction, pas une nouvelle frappe. Avant, effacer
+  // l'espace après « salut » rendait « salutation » (fantôme d'une complétion
+  // longue) et l'Espace suivant committait « salutation » — la barre mot-suivant
+  // marchait, on effaçait, et ça appliquait tout seul.
+  h.reset();
+  h.setCaps(fcitx::CapabilityFlags{fcitx::CapabilityFlag::Preedit,
+                                   fcitx::CapabilityFlag::SurroundingText});
+  h.setSurrounding("", 0);
+  h.daemon->setReply({"salut"}, "", true);
+  h.expectCommit("salut ");
+  h.type("salut");
+  h.type(" ");
+  h.setSurrounding("salut ", 6);
+  h.daemon->setReply({"salutation", "salut"}, "salutation", false);
+  h.key("BackSpace");
+  check("recompose: le mot revient sans fantôme", h.preedit() == "salut",
+        h.preedit());
+  h.expectCommit("salut ");
+  h.type(" ");
+  check("recompose: l'Espace garde le mot recomposé", true);
 }
 
 void multiWordTests(Harness &h) {

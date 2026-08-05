@@ -645,6 +645,13 @@ struct PredictState : public fcitx::InputContextProperty {
   std::string lastAutoWord;          // le mot qui avait été appliqué
   uint32_t lastAutoCps = 0;          // points de code committés à effacer
   bool vetoAuto = false;             // l'utilisateur a refusé : Espace garde le littéral
+  // L'utilisateur vient d'EFFACER (Backspace, ou recomposition d'un mot déjà
+  // committé) : ni fantôme ni auto-application tant qu'il n'a pas retapé un
+  // caractère. Sans ce frein, effacer ne servait à rien — la complétion
+  // remettait aussitôt ce qu'on venait d'enlever (⌫ sur « bonjour » réaffichait
+  // « bonjour » en fantôme), et l'Espace committait la complétion refusée.
+  // Comme vetoAuto, ça ne vaut que pour le mot en cours.
+  bool erasing = false;
   bool langMenu = false;             // panneau de langue ouvert (Ctrl+Shift+L)
   int langIndex = 0;                 // choix surligné dans kLangChoices
   bool reformulating = false;        // mode reformulation : cands = variantes de la sélection
@@ -1230,6 +1237,7 @@ public:
       }
       appendCp(state->buffer, cp);
       state->navigating = false;
+      state->erasing = false; // retaper réarme fantôme + auto-application
       updateCompletion(ic, state);
       event.filterAndAccept();
       return;
@@ -1252,6 +1260,7 @@ public:
     if (sym == FcitxKey_BackSpace && !mod && !state->buffer.empty()) {
       popLastCp(state->buffer);
       state->navigating = false;
+      state->erasing = true; // cf PredictState::erasing — effacer n'applique pas
       if (state->buffer.empty())
         clearPanel(ic);
       else
@@ -1298,6 +1307,11 @@ public:
           if (!state->ctx.empty() && state->ctx.back().rfind(word, 0) == 0)
             state->ctx.pop_back();
           state->navigating = false;
+          // Reculer sur un mot committé est un geste de CORRECTION : le mot
+          // revient tel quel, sans fantôme et sans auto-application (sinon
+          // effacer l'espace après « salut » rendait « salutation », que
+          // l'Espace suivant committait).
+          state->erasing = true;
           updateCompletion(ic, state);
           event.filterAndAccept();
           return;
@@ -1401,10 +1415,7 @@ public:
       // que updateCompletion) ; sinon → committe le littéral et file à l'app
       // (branche « toute autre touche » plus bas), comme avant.
       if (!mod && sym == FcitxKey_Right && !state->navigating &&
-          engineCfg().ghostText && !state->literalIsWord &&
-          !state->vetoAuto &&
-          state->ghost.size() > state->buffer.size() &&
-          state->ghost.compare(0, state->buffer.size(), state->buffer) == 0) {
+          ghostShown(state)) {
         commitWord(ic, state, state->ghost, /*trailingSpace=*/false);
         event.filterAndAccept();
         return;
@@ -1577,6 +1588,7 @@ public:
     state->cands.clear();
     state->navigating = false;
     state->vetoAuto = false;
+    state->erasing = false;
     state->lastAutoCps = 0;
     state->lastAutoLit.clear();
     state->ghost.clear();
@@ -1807,6 +1819,20 @@ private:
                    : rest);
   }
 
+  // Le FANTÔME est-il affiché dans l'état courant ? Un seul endroit, parce que
+  // DEUX code paths en dépendent : ce que updateCompletion peint, et ce que la
+  // touche → accepte. S'ils divergent, → insère une complétion que
+  // l'utilisateur ne voyait pas.
+  // Il ne s'affiche que si la complétion PROLONGE octet-à-octet la frappe
+  // (jamais pour une correction floue : la barre + le liseré s'en chargent), et
+  // jamais après un refus (vetoAuto) ni un effacement (erasing).
+  bool ghostShown(const PredictState *state) {
+    return engineCfg().ghostText && !state->literalIsWord &&
+           !state->vetoAuto && !state->erasing &&
+           state->ghost.size() > state->buffer.size() &&
+           state->ghost.compare(0, state->buffer.size(), state->buffer) == 0;
+  }
+
   // Mot retenu quand on appuie sur Espace en cours de composition :
   //  - en navigation → le candidat surligné ;
   //  - sinon, si le préfixe n'est PAS un mot réel → autocomplétion/autocorrection ;
@@ -1936,6 +1962,7 @@ private:
     state->cands.clear();
     state->navigating = false;
     state->vetoAuto = false; // le veto ne vaut que pour le mot en cours
+    state->erasing = false;  // idem : le mot suivant repart avec le fantôme
     if (trailingSpace)
       showNextWord(ic, state);
     else
@@ -1999,15 +2026,23 @@ private:
       // le fantôme reste : → est un accept EXPLICITE, pas besoin de revert.
     }
 
+    // EFFACEMENT : reculer désarme l'Espace pour ce mot (cf
+    // PredictState::erasing). Le fantôme, lui, est déjà éteint par ghostShown().
+    // Les candidats RESTENT : Tab / 1-6 permettent toujours de choisir
+    // explicitement — c'est l'application AUTOMATIQUE qu'on retire, pas la
+    // suggestion.
+    if (state->erasing) {
+      state->autocomplete.clear();
+      state->accentOnly = false;
+    }
+
     // GHOST TEXT : le reste de la complétion haute-confiance s'affiche dans
     // le préedit, curseur entre le tapé et le fantôme ("bonjou‸r") — que
     // l'Espace l'applique (autoApply) ou non : → l'accepte EXPLICITEMENT.
-    // Uniquement quand la complétion PROLONGE octet-à-octet la frappe
-    // (jamais pour une correction floue : la barre + liseré s'en chargent).
+    // Conditions dans ghostShown() : elles servent aussi à la touche → (accepter
+    // un fantôme invisible serait absurde).
     std::string ghost;
-    if (engineCfg().ghostText && !state->literalIsWord && !state->vetoAuto &&
-        state->ghost.size() > state->buffer.size() &&
-        state->ghost.compare(0, state->buffer.size(), state->buffer) == 0)
+    if (ghostShown(state))
       ghost = state->ghost.substr(state->buffer.size());
 
     fcitx::Text preedit;

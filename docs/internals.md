@@ -323,6 +323,18 @@ P1(w)    = 0.7·Pcont(w) + 0.3·Pfreq(w)
 - **Backspace juste après une auto-application** : REVERT — le mot remplacé
   est effacé, le littéral tapé revient en composition, et l'Espace suivant le
   respecte (pas de re-correction). La fenêtre survit aux modificateurs.
+- **Effacer n'applique jamais** (`erasing`) : après un Backspace — dans la
+  composition comme sur un mot recomposé — plus de **fantôme** ni
+  d'**auto-application** tant qu'un caractère n'a pas été retapé. Sans ce frein,
+  effacer ne servait à rien : la complétion du préfixe raccourci remettait
+  aussitôt ce qu'on venait d'enlever (⌫ sur `bonjour` réaffichait `bonjour`,
+  cursor entre `bonjou` et `r`), et l'Espace committait la complétion refusée —
+  pire sur une recomposition, où effacer l'espace après `salut` proposait
+  `salutation` que l'Espace appliquait. Les **candidats restent** (Tab/1-6
+  choisissent encore) : c'est l'application AUTOMATIQUE qu'on retire, pas la
+  suggestion. Même durée de vie que `vetoAuto` (le mot en cours).
+  `ghostShown()` centralise les conditions d'affichage du fantôme, parce que la
+  touche → s'en sert aussi : sinon → accepterait une complétion invisible.
 - **Ctrl+Backspace en composition** : ABANDONNE le mot en cours — rien n'est
   committé, rien n'est appris.
 
