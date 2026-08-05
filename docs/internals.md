@@ -686,7 +686,35 @@ couleur (17 px). Couleurs lues de
 `~/.cache/DankMaterialShell/dms-colors.json` (live-reload au changement de
 thème), override via `~/.config/fcitx5/qmlpanel/colors.json`
 (`{surface,onSurface,accent,onAccent,outline,surfaceVariant,onSurfaceVariant,
-secondaryContainer}`).
+secondaryContainer,surfaceTint,tertiary,scrim}` + `mode` et `opacity`).
+
+**Palette dynamique DMS** : les rôles Material 3 sont pris dans
+`colors.{dark,light}` de matugen — `surface_container_high` (carte),
+`on_surface`, `primary`/`on_primary` (accent), `outline_variant`,
+`surface_container_highest` (champ de recherche), `on_surface_variant`,
+`secondary_container` (case sélectionnée), et `surface_tint` (= primary : la
+teinte du reflet, donc **la couleur du fond d'écran**), `tertiary` (2e accent :
+pagination du picker), `scrim` (ombre). Le mode clair/sombre se **vote** sur les
+16 couleurs `dank16` (`default` == `dark` ou == `light`) au lieu de trancher sur
+la première qui diffère : DMS écrit certaines entrées identiques dans les deux
+modes, et une seule suffisait à inverser tout le thème du panneau.
+
+**Style acrylique** (verre) : la carte est translucide — `glass` =
+`surface` + alpha (0,74 sombre / 0,82 clair, réglable par `"opacity"` dans
+l'override ou `QMLPANEL_OPACITY`), plus un **reflet** dégradé teinté
+`surface_tint` en haut, une **arête interne** claire (`on_surface` à 16 %), un
+liseré externe adouci et un **halo** d'ombre dans la marge de 5 px (deux anneaux
+`scrim` : le renderer software n'a ni DropShadow ni shader). L'alpha est porté
+par les COULEURS, jamais par `opacity` sur la carte — sinon les glyphes se
+délavaient aussi. Tout est dérivé de la palette, donc le verre suit matugen.
+Le vrai flou vient du compositeur : sous Hyprland il faut
+`decoration:blur:input_methods = true` (à côté de `blur.popups`) — sans lui, le
+panneau reste du verre *teinté* (le fond se voit net à travers), ce qui est
+lisible mais pas dépoli. `input_methods_ignorealpha` (0,2 par défaut) écarte du
+flou les pixels très transparents : le halo disparaît proprement quand le flou
+est actif, la carte reste. `verre-picker.png` / `verre-barre-mots.png`
+(cf `panel_preview`) composent le panneau sur un faux fond d'application —
+l'alpha d'un PNG à fond transparent ne se juge pas.
 
 Trois rendus dans la même surface, choisis par `gridMode`/`listMode` :
 **compact** (mots), **picker emoji** (Material 3 : champ de recherche pleine

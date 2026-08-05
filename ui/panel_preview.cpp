@@ -14,7 +14,11 @@
 #include <thread>
 
 #include <QByteArray>
+#include <QColor>
+#include <QFont>
 #include <QImage>
+#include <QLinearGradient>
+#include <QPainter>
 #include <QStringList>
 #include <QVariantList>
 
@@ -43,6 +47,41 @@ void shot(PanelView &v, const QString &dir, const char *name, int minW,
               img.save(path);
     printf("%s %-22s %dx%d\n", ok ? "  ok  " : " FAIL ", name,
            img.width(), img.height());
+    if (!ok)
+        ++failures;
+}
+
+// Le panneau est du VERRE (fond translucide) : dans un PNG à fond transparent,
+// son alpha se lit en damier ou en noir et le style acrylique n'est pas
+// jugeable. On le compose donc sur un faux fond d'application (dégradé + lignes
+// de texte) — c'est ce que le compositeur montrera, en plus flouté s'il a
+// `decoration:blur:input_methods`.
+QImage onBackdrop(const QImage &panel) {
+    QImage bg(panel.width() + 140, panel.height() + 110,
+              QImage::Format_ARGB32_Premultiplied);
+    QPainter p(&bg);
+    QLinearGradient g(0, 0, bg.width(), bg.height());
+    g.setColorAt(0.0, QColor("#20364a"));
+    g.setColorAt(0.5, QColor("#4c3a5c"));
+    g.setColorAt(1.0, QColor("#7d5a3c"));
+    p.fillRect(bg.rect(), g);
+    p.setPen(QColor(255, 255, 255, 170));
+    p.setFont(QFont(QStringLiteral("DejaVu Sans"), 10));
+    for (int i = 0; i * 21 < bg.height(); i++)
+        p.drawText(10, 20 + i * 21,
+                   QStringLiteral("le texte de l'application passe DERRIÈRE le "
+                                  "panneau — lisibilité du verre"));
+    p.drawImage(70, 55, panel);
+    p.end();
+    return bg;
+}
+
+void shotOnBackdrop(PanelView &v, const QString &dir, const char *name) {
+    QImage img = onBackdrop(settle(v));
+    QString path = dir + "/" + name + ".png";
+    bool ok = !img.isNull() && img.save(path);
+    printf("%s %-22s %dx%d\n", ok ? "  ok  " : " FAIL ", name, img.width(),
+           img.height());
     if (!ok)
         ++failures;
 }
@@ -113,6 +152,27 @@ int main(int argc, char **argv) {
     // 4) non-régression : la barre de mots ne bouge pas
     v.update({"bonjour", "bonsoir", "bon"}, 1, {}, true, false);
     shot(v, dir, "barre-mots", 120, 25);
+
+    // 5) VERRE : les deux états sur un fond d'application, pour juger le style
+    //    acrylique (translucidité, reflet, arête, halo) et la lisibilité.
+    v.update(emojis(24), 3, autoMark, true, true, {}, false, false,
+             QStringLiteral("1/4"), QStringLiteral("coeur"));
+    shotOnBackdrop(v, dir, "verre-picker");
+    v.update({"bonjour", "bonsoir", "bon"}, 1, {}, true, false);
+    shotOnBackdrop(v, dir, "verre-barre-mots");
+
+    // 6) THÈME CLAIR : même verre, palette claire (QMLPANEL_MODE force le mode
+    //    — sans ça il faudrait basculer le thème DMS pour relire ce rendu). Un
+    //    second PanelView : les couleurs sont lues à la construction.
+    qputenv("QMLPANEL_MODE", "light");
+    PanelView light;
+    if (!light.ok()) {
+        fprintf(stderr, " FAIL  QML non chargé en thème clair\n");
+        return 1;
+    }
+    light.update(emojis(24), 3, autoMark, true, true, {}, false, false,
+                 QStringLiteral("1/4"), QStringLiteral("coeur"));
+    shotOnBackdrop(light, dir, "verre-picker-clair");
 
     printf(failures ? "\n%d rendu(s) en échec\n" : "\ntous les rendus OK\n",
            failures);

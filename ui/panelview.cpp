@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 
+#include <QColor>
 #include <QFile>
 #include <QFileInfo>
 #include <QGuiApplication>
@@ -45,6 +46,26 @@ Item {
     readonly property int pad: 10
     readonly property int cols: 8
 
+    // HALO : ombre portée douce, dans la marge de 5 px autour de la carte. Le
+    // renderer software n'a ni DropShadow ni shader — deux anneaux translucides
+    // suffisent à détacher le verre du fond. (Avec le flou du compositeur, ces
+    // pixels très transparents sont écartés par input_methods_ignorealpha : le
+    // halo disparaît proprement, le verre reste.)
+    Rectangle {
+        anchors.fill: card
+        anchors.margins: -3
+        radius: card.radius + 3
+        color: colors.halo
+        opacity: appear * 0.55
+    }
+    Rectangle {
+        anchors.fill: card
+        anchors.margins: -1
+        radius: card.radius + 1
+        color: colors.halo
+        opacity: appear
+    }
+
     Rectangle {
         id: card
         x: 5
@@ -52,13 +73,38 @@ Item {
         opacity: appear
         // shape scale M3 : large (16) pour la surface picker, medium sinon
         radius: gridMode ? 16 : (listMode ? 14 : 11)
-        color: colors.surface
+        // VERRE : fond translucide (cf loadColors → glass). Ce sont les COULEURS
+        // qui portent l'alpha, pas `opacity` : un opacity sur la carte
+        // délaverait aussi les glyphes, qui doivent rester nets.
+        color: colors.glass
         border.width: 1
-        border.color: colors.outline
+        border.color: colors.glassBorder
         width:  listMode ? listLayout.width
                          : (gridMode ? picker.width : compact.width)
         height: listMode ? listLayout.height
                          : (gridMode ? picker.height : compact.height)
+
+        // reflet : le haut du verre capte la lumière, teinté par la couleur
+        // dominante du thème (matugen) → le panneau prend la couleur du fond
+        // d'écran. Déclaré AVANT les contenus : il passe dessous.
+        Rectangle {
+            anchors.fill: parent
+            radius: parent.radius
+            gradient: Gradient {
+                GradientStop { position: 0.0; color: colors.sheen }
+                GradientStop { position: 0.6; color: "transparent" }
+            }
+        }
+        // arête interne claire : c'est ce liseré qui fait « verre » plutôt que
+        // « rectangle semi-transparent ».
+        Rectangle {
+            anchors.fill: parent
+            anchors.margins: 1
+            radius: Math.max(0, parent.radius - 1)
+            color: "transparent"
+            border.width: 1
+            border.color: colors.glassEdge
+        }
 
         // ===================== COMPACT (mots) =====================
         Item {
@@ -175,7 +221,7 @@ Item {
                 width: parent.width - 2 * root.pad
                 height: 30
                 radius: height / 2
-                color: colors.surfaceVariant
+                color: colors.field       // posé SUR le verre (cf loadColors)
 
                 // loupe DESSINÉE : le rendu est software et la fonte du
                 // panneau n'a pas forcément le glyphe (⌕/nerd-font) — deux
@@ -234,7 +280,9 @@ Item {
                     anchors.rightMargin: 12
                     anchors.verticalCenter: parent.verticalCenter
                     text: headerText
-                    color: colors.onSurfaceVariant
+                    // 2e accent de la palette dynamique : la pagination ne se
+                    // confond plus avec le placeholder gris du champ.
+                    color: colors.tertiary
                     font.pixelSize: 11
                     font.family: "Maple Mono NF"
                 }
@@ -257,7 +305,7 @@ Item {
                 width: root.cell
                 height: root.cell
                 radius: 10
-                color: colors.secondaryContainer
+                color: colors.pillGlass
             }
 
             Grid {
@@ -331,7 +379,9 @@ Item {
                 horizontalAlignment: Text.AlignHCenter
                 text: "↑↓←→ naviguer · Entrée insérer · Échap fermer"
                 color: colors.onSurfaceVariant
-                opacity: 0.75
+                // sur du verre, un texte de 10 px trop pâle se noie dans ce qui
+                // passe derrière — l'aide reste discrète mais lisible.
+                opacity: 0.9
                 font.pixelSize: 10
                 font.family: "Maple Mono NF"
             }
@@ -499,6 +549,36 @@ qint64 colorsStamp() {
     return s;
 }
 
+// Couleur + alpha → "#AARRGGBB" (QML lit les chaînes hex ARGB). Tout le VERRE
+// se compose ici, en C++ : le rendu QML est software, il n'a ni shader ni
+// arithmétique de couleur commode.
+QString withAlpha(const QString &hex, double a) {
+    QColor c(hex);
+    if (!c.isValid())
+        return hex;
+    c.setAlphaF(float(std::clamp(a, 0.0, 1.0)));
+    return c.name(QColor::HexArgb);
+}
+
+// Opacité du VERRE (style acrylique). Hyprland floute ce qu'il y a DERRIÈRE la
+// popup si `decoration:blur:input_methods = true` — le panneau devient alors du
+// verre dépoli ; sans flou c'est du verre teinté, lisible quand même (les
+// glyphes, eux, restent opaques). Réglable : "opacity" dans colors.json, ou
+// QMLPANEL_OPACITY (levier de debug, comme QMLPANEL_ANIM_SCALE). 1 = opaque.
+double glassOpacity(const QJsonObject &ov, bool dark) {
+    double a = dark ? 0.74 : 0.82;
+    if (ov.contains("opacity"))
+        a = ov.value("opacity").toDouble(a);
+    QByteArray e = qgetenv("QMLPANEL_OPACITY");
+    if (!e.isEmpty()) {
+        bool ok = false;
+        double v = e.toDouble(&ok);
+        if (ok)
+            a = v;
+    }
+    return std::clamp(a, 0.3, 1.0);
+}
+
 // Palette = défauts Catppuccin → écrasés par DMS (matugen) → écrasés par un
 // override explicite. Material You : accent = primary, surface = container.
 // Mode CLAIR/SOMBRE : "mode" explicite dans l'override > détection DMS (dans
@@ -507,20 +587,34 @@ QVariantMap loadColors() {
     QJsonObject root = readJson(dmsColorsPath());
     QJsonObject ov = readJson(overrideColorsPath());
     bool dark = true;
-    QString mode = ov.value("mode").toString();
+    // QMLPANEL_MODE : force le thème (levier de debug/captures — cf
+    // panel_preview, qui rend les deux thèmes en un seul run).
+    QString mode = QString::fromLocal8Bit(qgetenv("QMLPANEL_MODE"));
+    if (mode != "light" && mode != "dark")
+        mode = ov.value("mode").toString();
     if (mode == "light" || mode == "dark") {
         dark = (mode == "dark");
     } else {
+        // VOTE sur les 16 couleurs, au lieu de trancher sur la première qui
+        // diffère : DMS écrit certaines entrées identiques en clair et en sombre
+        // (color0 ici), et une seule entrée incohérente suffisait à inverser
+        // tout le thème du panneau.
         QJsonObject d16 = root.value("dank16").toObject();
+        int votesDark = 0, votesLight = 0;
         for (const QString &k : d16.keys()) {
             QJsonObject col = d16.value(k).toObject();
             QString dv = col.value("dark").toString();
             QString lv = col.value("light").toString();
-            if (!dv.isEmpty() && dv != lv) {
-                dark = (col.value("default").toString() == dv);
-                break;
-            }
+            QString cur = col.value("default").toString();
+            if (dv.isEmpty() || dv == lv || cur.isEmpty())
+                continue; // n'apprend rien sur le mode
+            if (cur == dv)
+                votesDark++;
+            else if (cur == lv)
+                votesLight++;
         }
+        if (votesDark || votesLight)
+            dark = votesDark >= votesLight;
     }
 
     // défauts Catppuccin (mocha/latte) selon le mode détecté
@@ -535,6 +629,12 @@ QVariantMap loadColors() {
     c["surfaceVariant"] = dark ? "#313244" : "#ccd0da";
     c["onSurfaceVariant"] = dark ? "#a6adc8" : "#6c6f85";
     c["secondaryContainer"] = dark ? "#585b70" : "#acb0be";
+    // rôles du VERRE : teinte qui colore le reflet (Material You : surface_tint
+    // = primary, donc la couleur du fond d'écran), 2e accent (pagination), noir
+    // de l'ombre portée.
+    c["surfaceTint"] = dark ? "#89b4fa" : "#1e66f5";
+    c["tertiary"] = dark ? "#94e2d5" : "#179299";
+    c["scrim"] = "#000000";
 
     // 1) couleurs DMS/matugen (régénérées à chaque changement de thème)
     QJsonObject d = root.value("colors").toObject()
@@ -557,6 +657,9 @@ QVariantMap loadColors() {
         QString onSurfaceVariant = pick({"on_surface_variant"});
         QString secondaryContainer = pick({"secondary_container",
                                            "surface_container_highest"});
+        QString surfaceTint = pick({"surface_tint", "primary"});
+        QString tertiary = pick({"tertiary", "secondary"});
+        QString scrim = pick({"scrim", "shadow"});
         if (!surface.isEmpty()) c["surface"] = surface;
         if (!onSurface.isEmpty()) c["onSurface"] = onSurface;
         if (!accent.isEmpty()) c["accent"] = accent;
@@ -567,13 +670,43 @@ QVariantMap loadColors() {
             c["onSurfaceVariant"] = onSurfaceVariant;
         if (!secondaryContainer.isEmpty())
             c["secondaryContainer"] = secondaryContainer;
+        if (!surfaceTint.isEmpty()) c["surfaceTint"] = surfaceTint;
+        if (!tertiary.isEmpty()) c["tertiary"] = tertiary;
+        if (!scrim.isEmpty()) c["scrim"] = scrim;
     }
-    // 2) override explicite (mêmes clés + "mode")
+    // 2) override explicite (mêmes clés + "mode" et "opacity")
     for (const QString &k :
          {"surface", "onSurface", "accent", "onAccent", "outline",
-          "surfaceVariant", "onSurfaceVariant", "secondaryContainer"})
+          "surfaceVariant", "onSurfaceVariant", "secondaryContainer",
+          "surfaceTint", "tertiary", "scrim"})
         if (ov.contains(k))
             c[k] = ov.value(k).toString();
+
+    // 3) VERRE ACRYLIQUE — dérivé de la palette (donc dynamique : il suit
+    //    matugen), composé ici parce que le QML software ne sait pas le faire.
+    //      glass       fond translucide de la carte (le compositeur floute
+    //                  derrière si decoration:blur:input_methods est activé)
+    //      sheen       reflet haut, teinté par la couleur dominante du thème
+    //      glassEdge   arête interne claire (le « bord » du verre)
+    //      glassBorder liseré externe, plus discret qu'un outline plein
+    //      halo        ombre portée douce (pas de DropShadow en software)
+    //      field       champ de recherche du picker, posé SUR le verre
+    //      pillGlass   case emoji sélectionnée : presque opaque, elle doit
+    //                  rester lisible même sur un fond chargé
+    const double a = glassOpacity(ov, dark);
+    auto col = [&](const char *k) { return c.value(k).toString(); };
+    c["glass"] = withAlpha(col("surface"), a);
+    c["sheen"] = withAlpha(col("surfaceTint"), dark ? 0.10 : 0.07);
+    // arête : en SOMBRE, un filet de la couleur du texte fait la brillance ; en
+    // CLAIR il ferait une ombre — c'est du blanc qu'il faut (comme une vitre
+    // éclairée par le dessus).
+    c["glassEdge"] = dark ? withAlpha(col("onSurface"), 0.16)
+                          : withAlpha(QStringLiteral("#ffffff"), 0.60);
+    c["glassBorder"] = withAlpha(col("outline"), a < 1.0 ? 0.70 : 1.0);
+    c["halo"] = withAlpha(col("scrim"), dark ? 0.20 : 0.12);
+    c["field"] = withAlpha(col("surfaceVariant"), std::min(1.0, a + 0.05));
+    c["pillGlass"] = withAlpha(col("secondaryContainer"),
+                               std::min(1.0, a + 0.18));
     return c;
 }
 
