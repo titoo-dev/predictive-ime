@@ -83,6 +83,15 @@ wl_buffer *makeImageBuffer(wl_shm *shm, const QImage &img) {
     wl_buffer_add_listener(buf, &kBufferListener, nullptr);
     return buf;
 }
+
+// Le PICKER EMOJI s'annonce par le préedit du PANNEAU (« :requête ») : pendant
+// la recherche l'engine n'écrit plus rien dans l'application (le préedit client
+// reste vide), donc c'est le seul marqueur. Il sert aussi à garder la barre
+// affichée quand la recherche ne rend AUCUN candidat (état vide du picker).
+bool emojiPicker(fcitx::InputContext *ic) {
+    std::string pre = ic->inputPanel().preedit().toString();
+    return !pre.empty() && pre[0] == ':';
+}
 } // namespace
 
 using namespace fcitx;
@@ -99,7 +108,7 @@ public:
         bool show = ic && ic->hasFocus();
         if (show) {
             auto list = ic->inputPanel().candidateList();
-            show = list && list->size() > 0;
+            show = (list && list->size() > 0) || emojiPicker(ic);
         }
         if (show)
             showPanel(ic);
@@ -155,6 +164,18 @@ private:
         if (!surface_ || ic != currentIc_ || im != currentIm_) {
             destroyPanel(); // remet aussi l'anim d'apparition à zéro
             surface_ = wl_compositor_create_surface(compositor_);
+            // RÉGION D'INPUT VIDE : sans elle, l'input region par défaut d'un
+            // wl_surface est TOUTE la surface, et Hyprland route le pointeur
+            // vers les popups input-method EN PRIORITÉ sur les fenêtres. La
+            // moindre surface restée mappée (fondu de fermeture interrompu,
+            // canvas transparent d'avoidTextRow) devenait alors une zone morte
+            // invisible qui avalait les clics — introuvable via hyprctl, les
+            // popups IME n'apparaissent ni dans layers ni dans clients. Le
+            // panneau est 100 % piloté au clavier : il ne doit JAMAIS prendre
+            // la souris. (Double-buffered : appliquée au premier commit.)
+            wl_region *empty = wl_compositor_create_region(compositor_);
+            wl_surface_set_input_region(surface_, empty);
+            wl_region_destroy(empty);
             popup_ = zwp_input_method_v2_get_input_popup_surface(im, surface_);
             // le compositeur nous dit où est la LIGNE DE TEXTE dans nos
             // coordonnées de surface — sert à l'évitement (cf renderFrame)
@@ -192,8 +213,14 @@ private:
             }
         }
         std::string pre = ic->inputPanel().clientPreedit().toString();
-        bool composing = !pre.empty();
-        bool grid = !pre.empty() && pre[0] == ':'; // mode emoji → grille
+        // grille = picker emoji (préedit du PANNEAU) ; la requête alimente le
+        // champ de recherche, sans le ':' interne.
+        bool grid = emojiPicker(ic);
+        QString searchText =
+            grid ? QString::fromStdString(
+                       ic->inputPanel().preedit().toString().substr(1))
+                 : QString();
+        bool composing = !pre.empty() || grid;
         // Mode LISTE (reformulation) : des labels numériques sont posés sur les
         // candidats. Le placeholder de génération est un candidat unique
         // commençant par ⟳ (U+27F3) → mode liste + état « loading ».
@@ -210,7 +237,7 @@ private:
         QString headerText =
             QString::fromStdString(ic->inputPanel().auxUp().toString());
         view_->update(cands, highlight, autoMark, composing, grid, labels,
-                      listMode, loading, headerText);
+                      listMode, loading, headerText, searchText);
         if (!renderFrame())
             return;
         mapped_ = true;
@@ -236,7 +263,9 @@ private:
         // la barre), on décale la barre DANS la surface, sur un canvas
         // transparent : collée AU-DESSUS de la ligne si la place existe,
         // sinon juste EN DESSOUS. Le texte reste visible à travers les pixels
-        // transparents (une popup input-method ne prend pas l'input).
+        // transparents, et les clics passent : la surface déclare une région
+        // d'input VIDE (cf showPanel) — sans elle ce canvas transparent était
+        // une zone morte pour la souris.
         // Hystérésis `lifted_` : on garde le mode jusqu'au démappage (mot
         // suivant) — sans quoi surface qui rétrécit → compositeur qui
         // replace → nouvel overlap → oscillation visible.

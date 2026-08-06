@@ -290,15 +290,15 @@ uint32_t toUpperCp(uint32_t cp) {
 }
 
 // Caractère qui prolonge un mot : lettre toujours ; apostrophe / trait d'union /
-// chiffre seulement si le buffer est déjà entamé (mot en cours). ':' sur buffer
-// VIDE démarre le picker emoji (":coeur" → ❤️), ';' un SNIPPET (";mail" →
-// expansion) — jamais en milieu de mot, donc "10:30" ou "voici :" tapent
-// normalement.
+// chiffre seulement si le buffer est déjà entamé (mot en cours). ';' sur buffer
+// VIDE démarre un SNIPPET (";mail" → expansion) — jamais en milieu de mot. Le
+// picker emoji, lui, n'est PLUS déclenché par ':' tapé mais par Super+; (cf
+// bloc (0-emoji) du keyEvent) : ':' se tape donc littéralement partout.
 bool isWordExtender(uint32_t cp, bool bufferEmpty) {
   if (isLetterCp(cp))
     return true;
   if (bufferEmpty)
-    return cp == ':' || cp == ';';
+    return cp == ';';
   return cp == '\'' || cp == 0x2019 || cp == '-' || (cp >= '0' && cp <= '9');
 }
 
@@ -306,6 +306,14 @@ bool isWordExtender(uint32_t cp, bool bufferEmpty) {
 // bigramme ni de contexte — ce n'est pas de la prose.
 bool isTriggerBuffer(const std::string &buffer) {
   return !buffer.empty() && (buffer[0] == ':' || buffer[0] == ';');
+}
+
+// Buffer du PICKER EMOJI. Son ':' de tête est SYNTHÉTIQUE (posé par Super+;,
+// jamais tapé) : aucun chemin « littéral » ne doit le committer comme texte —
+// cf la garde en tête de commitWord, qui ferme le picker à la place. Le ';'
+// des snippets, lui, est bien tapé et reste littéral.
+bool isEmojiBuffer(const std::string &buffer) {
+  return !buffer.empty() && buffer[0] == ':';
 }
 
 // Majuscule sur la première lettre (auto-capitalisation en début de phrase).
@@ -409,13 +417,18 @@ std::vector<std::string> lastWords(const std::vector<uint32_t> &cps,
 // SurroundingText : l'app ne renvoie son update qu'après un aller-retour,
 // et une complétion relancée juste derrière lirait sinon l'ancien texte
 // (le mot supprimé polluerait son propre contexte).
+//
+// Les bornes sont vérifiées AVANT d'envoyer quoi que ce soit : demander plus
+// que ce que le client détient fait déréférencer hors chaîne côté GTK4
+// (text_input_delete_surrounding_text → g_utf8_pointer_to_offset) et TUE le
+// client. Les appelants doivent en plus passer par canEditSurrounding().
 void deleteSurroundingBefore(fcitx::InputContext *ic, unsigned n) {
-  ic->deleteSurroundingText(-int(n), n);
   auto &st = ic->surroundingText();
   auto cps = decodeUtf8(st.text());
   size_t cur = st.cursor();
   if (n == 0 || n > cur || cur > cps.size())
     return;
+  ic->deleteSurroundingText(-int(n), n);
   std::string out;
   for (size_t i = 0; i < cps.size(); i++)
     if (i < cur - n || i >= cur)
@@ -632,6 +645,13 @@ struct PredictState : public fcitx::InputContextProperty {
   std::string lastAutoWord;          // le mot qui avait été appliqué
   uint32_t lastAutoCps = 0;          // points de code committés à effacer
   bool vetoAuto = false;             // l'utilisateur a refusé : Espace garde le littéral
+  // L'utilisateur vient d'EFFACER (Backspace, ou recomposition d'un mot déjà
+  // committé) : ni fantôme ni auto-application tant qu'il n'a pas retapé un
+  // caractère. Sans ce frein, effacer ne servait à rien — la complétion
+  // remettait aussitôt ce qu'on venait d'enlever (⌫ sur « bonjour » réaffichait
+  // « bonjour » en fantôme), et l'Espace committait la complétion refusée.
+  // Comme vetoAuto, ça ne vaut que pour le mot en cours.
+  bool erasing = false;
   bool langMenu = false;             // panneau de langue ouvert (Ctrl+Shift+L)
   int langIndex = 0;                 // choix surligné dans kLangChoices
   bool reformulating = false;        // mode reformulation : cands = variantes de la sélection
@@ -650,6 +670,21 @@ struct PredictState : public fcitx::InputContextProperty {
   // Génération de la barre mot-suivant (E5) : un refresh neural arrivé APRÈS
   // que l'état a changé (frappe, commit, reset) est jeté (gen différente).
   uint64_t nextWordGen = 0;
+  // Méthode d'entrée d'AVANT l'ouverture du picker par raccourci (vide si on
+  // n'a rien basculé). Le picker emprunte l'IME le temps de choisir un emoji,
+  // puis on rend la main : sans ça, ouvrir le picker allumait la PRÉDICTION
+  // de texte pour la suite de la frappe, ce que l'utilisateur n'a pas demandé.
+  std::string imBeforePicker;
+  // Picker emoji : la grille montre une PAGE de 24 (3×8) ; `pageStart` est
+  // l'index absolu du premier emoji affiché. Les flèches débordent d'une page
+  // à l'autre, la barre de recherche affiche « 2/4 ».
+  size_t pageStart = 0;
+  // Ce client a-t-il PUBLIÉ un texte environnant depuis qu'il a le focus ?
+  // La capacité annoncée ne suffit pas : le cache de fcitx peut dater d'un
+  // AUTRE contexte, et un client qui n'implémente pas set_surrounding_text
+  // (ghostty et les terminaux GTK4 en général) n'a rien en face — une
+  // suppression le fait déréférencer NULL et il MEURT. Cf canEditSurrounding.
+  bool sawSurrounding = false;
 };
 
 class PredictCandidate : public fcitx::CandidateWord {
@@ -732,6 +767,12 @@ int panelDigit(const fcitx::Key &key, uint32_t cp) {
   return -1;
 }
 
+// Grille du picker emoji : 8 colonnes × 3 lignes par PAGE. Le daemon rend
+// jusqu'à 4 pages de résultats ; les flèches débordent d'une page à l'autre.
+constexpr int kGridCols = 8;
+constexpr int kGridRows = 3;
+constexpr int kGridPage = kGridCols * kGridRows;
+
 // Panneau de LANGUE (Ctrl+Shift+L) : valeur écrite dans config.json + libellé
 // des chips. Extensible : ajouter une langue = une ligne ici (une fois le
 // support daemon/modèle en place).
@@ -766,9 +807,172 @@ public:
     // Instance::eventDispatcher() n'existe pas sur le fcitx5 des vieilles
     // distros (Ubuntu 24.04 livre 5.1.7). Cf postToMain.
     dispatcher_.attach(&instance_->eventLoop());
+    // Le SEUL signal fiable qu'un client gère vraiment le texte environnant :
+    // il vient d'en publier un. Tout ce qui édite du texte déjà écrit
+    // (revert, recomposition, reformulation) l'exige — cf canEditSurrounding.
+    surroundingWatcher_ = instance_->watchEvent(
+        fcitx::EventType::InputContextSurroundingTextUpdated,
+        fcitx::EventWatcherPhase::Default, [this](fcitx::Event &event) {
+          auto &e = static_cast<fcitx::InputContextEvent &>(event);
+          e.inputContext()->propertyFor(&factory_)->sawSurrounding = true;
+        });
+    // Le picker emoji ne doit PAS dépendre de l'activation de l'IME : sans
+    // ça, Super+; ne fait rien tant qu'on n'a pas basculé (Ctrl+Espace) sur
+    // « predict », puisque fcitx n'envoie les touches qu'à la méthode
+    // COURANTE. On écoute donc les touches en phase PreInputMethod (avant
+    // toute méthode) : si le raccourci tombe alors qu'une autre méthode est
+    // active, on bascule sur predict et on ouvre le picker dans la foulée.
+    hotkeyWatcher_ = instance_->watchEvent(
+        fcitx::EventType::InputContextKeyEvent,
+        fcitx::EventWatcherPhase::PreInputMethod, [this](fcitx::Event &event) {
+          auto &ke = static_cast<fcitx::KeyEvent &>(event);
+          if (ke.isRelease() || !isEmojiHotkey(ke.key()))
+            return;
+          auto *ic = ke.inputContext();
+          if (instance_->inputMethod(ic) == "predict")
+            return; // notre keyEvent s'en charge (et gère la fermeture)
+          auto *state = ic->propertyFor(&factory_);
+          std::string previous = instance_->inputMethod(ic);
+          instance_->setCurrentInputMethod(ic, "predict", /*local=*/true);
+          // la bascule passe par reset() : on ouvre APRÈS, sinon le picker
+          // serait effacé dans la foulée (et reset() vide `imBeforePicker`).
+          toggleEmojiPicker(ic, state);
+          state->imBeforePicker = previous; // à rendre en refermant
+          ke.filterAndAccept();
+        });
   }
 
   ~PredictEngine() override { disarmRefresh(); }
+
+  // Le raccourci du picker. Sur AZERTY, ';' est en Shift+, → le keysym peut
+  // remonter en ':' ; on accepte les deux.
+  static bool isEmojiHotkey(const fcitx::Key &key) {
+    return (key.sym() == FcitxKey_semicolon || key.sym() == FcitxKey_colon) &&
+           key.states().test(fcitx::KeyState::Super);
+  }
+
+  // Rend la méthode d'entrée empruntée par le picker. Le picker n'est qu'un
+  // sélecteur d'emoji : une fois refermé, la frappe doit retrouver EXACTEMENT
+  // ce qu'elle était avant (pas de prédiction de texte allumée au passage).
+  // Le changement passe par le dispatcher : on est au milieu du traitement
+  // d'une touche, basculer d'IME ici rappellerait reset() en pleine main.
+  void releaseBorrowedIm(fcitx::InputContext *ic, PredictState *state) {
+    if (state->imBeforePicker.empty())
+      return;
+    std::string previous;
+    previous.swap(state->imBeforePicker);
+    postToMain(ic->watch(), [this, ic, previous]() {
+      instance_->setCurrentInputMethod(ic, previous, /*local=*/true);
+    });
+  }
+
+  // Ouvre le picker (ou le referme s'il est déjà ouvert). Le mot en cours est
+  // committé tel quel, SANS apprendre : c'est un fragment tapé, pas un mot
+  // validé.
+  void toggleEmojiPicker(fcitx::InputContext *ic, PredictState *state) {
+    if (isEmojiBuffer(state->buffer)) {
+      state->buffer.clear();
+      state->navigating = false;
+      state->pageStart = 0;
+      clearPanel(ic);
+      releaseBorrowedIm(ic, state);
+      return;
+    }
+    if (!state->buffer.empty())
+      commitWord(ic, state, state->buffer, /*trailingSpace=*/false,
+                 /*learn=*/false);
+    state->buffer = ":";
+    state->navigating = false;
+    state->pageStart = 0;
+    updateCompletion(ic, state);
+    pingCaretRect(ic); // sinon le panneau ne suit pas le caret (cf ci-dessous)
+  }
+
+  // Espace sans chasse (U+200B) du ping, et durée de pose. 200 ms : très
+  // au-delà du délai mesuré entre la préédition et le rectangle publié (~45 ms
+  // sur Chrome), assez court pour qu'aucun clic ne s'y glisse.
+  static constexpr const char *kCaretPing = "\xE2\x80\x8B";
+  static constexpr uint64_t kCaretPingUs = 200 * 1000;
+
+  // « Publie ton caret » — provoque le rectangle de curseur du client.
+  //
+  // Le compositeur place la popup du panneau AU CARET, mais seulement si le
+  // client a publié son rectangle de curseur (text-input-v3,
+  // `set_cursor_rectangle`). Les clients Chromium (Chrome, Discord, VS Code…)
+  // ne le publient QUE quand une PRÉÉDITION change : c'est leur moteur de
+  // rendu qui remonte la position du caret, et il ne le fait que si l'état de
+  // saisie a bougé. Trace protocole d'un champ Chrome, `--enable-wayland-ime` :
+  //
+  //   enter / enable / commit                 ← focus : AUCUN rectangle
+  //   preedit_string("b") … 45 ms plus tard → set_cursor_rectangle(406,390,0,22)
+  //
+  // La barre de mots suit donc bien le caret (elle pose un préedit client à
+  // chaque frappe), mais les panneaux qui laissent le préedit client VIDE —
+  // picker emoji (la requête vit dans le champ de recherche du panneau, pas
+  // dans l'application) et menu de langue — ne déclenchaient rien. Faute de
+  // rectangle, le compositeur ancre la popup sur un bloc de REPLI au coin du
+  // client (Hyprland : 500×500 au coin haut-gauche, cf CInputPopup::updateBox)
+  // et le panneau restait scotché là, loin du curseur.
+  //
+  // D'où ce ping : une préédition ZÉRO-LARGEUR (U+200B) posée le temps que le
+  // client recalcule et publie sa position, puis effacée. Invisible dans
+  // l'application (aucun glyphe, le caret ne bouge pas) et l'effacement
+  // provoque un second rectangle — au même endroit, donc sans saut.
+  void pingCaretRect(fcitx::InputContext *ic) {
+    // Une préédition REMPLACE la sélection courante (comportement standard
+    // d'une composition) : pas de ping quand du texte est sélectionné — on ne
+    // détruit pas la sélection de l'utilisateur pour un détail de placement.
+    if (ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText) &&
+        ic->surroundingText().isValid() &&
+        ic->surroundingText().anchor() != ic->surroundingText().cursor())
+      return;
+    ic->inputPanel().setClientPreedit(caretPingPreedit());
+    ic->updatePreedit();
+    // La composition ne doit pas SURVIVRE au ping : un client qui la valide de
+    // lui-même (clic ailleurs → Chromium committe la composition en cours)
+    // écrirait le caractère invisible dans le texte.
+    caretPing_ = instance_->eventLoop().addTimeEvent(
+        CLOCK_MONOTONIC, fcitx::now(CLOCK_MONOTONIC) + kCaretPingUs, 0,
+        [this, uuid = ic->uuid()](fcitx::EventSourceTime *, uint64_t) {
+          caretPing_.reset();
+          auto *ic = instance_->inputContextManager().findByUUID(uuid);
+          // N'efface QUE notre ping : entre-temps le panneau a pu se fermer et
+          // la frappe reprendre — effacer le préedit du mot en cours ferait
+          // disparaître le texte fantôme sous les doigts.
+          if (!ic || ic->inputPanel().clientPreedit().toString() != kCaretPing)
+            return true;
+          ic->inputPanel().setClientPreedit(fcitx::Text{});
+          ic->updatePreedit();
+          return true;
+        });
+  }
+
+  // Le préedit du ping : l'invisible, curseur APRÈS (le client le place où il
+  // placerait le caret).
+  static fcitx::Text caretPingPreedit() {
+    fcitx::Text t(kCaretPing);
+    t.setCursor(int(std::strlen(kCaretPing)));
+    return t;
+  }
+
+  // Le texte environnant de CE client est-il utilisable (lecture du contexte,
+  // et surtout SUPPRESSION de texte déjà écrit) ?
+  //
+  // La capacité annoncée par fcitx ne suffit PAS. Un terminal GTK4 (ghostty)
+  // active text-input-v3 sans jamais appeler set_surrounding_text : côté GTK
+  // le tampon reste NULL, mais le cache de fcitx, lui, peut contenir le texte
+  // d'un AUTRE contexte. La suppression passait alors la validation de fcitx,
+  // arrivait chez un client sans tampon, et
+  // text_input_delete_surrounding_text déréférençait NULL → SIGSEGV DU
+  // CLIENT (ghostty qui disparaît en tapant puis effaçant).
+  // On exige donc la seule preuve fiable : ce client a publié un texte
+  // environnant depuis qu'il a le focus.
+  bool canEditSurrounding(fcitx::InputContext *ic) {
+    auto *state = ic->propertyFor(&factory_);
+    return state->sawSurrounding &&
+           ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText) &&
+           ic->surroundingText().isValid();
+  }
 
   void keyEvent(const fcitx::InputMethodEntry &,
                 fcitx::KeyEvent &event) override {
@@ -969,11 +1173,22 @@ public:
     uint32_t reformRevCps = state->reformRevertCps;
     state->reformRevertCps = 0;
     if (sym == FcitxKey_BackSpace && !mod && state->buffer.empty() &&
-        reformRevCps > 0 &&
-        ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText) &&
-        ic->surroundingText().isValid()) {
+        reformRevCps > 0 && canEditSurrounding(ic)) {
       ic->deleteSurroundingText(-int(reformRevCps), reformRevCps);
       ic->commitString(state->reformRevertOrig);
+      event.filterAndAccept();
+      return;
+    }
+
+    // (0-emoji) Super+; : ouvre le PICKER EMOJI, TOUJOURS disponible — buffer
+    //      vide, en plein mot, barre mot-suivant ouverte. Remplace l'ancien
+    //      déclencheur ':' tapé (qui redevient un caractère normal : « 10:30 »,
+    //      « voici : »). Le mot en cours est committé tel quel, SANS apprendre
+    //      (fragment tapé, pas un mot validé). Re-presser referme le picker.
+    //      NB: sur AZERTY, ';' est en Shift+, → le keysym peut remonter en
+    //      ':' ; on accepte les deux.
+    if (isEmojiHotkey(key)) {
+      toggleEmojiPicker(ic, state);
       event.filterAndAccept();
       return;
     }
@@ -995,9 +1210,7 @@ public:
     uint32_t autoCps = state->lastAutoCps;
     state->lastAutoCps = 0; // la fenêtre ne dure qu'une touche
     if (sym == FcitxKey_BackSpace && !mod && state->buffer.empty() &&
-        autoCps > 0 &&
-        ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText) &&
-        ic->surroundingText().isValid()) {
+        autoCps > 0 && canEditSurrounding(ic)) {
       deleteSurroundingBefore(ic, autoCps);
       state->buffer = state->lastAutoLit;
       state->vetoAuto = true;
@@ -1018,12 +1231,13 @@ public:
     if (!mod && cp && isWordExtender(cp, state->buffer.empty())) {
       if (state->navigating && cp >= '1' && cp <= '6' &&
           int(cp - '1') < (int)state->cands.size()) {
-        commitWord(ic, state, state->cands[cp - '1'], /*trailingSpace=*/true);
+        commitWord(ic, state, candOf(state, cp - '1'), /*trailingSpace=*/true);
         event.filterAndAccept();
         return;
       }
       appendCp(state->buffer, cp);
       state->navigating = false;
+      state->erasing = false; // retaper réarme fantôme + auto-application
       updateCompletion(ic, state);
       event.filterAndAccept();
       return;
@@ -1046,6 +1260,7 @@ public:
     if (sym == FcitxKey_BackSpace && !mod && !state->buffer.empty()) {
       popLastCp(state->buffer);
       state->navigating = false;
+      state->erasing = true; // cf PredictState::erasing — effacer n'applique pas
       if (state->buffer.empty())
         clearPanel(ic);
       else
@@ -1062,8 +1277,7 @@ public:
     //        proposait plus rien. Même patron que le revert (0) :
     //        deleteSurroundingText + buffer + updateCompletion.
     if (sym == FcitxKey_BackSpace && !mod && state->buffer.empty() &&
-        ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText) &&
-        ic->surroundingText().isValid()) {
+        canEditSurrounding(ic)) {
       const auto &st = ic->surroundingText();
       auto cps = decodeUtf8(st.text());
       size_t cur = st.cursor();
@@ -1093,6 +1307,11 @@ public:
           if (!state->ctx.empty() && state->ctx.back().rfind(word, 0) == 0)
             state->ctx.pop_back();
           state->navigating = false;
+          // Reculer sur un mot committé est un geste de CORRECTION : le mot
+          // revient tel quel, sans fantôme et sans auto-application (sinon
+          // effacer l'espace après « salut » rendait « salutation », que
+          // l'Espace suivant committait).
+          state->erasing = true;
           updateCompletion(ic, state);
           event.filterAndAccept();
           return;
@@ -1134,22 +1353,59 @@ public:
         event.filterAndAccept();
         return;
       }
-      if (!mod && emojiGrid && sym == FcitxKey_Down) {
-        navigate(ic, state, +8);
+      // ↑/↓ : une LIGNE. Au bord de la grille on ne s'arrête pas, on TOURNE
+      // LA PAGE (colonne conservée) — c'est le « scroll » du picker.
+      if (!mod && emojiGrid && (sym == FcitxKey_Down || sym == FcitxKey_Up)) {
+        bool down = sym == FcitxKey_Down;
+        int col = state->navigating ? state->navIndex % kGridCols : 0;
+        int next = state->navigating ? state->navIndex + (down ? +8 : -8)
+                                     : (down ? 0 : (kGridRows - 1) * kGridCols);
+        if (!state->navigating || (next >= 0 && next < pageCount(state)))
+          navigate(ic, state, state->navigating ? (down ? +8 : -8) : 0,
+                   /*clamp=*/true);
+        else if (!turnPage(ic, state, down ? +1 : -1, col))
+          navigate(ic, state, down ? +8 : -8, /*clamp=*/true); // dernière page
         event.filterAndAccept();
         return;
       }
-      if (!mod && emojiGrid && sym == FcitxKey_Up) {
-        navigate(ic, state, -8);
+      // Page suivante / précédente en un coup.
+      if (!mod && emojiGrid &&
+          (sym == FcitxKey_Page_Down || sym == FcitxKey_Page_Up)) {
+        turnPage(ic, state, sym == FcitxKey_Page_Down ? +1 : -1,
+                 state->navigating ? state->navIndex % kGridCols : 0);
+        event.filterAndAccept();
+        return;
+      }
+      // Début/Fin : première / dernière case de la grille (sauter au bout sans
+      // marteler la flèche). Hors grille elles filent à l'application.
+      if (!mod && emojiGrid &&
+          (sym == FcitxKey_Home || sym == FcitxKey_End)) {
+        if (sym == FcitxKey_Home)
+          state->pageStart = 0;
+        else
+          state->pageStart = (state->cands.size() - 1) / kGridPage * kGridPage;
+        setCandidates(ic, state);
+        showPageIndicator(ic, state);
+        navigateTo(ic, state, sym == FcitxKey_Home ? 0 : pageCount(state) - 1);
         event.filterAndAccept();
         return;
       }
       // ←/→ naviguent aussi ; en GRILLE emoji ils ENTRENT directement (pas
       // besoin de Tab d'abord — sans ça ils committaient le littéral ':xyz'
-      // et la touche fuyait vers l'application).
+      // et la touche fuyait vers l'application) et débordent de page en page.
       if (!mod && (state->navigating || emojiGrid) &&
           (sym == FcitxKey_Left || sym == FcitxKey_Right)) {
-        navigate(ic, state, sym == FcitxKey_Right ? +1 : -1);
+        bool right = sym == FcitxKey_Right;
+        int next = state->navIndex + (right ? +1 : -1);
+        if (emojiGrid && state->navigating &&
+            (next < 0 || next >= pageCount(state)) &&
+            turnPage(ic, state, right ? +1 : -1,
+                     right ? 0 : kGridCols - 1)) {
+          // page tournée : on entre par le bord opposé
+          navigateTo(ic, state, right ? 0 : pageCount(state) - 1);
+        } else {
+          navigate(ic, state, right ? +1 : -1, emojiGrid);
+        }
         event.filterAndAccept();
         return;
       }
@@ -1159,10 +1415,7 @@ public:
       // que updateCompletion) ; sinon → committe le littéral et file à l'app
       // (branche « toute autre touche » plus bas), comme avant.
       if (!mod && sym == FcitxKey_Right && !state->navigating &&
-          engineCfg().ghostText && !state->literalIsWord &&
-          !state->vetoAuto &&
-          state->ghost.size() > state->buffer.size() &&
-          state->ghost.compare(0, state->buffer.size(), state->buffer) == 0) {
+          ghostShown(state)) {
         commitWord(ic, state, state->ghost, /*trailingSpace=*/false);
         event.filterAndAccept();
         return;
@@ -1185,12 +1438,13 @@ public:
         if (state->navigating) {
           commitWord(ic, state, highlighted(state), /*space=*/false);
           event.filterAndAccept(); // suggestion prise → on avale Entrée
-        } else if (isTriggerBuffer(state->buffer) && state->buffer.size() > 1 &&
-                   !state->cands.empty()) {
-          // Picker emoji / snippet AVEC requête : Entrée prend le 1er candidat
-          // (comme l'Espace, mais sans espace final). Le déclencheur nu
-          // (':' seul) garde le comportement littéral — Entrée = retour-ligne.
-          commitWord(ic, state, state->cands[0], /*space=*/false);
+        } else if (isTriggerBuffer(state->buffer) && !state->cands.empty() &&
+                   (state->buffer.size() > 1 || isEmojiBuffer(state->buffer))) {
+          // Picker emoji (même SANS requête : la grille montre les favoris) et
+          // snippet AVEC requête : Entrée prend le 1er candidat (comme
+          // l'Espace, mais sans espace final). Le snippet nu (';' seul) garde
+          // le comportement littéral — Entrée = retour-ligne.
+          commitWord(ic, state, candOf(state, 0), /*space=*/false);
           event.filterAndAccept();
         } else {
           commitWord(ic, state, state->buffer, /*space=*/false);
@@ -1270,7 +1524,7 @@ public:
       }
       if (cp >= '1' && cp <= '6' &&
           int(cp - '1') < (int)state->cands.size()) {
-        commitWord(ic, state, state->cands[cp - '1'], /*space=*/true);
+        commitWord(ic, state, candOf(state, cp - '1'), /*space=*/true);
         event.filterAndAccept();
         return;
       }
@@ -1334,12 +1588,20 @@ public:
     state->cands.clear();
     state->navigating = false;
     state->vetoAuto = false;
+    state->erasing = false;
     state->lastAutoCps = 0;
     state->lastAutoLit.clear();
     state->ghost.clear();
     state->accentOnly = false;
     state->nextWordGen++; // un refresh neural en vol devient périmé
+    // Changement de focus : ce que le PRÉCÉDENT client avait publié ne dit
+    // rien du suivant. On réexige une publication avant de toucher au texte.
+    state->sawSurrounding = false;
+    state->pageStart = 0;
     clearPanel(ic);
+    // Picker abandonné (focus perdu, bascule manuelle…) : rendre la méthode
+    // d'entrée empruntée, sinon la prédiction resterait allumée.
+    releaseBorrowedIm(ic, state);
   }
 
 private:
@@ -1423,8 +1685,7 @@ private:
   // C). Absorbe une espace ORDINAIRE déjà tapée (sinon « mot  ! » double espace)
   // et ne fait rien si une fine est déjà là — best-effort via SurroundingText.
   void frenchThinBefore(fcitx::InputContext *ic) {
-    if (ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText) &&
-        ic->surroundingText().isValid()) {
+    if (canEditSurrounding(ic)) {
       auto cps = decodeUtf8(ic->surroundingText().text());
       unsigned int cur = ic->surroundingText().cursor();
       if (cur > 0 && cur <= cps.size()) {
@@ -1446,8 +1707,9 @@ private:
   // tout le groupe nominal (déterminant + adjectifs intercalés).
   std::vector<std::string> contextFor(fcitx::InputContext *ic,
                                       PredictState *state) {
-    if (ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText) &&
-        ic->surroundingText().isValid()) {
+    // Pas de sawSurrounding = le cache peut décrire une AUTRE fenêtre : on
+    // retombe sur notre propre contexte plutôt que de lire à côté.
+    if (canEditSurrounding(ic)) {
       auto cps = decodeUtf8(ic->surroundingText().text());
       unsigned int cur = ic->surroundingText().cursor();
       if (cur < cps.size())
@@ -1465,8 +1727,7 @@ private:
   // caractères, coupés à un début de mot. Repli sans SurroundingText : les
   // derniers mots committés.
   std::string wideTextFor(fcitx::InputContext *ic, PredictState *state) {
-    if (ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText) &&
-        ic->surroundingText().isValid()) {
+    if (canEditSurrounding(ic)) {
       auto cps = decodeUtf8(ic->surroundingText().text());
       unsigned int cur = ic->surroundingText().cursor();
       if (cur < cps.size())
@@ -1499,13 +1760,77 @@ private:
       state->ctx.erase(state->ctx.begin());
   }
 
-  const std::string &highlighted(PredictState *state) {
+  // « 2/4 » dans le champ de recherche du picker (auxUp, que la barre QML
+  // rend à droite du champ). Une seule page → rien à afficher.
+  void showPageIndicator(fcitx::InputContext *ic, PredictState *state) {
+    int total = int(state->cands.size());
+    if (total <= kGridPage)
+      return;
+    int pages = (total + kGridPage - 1) / kGridPage;
+    int cur = int(state->pageStart) / kGridPage + 1;
+    ic->inputPanel().setAuxUp(
+        fcitx::Text(std::to_string(cur) + "/" + std::to_string(pages)));
+  }
+
+  // Change de page (delta en pages) en gardant la COLONNE, et surligne la
+  // ligne d'arrivée : vers le bas on entre par le haut, vers le haut par le
+  // bas. Rend false si la page n'existe pas (on est déjà au bout).
+  bool turnPage(fcitx::InputContext *ic, PredictState *state, int delta,
+                int column) {
+    long start = long(state->pageStart) + long(delta) * kGridPage;
+    if (start < 0 || start >= (long)state->cands.size())
+      return false;
+    state->pageStart = size_t(start);
+    int last = pageCount(state) - 1;
+    int idx = delta > 0 ? column : (kGridRows - 1) * kGridCols + column;
+    state->navigating = true;
+    state->navIndex = std::max(0, std::min(idx, last));
+    setCandidates(ic, state);
+    showPageIndicator(ic, state);
+    if (auto list = ic->inputPanel().candidateList())
+      if (auto *cl = dynamic_cast<PredictCandidateList *>(list.get()))
+        cl->setCursorIndex(state->navIndex);
+    ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
+    return true;
+  }
+
+  // Candidat d'index LOCAL à la page affichée (le picker emoji n'en montre
+  // que 24 à la fois ; partout ailleurs la page vaut toute la liste).
+  const std::string &candOf(PredictState *state, int local) {
     if (state->cands.empty())
       return state->buffer;
-    int i = state->navIndex;
-    if (i < 0 || i >= (int)state->cands.size())
-      i = 0;
+    size_t i = state->pageStart + size_t(local < 0 ? 0 : local);
+    if (i >= state->cands.size())
+      i = state->pageStart < state->cands.size() ? state->pageStart : 0;
     return state->cands[i];
+  }
+
+  const std::string &highlighted(PredictState *state) {
+    return candOf(state, state->navIndex);
+  }
+
+  // Nombre de candidats affichés dans la page courante.
+  int pageCount(PredictState *state) {
+    size_t rest = state->cands.size() > state->pageStart
+                      ? state->cands.size() - state->pageStart
+                      : 0;
+    return int(isEmojiBuffer(state->buffer)
+                   ? std::min<size_t>(rest, kGridPage)
+                   : rest);
+  }
+
+  // Le FANTÔME est-il affiché dans l'état courant ? Un seul endroit, parce que
+  // DEUX code paths en dépendent : ce que updateCompletion peint, et ce que la
+  // touche → accepte. S'ils divergent, → insère une complétion que
+  // l'utilisateur ne voyait pas.
+  // Il ne s'affiche que si la complétion PROLONGE octet-à-octet la frappe
+  // (jamais pour une correction floue : la barre + le liseré s'en chargent), et
+  // jamais après un refus (vetoAuto) ni un effacement (erasing).
+  bool ghostShown(const PredictState *state) {
+    return engineCfg().ghostText && !state->literalIsWord &&
+           !state->vetoAuto && !state->erasing &&
+           state->ghost.size() > state->buffer.size() &&
+           state->ghost.compare(0, state->buffer.size(), state->buffer) == 0;
   }
 
   // Mot retenu quand on appuie sur Espace en cours de composition :
@@ -1532,31 +1857,47 @@ private:
   // Surligne un candidat. dir : +1 suivant, -1 précédent, 0 (1er appui) → le
   // 1er. Premier appui en ARRIÈRE (⇧Tab/↑) → on entre par la droite (dernier).
   // On calcule l'index nous-mêmes (robuste, indépendant de nextCandidate()).
-  void navigate(fcitx::InputContext *ic, PredictState *state, int dir) {
+  // `clamp` : borne au lieu de boucler — c'est le mode GRILLE (emoji). Dans une
+  // grille, boucler désoriente : ↓ sur la dernière ligne renvoyait en haut, →
+  // sur la dernière case revenait à la première. Borné, une flèche qui ne peut
+  // plus avancer ne bouge pas ; ↓ depuis une ligne incomplète tombe sur la
+  // DERNIÈRE case (comportement des grilles emoji système).
+  void navigate(fcitx::InputContext *ic, PredictState *state, int dir,
+                bool clamp = false) {
     auto list = ic->inputPanel().candidateList();
     if (!list || list->size() == 0)
       return;
     int sz = list->size();
     int next = state->navigating ? state->navIndex + dir
                                  : (dir < 0 ? sz - 1 : 0);
-    next = ((next % sz) + sz) % sz; // wrap (marche aussi pour ±8 en grille)
+    next = clamp ? std::max(0, std::min(next, sz - 1))
+                 : ((next % sz) + sz) % sz;
     state->navigating = true;
     state->navIndex = next;
     if (auto *cl = dynamic_cast<PredictCandidateList *>(list.get()))
       cl->setCursorIndex(next);
     // reflète le candidat surligné dans la préédition (mode complétion) —
-    // SAUF en mode emoji : le préedit reste ":requête" (le pill de la grille
-    // montre déjà la sélection, et l'UI déduit le mode grille du préfixe ':').
-    if (!state->buffer.empty() && next < (int)state->cands.size()) {
-      std::string shown = state->buffer[0] == ':'
-                              ? state->buffer
-                              : applyCase(state->cands[next], state->buffer);
+    // SAUF en mode emoji : le préedit CLIENT reste vide (la requête vit dans
+    // le champ de recherche du panneau, cf updateCompletion).
+    if (!state->buffer.empty() && !isEmojiBuffer(state->buffer) &&
+        next < (int)state->cands.size()) {
+      std::string shown = applyCase(state->cands[next], state->buffer);
       fcitx::Text preedit(shown, fcitx::TextFormatFlag::Underline);
       preedit.setCursor(shown.size());
       ic->inputPanel().setClientPreedit(preedit);
       ic->updatePreedit();
     }
     ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
+  }
+
+  // Place le surlignage sur un index ABSOLU (Début/Fin de la grille).
+  void navigateTo(fcitx::InputContext *ic, PredictState *state, int index) {
+    auto list = ic->inputPanel().candidateList();
+    if (!list || list->size() == 0)
+      return;
+    state->navigating = true; // → navigate(0) repart de `index` exactement
+    state->navIndex = index;
+    navigate(ic, state, 0, /*clamp=*/true);
   }
 
   // Valide un mot : applique la casse du buffer, committe, apprend (sauf
@@ -1566,8 +1907,22 @@ private:
   void commitWord(fcitx::InputContext *ic, PredictState *state,
                   const std::string &raw, bool trailingSpace,
                   bool learn = true) {
+    // Picker emoji : committer le LITTÉRAL (Échap, Entrée nue, ponctuation,
+    // Espace sans candidat…) cracherait ':requête' dans le texte alors que ce
+    // ':' vient du raccourci Super+;, pas de la frappe. Un picker qu'on annule
+    // se ferme, point — c'est un menu, pas une composition.
+    if (isEmojiBuffer(state->buffer) && raw == state->buffer) {
+      state->buffer.clear();
+      state->cands.clear();
+      state->navigating = false;
+      state->pageStart = 0;
+      clearPanel(ic);
+      releaseBorrowedIm(ic, state);
+      return;
+    }
     state->nextWordGen++; // le commit invalide tout refresh en vol
     bool trigger = isTriggerBuffer(state->buffer); // emoji ':' / snippet ';'
+    bool wasPicker = isEmojiBuffer(state->buffer); // emoji choisi → on referme
     std::string word = applyCase(raw, state->buffer);
     // Auto-majuscule (amélioration D) en DÉBUT DE PHRASE : on s'appuie sur le
     // contexte EFFECTIF (contextFor → SurroundingText prioritaire). lastWords
@@ -1607,10 +1962,13 @@ private:
     state->cands.clear();
     state->navigating = false;
     state->vetoAuto = false; // le veto ne vaut que pour le mot en cours
+    state->erasing = false;  // idem : le mot suivant repart avec le fantôme
     if (trailingSpace)
       showNextWord(ic, state);
     else
       clearPanel(ic);
+    if (wasPicker)
+      releaseBorrowedIm(ic, state);
   }
 
   // Mode complétion : candidats commençant par le buffer (avec autocorrection).
@@ -1628,8 +1986,33 @@ private:
     state->autocomplete = reply.autocomplete;
     state->ghost = reply.ghost;
     state->accentOnly = reply.accentOnly;
-    if (state->cands.empty())
-      state->cands.push_back(state->buffer); // repli : le brut
+    // Repli « le brut » : le mot tapé reste proposable quand le modèle ne rend
+    // rien. PAS pour le picker emoji — proposer ':zzz' comme candidat n'a aucun
+    // sens ; la grille affiche son état vide (cf panelview).
+    if (state->cands.empty() && !isEmojiBuffer(state->buffer))
+      state->cands.push_back(state->buffer);
+
+    // PICKER EMOJI : la requête n'est PAS du texte en cours de saisie, c'est
+    // une recherche. Elle ne va donc plus dans le préedit CLIENT (qui
+    // l'écrivait dans l'application : « :coeur » visible en plein champ) mais
+    // dans le préedit du PANNEAU — la barre QML en fait un champ de recherche,
+    // et l'UI fcitx classique l'affiche au-dessus des candidats.
+    if (isEmojiBuffer(state->buffer)) {
+      state->pageStart = 0; // la frappe change les résultats → retour page 1
+      fcitx::Text query(state->buffer);
+      query.setCursor(state->buffer.size());
+      ic->inputPanel().setPreedit(query);
+      // Ping du caret encore en vol (cf pingCaretRect) : la préédition
+      // zéro-largeur RESTE posée — la première lettre tapée l'effacerait avant
+      // que le client n'ait publié sa position, et le panneau resterait au coin.
+      ic->inputPanel().setClientPreedit(caretPing_ ? caretPingPreedit()
+                                                   : fcitx::Text{});
+      setCandidates(ic, state);
+      showPageIndicator(ic, state);
+      ic->updatePreedit();
+      ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
+      return;
+    }
 
     // Pas de filet, pas de remplacement : si l'app n'expose pas le
     // SurroundingText, le revert Backspace d'une auto-application est
@@ -1637,22 +2020,29 @@ private:
     // Tab choisit). Les déclencheurs ':'/';' restent explicites.
     // Opt-out : autoApplyNeedsRevert=false.
     if (engineCfg().autoApplyNeedsRevert && !isTriggerBuffer(state->buffer) &&
-        !(ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText) &&
-          ic->surroundingText().isValid())) {
+        !canEditSurrounding(ic)) {
       state->autocomplete.clear();
       state->accentOnly = false;
       // le fantôme reste : → est un accept EXPLICITE, pas besoin de revert.
     }
 
+    // EFFACEMENT : reculer désarme l'Espace pour ce mot (cf
+    // PredictState::erasing). Le fantôme, lui, est déjà éteint par ghostShown().
+    // Les candidats RESTENT : Tab / 1-6 permettent toujours de choisir
+    // explicitement — c'est l'application AUTOMATIQUE qu'on retire, pas la
+    // suggestion.
+    if (state->erasing) {
+      state->autocomplete.clear();
+      state->accentOnly = false;
+    }
+
     // GHOST TEXT : le reste de la complétion haute-confiance s'affiche dans
     // le préedit, curseur entre le tapé et le fantôme ("bonjou‸r") — que
     // l'Espace l'applique (autoApply) ou non : → l'accepte EXPLICITEMENT.
-    // Uniquement quand la complétion PROLONGE octet-à-octet la frappe
-    // (jamais pour une correction floue : la barre + liseré s'en chargent).
+    // Conditions dans ghostShown() : elles servent aussi à la touche → (accepter
+    // un fantôme invisible serait absurde).
     std::string ghost;
-    if (engineCfg().ghostText && !state->literalIsWord && !state->vetoAuto &&
-        state->ghost.size() > state->buffer.size() &&
-        state->ghost.compare(0, state->buffer.size(), state->buffer) == 0)
+    if (ghostShown(state))
       ghost = state->ghost.substr(state->buffer.size());
 
     fcitx::Text preedit;
@@ -1729,6 +2119,8 @@ private:
       list->append(kLangChoices[i].label, /*autoApply=*/false);
     list->setCursorIndex(state->langIndex);
     ic->inputPanel().reset();
+    if (caretPing_) // cf pingCaretRect : changer de chip ne coupe pas le ping
+      ic->inputPanel().setClientPreedit(caretPingPreedit());
     ic->inputPanel().setAuxUp(fcitx::Text("Langue"));
     ic->inputPanel().setCandidateList(std::move(list));
     ic->updatePreedit();
@@ -1744,6 +2136,7 @@ private:
     state->langMenu = true;
     state->navigating = false;
     setLangMenuCandidates(ic, state);
+    pingCaretRect(ic); // même panneau sans préedit client, même repli (cf ping)
   }
 
   void exitLangMenu(fcitx::InputContext *ic, PredictState *state) {
@@ -1843,7 +2236,7 @@ private:
 
   void enterReformulation(fcitx::InputContext *ic, PredictState *state) {
     bool cap = ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText);
-    bool valid = cap && ic->surroundingText().isValid();
+    bool valid = canEditSurrounding(ic);
     std::string sel = valid ? ic->surroundingText().selectedText() : std::string{};
     // Texte à reformuler :
     //  - sélection rapportée (souris) → la sélection.
@@ -1980,9 +2373,7 @@ private:
     // supprimée == la sélection : le résultat reste correct.
     if (idx >= 0 && idx < (int)state->cands.size()) {
       const std::string &variant = state->cands[idx];
-      if (!state->reformFromSelection &&
-          ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText) &&
-          ic->surroundingText().isValid()) {
+      if (!state->reformFromSelection && canEditSurrounding(ic)) {
         auto &st = ic->surroundingText();
         auto cps = decodeUtf8(st.text());
         size_t cur = std::min(size_t(st.cursor()), cps.size());
@@ -2007,9 +2398,15 @@ private:
     bool willAuto = !state->buffer.empty() && !state->autocomplete.empty() &&
                     !state->vetoAuto &&
                     (!state->literalIsWord || state->accentOnly);
-    for (auto &w : state->cands)
+    size_t from = state->pageStart < state->cands.size() ? state->pageStart : 0;
+    size_t to = isEmojiBuffer(state->buffer)
+                    ? std::min(state->cands.size(), from + kGridPage)
+                    : state->cands.size();
+    for (size_t i = from; i < to; i++) {
+      const std::string &w = state->cands[i];
       list->append(applyCase(w, state->buffer),
                    willAuto && w == state->autocomplete);
+    }
     list->setCursorIndex(-1); // aucun surlignage tant qu'on ne navigue pas
     ic->inputPanel().setCandidateList(std::move(list));
   }
@@ -2031,9 +2428,21 @@ private:
   }
 
   fcitx::EventDispatcher dispatcher_;
+  // Abonnement à « ce client vient de publier son texte environnant »
+  // (seule preuve qu'on peut toucher au texte déjà écrit — cf
+  // canEditSurrounding).
+  std::unique_ptr<fcitx::HandlerTableEntry<fcitx::EventHandler>>
+      surroundingWatcher_;
+  // Super+; capté AVANT toute méthode d'entrée : le picker s'ouvre même quand
+  // l'IME prédictif n'est pas la méthode active.
+  std::unique_ptr<fcitx::HandlerTableEntry<fcitx::EventHandler>>
+      hotkeyWatcher_;
   // Dernier mode de reformulation utilisé — le prochain Ctrl+Alt+R repart de
   // là (partagé entre les contextes : préférence de session, pas de champ).
   int lastReformMode_ = 0;
+  // Échéance d'effacement du ping « publie ton caret » (cf pingCaretRect) ;
+  // non nulle = ping en vol, les rafraîchissements de panneau le préservent.
+  std::unique_ptr<fcitx::EventSourceTime> caretPing_;
   // Refresh asynchrone (E5) — au plus UNE connexion en attente.
   std::unique_ptr<fcitx::EventSourceIO> refreshWatch_;
   int refreshFd_ = -1;

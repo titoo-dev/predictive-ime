@@ -11,15 +11,15 @@
 # mortes après quelques mots) et la mutilation des contractions (j'ai → jail).
 #
 # Prérequis (téléchargés par nix au besoin) : sway, zenity, wtype, dbus.
-# Usage : ./ime/test-e2e.sh   (depuis la racine du repo)
+# Usage : ./test-e2e.sh   (depuis le repo)
 set -uo pipefail
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" # le repo lui-même (son NOM ne compte pas)
 WT=/tmp/ime-e2e; rm -rf "$WT"; mkdir -p "$WT/config/fcitx5" "$WT/cache" "$WT/xdg"
 
 echo "==> build paquets + modèle + outils"
-ENGINE=$(nix build "$REPO/ime#fcitx5-predict" --no-link --print-out-paths 2>/dev/null)
-DAEMON=$(nix build "$REPO/ime#predictord" --no-link --print-out-paths 2>/dev/null)
-MODEL=$(nix build  "$REPO/ime#model" --no-link --print-out-paths 2>/dev/null)
+ENGINE=$(nix build "$REPO#fcitx5-predict" --no-link --print-out-paths 2>/dev/null)
+DAEMON=$(nix build "$REPO#predictord" --no-link --print-out-paths 2>/dev/null)
+MODEL=$(nix build  "$REPO#model" --no-link --print-out-paths 2>/dev/null)
 FCITX5=$(nix build nixpkgs#fcitx5 --no-link --print-out-paths 2>/dev/null)
 SWAY=$(nix build  nixpkgs#sway   --no-link --print-out-paths 2>/dev/null)
 ZENITY=$(nix build nixpkgs#zenity --no-link --print-out-paths 2>/dev/null)
@@ -101,6 +101,7 @@ expect() {  # $1=libellé  $2=chaîne tapée  $3=résultat attendu
       "<RIGHT>"*) sleep 0.3; inj -k Right;         sleep 0.3; rest="${rest#<RIGHT>}" ;;
       "<BS>"*)    sleep 0.3; inj -k BackSpace;     sleep 0.3; rest="${rest#<BS>}" ;;
       "<SHIFT>"*) sleep 0.3; inj -M shift -m shift; sleep 0.3; rest="${rest#<SHIFT>}" ;;
+      "<EMOJI>"*) sleep 0.3; inj -M logo -k semicolon -m logo; sleep 0.3; rest="${rest#<EMOJI>}" ;;
       *) seg="${rest%%<*}"
          if [ "$seg" = "$rest" ]; then inj -d 70 -- "$rest"; rest=""
          else [ -n "$seg" ] && inj -d 70 -- "$seg"; rest="${rest#"$seg"}"; fi ;;
@@ -128,8 +129,9 @@ expect "autocorrection faute simple"   "teh "                   "the "
 expect "no-clobber d'un vrai mot"      "le "                    "le "
 expect "chiffres NON avalés"           "code 3 "                "code 3 "
 expect "phrase multi-mots + accents"   "je suis allé au café "  "je suis allé au café "
-expect "emoji picker ':coeur'+espace"  ":coeur "                "❤️ "
-expect "':' nu reste littéral"         ": ok "                  ": ok "
+expect "emoji picker Super+;+'coeur'"  "<EMOJI>coeur "          "❤️ "
+expect "':' tapé reste littéral"       ": ok "                  ": ok "
+expect "':' littéral en plein mot"     "10:30 "                 "10:30 "
 expect "Échap annule la suggestion"    "bonjou<ESC> ok "        "bonjou ok "
 expect "Échap ferme la barre (avalé)"  "je <ESC>vais "          "je vais "
 expect "ponctuation corrige aussi"     "teh. ok "               "the. ok "

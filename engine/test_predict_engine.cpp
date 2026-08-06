@@ -193,6 +193,12 @@ struct Harness {
     ic->surroundingText().setText(text, cursor, anchor);
     ic->updateSurroundingText();
   }
+  // Cache de texte environnant que le client n'a JAMAIS publié (pas
+  // d'événement) : c'est l'état d'un terminal GTK4 comme ghostty, où le cache
+  // de fcitx décrit une autre fenêtre. Éditer là-dessus tue le client.
+  void setSurroundingStale(const std::string &text, unsigned cursor) {
+    ic->surroundingText().setText(text, cursor, cursor);
+  }
   void key(const char *sym) {
     tf->call<fcitx::ITestFrontend::keyEvent>(uuid, fcitx::Key(sym), false);
   }
@@ -218,10 +224,27 @@ struct Harness {
   std::string preedit() {
     return ic->inputPanel().clientPreedit().toStringForCommit();
   }
+  // Préedit du PANNEAU (pas envoyé à l'application) : c'est là que vit la
+  // requête du picker emoji, et le marqueur de mode grille pour l'UI.
+  std::string auxUp() { return ic->inputPanel().auxUp().toStringForCommit(); }
+  std::string panelPreedit() {
+    return ic->inputPanel().preedit().toStringForCommit();
+  }
 };
 
 // --- Tests comportementaux (chacun pousse une expectation pour CHAQUE commit
 //     que l'engine fait ; le testfrontend abort sur commit inattendu/manquant).
+
+// Le PING DU CARET (cf pingCaretRect, engine) : les panneaux sans préedit
+// client posent brièvement un U+200B zéro-largeur pour forcer le client à
+// publier son rectangle de curseur. Aucun glyphe, le caret ne bouge pas : ça ne
+// compte pas comme « du texte écrit dans l'application ». Tout le reste, si.
+const std::string kZwsp = "\xE2\x80\x8B";
+std::string withoutPing(std::string s) {
+  for (size_t p; (p = s.find(kZwsp)) != std::string::npos;)
+    s.erase(p, kZwsp.size());
+  return s;
+}
 
 void compositionTests(Harness &h) {
   h.setCaps(fcitx::CapabilityFlags{fcitx::CapabilityFlag::Preedit,
@@ -276,6 +299,35 @@ void backspaceTests(Harness &h) {
   h.key("Control+BackSpace");
   check("backspace: Ctrl+Backspace ferme la barre (input vidé)",
         h.candidates().empty(), h.candidates().empty() ? "" : h.candidates()[0]);
+
+  // EFFACER NE DOIT PAS RE-APPLIQUER. Le fantôme complétait le préfixe RACCOURCI
+  // par le Backspace : effacer la dernière lettre la remettait aussitôt (⌫ sur
+  // « bonjour » réaffichait « bonjour »), et l'Espace committait la complétion
+  // qu'on venait d'enlever. Effacer est un geste de correction : plus de fantôme
+  // ni d'auto-application tant qu'on n'a pas retapé.
+  h.reset();
+  h.setCaps(fcitx::CapabilityFlags{fcitx::CapabilityFlag::Preedit,
+                                   fcitx::CapabilityFlag::SurroundingText});
+  h.setSurrounding("", 0);
+  h.daemon->setReply({"bonjour", "bonsoir"}, "bonjour", false);
+  h.type("bonjour");
+  check("effacer: pré — le fantôme s'affiche pendant la frappe",
+        h.preedit() == "bonjour", h.preedit());
+  h.key("BackSpace");
+  check("effacer: le fantôme ne remet PAS la lettre effacée",
+        h.preedit() == "bonjou", h.preedit());
+  check("effacer: les candidats restent (Tab choisit encore)",
+        !h.candidates().empty(),
+        h.candidates().empty() ? "vide" : h.candidates()[0]);
+  h.expectCommit("bonjou "); // et l'Espace garde le littéral
+  h.type(" ");
+  check("effacer: l'Espace n'auto-applique plus la complétion refusée", true);
+  // …mais retaper un caractère réarme la proposition.
+  h.type("bonjou");
+  check("effacer: retaper réarme le fantôme", h.preedit() == "bonjour",
+        h.preedit());
+  h.expectCommit("bonjour ");
+  h.type(" ");
 }
 
 void capabilityTests(Harness &h) {
@@ -325,23 +377,147 @@ void interactionTests(Harness &h) {
   h.type(" ");
   check("interaction: Tab puis Espace committe le candidat surligné", true);
 
-  // picker emoji : Entrée SANS navigation prend le 1er candidat (sans espace)
+  // picker emoji : Super+; ouvre, Entrée SANS navigation prend le 1er candidat
+  // (sans espace)
   h.daemon->setReply({"❤️", "💕"}, "❤️", false);
   h.expectCommit("❤️");
-  h.type(":coeur");
+  h.key("Super+semicolon");
+  h.type("coeur");
   h.key("Return");
-  check("emoji: Entrée committe le 1er candidat (sans espace)", true);
+  check("emoji: Super+; puis Entrée committe le 1er candidat", true);
+
+  // ':' tapé n'ouvre PLUS le picker : caractère normal qui file à l'application
+  h.daemon->setReply({"❤️"}, "", false);
+  h.type(":");
+  check("emoji: ':' tapé ne compose plus (pas de picker)", h.preedit().empty(),
+        h.preedit());
+
+  // Super+; EN PLEIN MOT : le fragment est committé tel quel, le picker s'ouvre
+  h.daemon->setReply({"❤️", "💕"}, "", false);
+  h.expectCommit("bonj");
+  h.key("b"); h.key("o"); h.key("n"); h.key("j");
+  h.key("Super+semicolon");
+  check("emoji: Super+; en plein mot committe le fragment puis ouvre",
+        h.panelPreedit() == ":", h.panelPreedit());
+  h.key("Super+semicolon"); // re-presser referme le picker (rien de committé)
+  check("emoji: Super+; referme le picker", h.panelPreedit().empty(),
+        h.panelPreedit());
+
+  // la RECHERCHE reste dans le panneau : l'application ne voit RIEN (avant, le
+  // préedit client écrivait « :coeur » en plein champ de saisie).
+  h.daemon->setReply({"❤️", "💕"}, "", false);
+  h.key("Super+semicolon");
+  // À l'ouverture, le SEUL préedit client est le ping zéro-largeur : c'est lui
+  // qui fait publier au client son rectangle de curseur, sinon les clients
+  // Chromium (Chrome, Discord…) n'en publient jamais et le compositeur pose le
+  // panneau au coin de la fenêtre au lieu du caret (cf pingCaretRect).
+  check("emoji: l'ouverture ping le caret (préedit zéro-largeur)",
+        h.preedit() == kZwsp, h.preedit());
+  h.type("coeur");
+  check("emoji: la requête vit dans le préedit du panneau",
+        h.panelPreedit() == ":coeur", h.panelPreedit());
+  check("emoji: rien de visible n'est écrit dans l'application",
+        withoutPing(h.preedit()).empty(), h.preedit());
+
+  // recherche sans résultat : le picker RESTE ouvert (état vide côté UI), il ne
+  // propose PAS le littéral ':zzz' en candidat.
+  h.daemon->setReply({}, "", false);
+  h.type("zz");
+  check("emoji: aucun résultat → pas de candidat littéral",
+        h.candidates().empty(), std::to_string(h.candidates().size()));
+  check("emoji: aucun résultat → le picker reste ouvert",
+        h.panelPreedit() == ":coeurzz", h.panelPreedit());
+
+  // Échap dans le picker : ferme SANS committer le ':' synthétique ni la
+  // requête (le testfrontend abort sur tout commit non attendu).
+  h.key("Escape");
+  check("emoji: Échap ferme le picker sans rien committer",
+        h.panelPreedit().empty(), h.panelPreedit());
+
+  // picker NU (aucune requête, grille de favoris) : Entrée prend le 1er emoji
+  h.daemon->setReply({"😀", "❤️"}, "", false);
+  h.expectCommit("😀");
+  h.key("Super+semicolon");
+  h.key("Return");
+  check("emoji: Entrée sur le picker nu committe le 1er favori", true);
 
   // grille emoji : → entre en navigation sans Tab, ↓ saute une ligne (+8),
   // Entrée committe le surligné.
   h.daemon->setReply({"e0", "e1", "e2", "e3", "e4", "e5", "e6", "e7", "e8",
                       "e9"}, "", false);
   h.expectCommit("e8");
-  h.type(":x");
+  h.key("Super+semicolon");
+  h.type("x");
   h.key("Right"); // entre dans la grille (index 0)
   h.key("Down");  // +8 → index 8
   h.key("Return");
   check("emoji: →/↓ naviguent la grille sans Tab, Entrée committe", true);
+
+  // BORNAGE de la grille (10 candidats = 1 ligne pleine + 2) : ← sur la 1re
+  // case ne reboucle pas sur la dernière, et ↓ depuis une ligne incomplète
+  // tombe sur la DERNIÈRE case au lieu de repartir en haut.
+  h.daemon->setReply({"e0", "e1", "e2", "e3", "e4", "e5", "e6", "e7", "e8",
+                      "e9"}, "", false);
+  h.expectCommit("e9");
+  h.key("Super+semicolon");
+  h.type("x");
+  h.key("Right"); // index 0
+  h.key("Left");  // borné → reste 0
+  h.key("Down");  // +8 → 8
+  h.key("Down");  // +8 → 16, borné → 9 (dernier)
+  h.key("Return");
+  check("emoji: ←/↓ bornés aux extrémités (pas de wrap en grille)", true);
+
+  // Début / Fin : extrémités directes de la grille
+  h.expectCommit("e0");
+  h.key("Super+semicolon");
+  h.type("x");
+  h.key("End");
+  h.key("Home");
+  h.key("Return");
+  check("emoji: Fin puis Début sautent aux extrémités", true);
+
+  // PAGINATION : 30 candidats = 2 pages de 24. La grille n'en montre que 24,
+  // ↓ depuis la dernière ligne TOURNE LA PAGE (colonne conservée) et Entrée
+  // committe le bon emoji ABSOLU (page 2, colonne 1 → index 24).
+  {
+    std::vector<std::string> many;
+    for (int i = 0; i < 30; i++)
+      many.push_back("e" + std::to_string(i));
+    h.daemon->setReply(many, "", false);
+    h.expectCommit("e24");
+    h.key("Super+semicolon");
+    h.type("x");
+    check("emoji: la grille est bornée à une page de 24",
+          h.candidates().size() == 24,
+          std::to_string(h.candidates().size()));
+    h.key("Right"); // index 0 (page 1)
+    h.key("Down");  // 8
+    h.key("Down");  // 16
+    h.key("Down");  // 24 hors page → page 2, colonne 0
+    check("emoji: page 2 affichée (reste 6 candidats)",
+          h.candidates().size() == 6, std::to_string(h.candidates().size()));
+    check("emoji: indicateur de page", h.auxUp() == "2/2", h.auxUp());
+    h.key("Return");
+    check("emoji: ↓ tourne la page et Entrée committe l'emoji absolu", true);
+  }
+
+  // Page précédente : ↑ depuis la première ligne revient à la page d'avant.
+  {
+    std::vector<std::string> many;
+    for (int i = 0; i < 30; i++)
+      many.push_back("f" + std::to_string(i));
+    h.daemon->setReply(many, "", false);
+    h.expectCommit("f16");
+    h.key("Super+semicolon");
+    h.type("x");
+    h.key("Next");     // Page suivante (PgDn) → page 2
+    check("emoji: PgDn passe en page 2", h.auxUp() == "2/2", h.auxUp());
+    h.key("Up");       // remonte : page 1, dernière ligne, colonne 0 → 16
+    check("emoji: PgUp/↑ revient en page 1", h.auxUp() == "1/2", h.auxUp());
+    h.key("Return");
+    check("emoji: ↑ depuis la 1re ligne revient à la page précédente", true);
+  }
 
   // ponctuation : committe le mot (sans espace) ; le '.' file à l'application
   h.daemon->setReply({"fin"}, "", true);
@@ -453,6 +629,47 @@ void recomposeTests(Harness &h) {
   h.key("BackSpace");
   check("recompose: sans SurroundingText, Backspace file à l'app",
         h.preedit().empty(), h.preedit());
+
+  // RÉGRESSION « ghostty meurt en tapant puis effaçant » : la capacité est
+  // annoncée et le cache de fcitx contient du texte, mais CE client ne l'a
+  // jamais publié (terminal GTK4 : aucun tampon en face). Toute suppression
+  // le fait déréférencer NULL et le TUE → on ne recompose pas.
+  h.reset();
+  h.setCaps(fcitx::CapabilityFlags{fcitx::CapabilityFlag::Preedit,
+                                   fcitx::CapabilityFlag::SurroundingText});
+  h.setSurroundingStale("bonjour ", 8);
+  h.key("BackSpace");
+  check("surrounding jamais publié : aucune édition du texte écrit",
+        h.preedit().empty(), h.preedit());
+
+  // …et dès que le client publie vraiment, la recomposition revient.
+  h.daemon->setReply({"bonjour"}, "", false);
+  h.setSurrounding("bonjour ", 8);
+  h.key("BackSpace");
+  check("surrounding publié : la recomposition marche de nouveau",
+        h.preedit() == "bonjour", h.preedit());
+
+  // RECOMPOSER N'APPLIQUE RIEN. Le mot revient TEL QUEL : reculer sur du texte
+  // déjà écrit est une correction, pas une nouvelle frappe. Avant, effacer
+  // l'espace après « salut » rendait « salutation » (fantôme d'une complétion
+  // longue) et l'Espace suivant committait « salutation » — la barre mot-suivant
+  // marchait, on effaçait, et ça appliquait tout seul.
+  h.reset();
+  h.setCaps(fcitx::CapabilityFlags{fcitx::CapabilityFlag::Preedit,
+                                   fcitx::CapabilityFlag::SurroundingText});
+  h.setSurrounding("", 0);
+  h.daemon->setReply({"salut"}, "", true);
+  h.expectCommit("salut ");
+  h.type("salut");
+  h.type(" ");
+  h.setSurrounding("salut ", 6);
+  h.daemon->setReply({"salutation", "salut"}, "salutation", false);
+  h.key("BackSpace");
+  check("recompose: le mot revient sans fantôme", h.preedit() == "salut",
+        h.preedit());
+  h.expectCommit("salut ");
+  h.type(" ");
+  check("recompose: l'Espace garde le mot recomposé", true);
 }
 
 void multiWordTests(Harness &h) {

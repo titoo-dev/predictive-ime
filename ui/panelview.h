@@ -46,11 +46,15 @@ public:
     // animé (la rotation tourne tant que `loading`).
     // `headerText` (mode liste) : libellé du mode + badge source (« Formel ⚡
     // Groq · ←→ mode »), fourni par l'engine via auxUp. Vide → header par défaut.
+    // MODE GRILLE (`grid`, picker emoji) : `searchText` est la requête en cours
+    // (sans le ':' interne) — elle s'affiche dans le champ de recherche du
+    // picker, pas dans l'application.
     void update(const QStringList &candidates, int highlight,
                 const QVariantList &autoMark = {}, bool composing = false,
                 bool grid = false, const QStringList &labels = {},
                 bool listMode = false, bool loading = false,
-                const QString &headerText = {});
+                const QString &headerText = {},
+                const QString &searchText = {});
     // Démarre le FONDU de fermeture ; false si la barre n'était pas visible.
     // Pendant le fondu, animating() reste vrai ; à la fin hideDone() == true
     // et l'appelant démappe la surface.
@@ -84,7 +88,9 @@ private:
 
     Anim appear_;             // 0→1 à l'apparition de la barre
     Anim hide_;               // →0 au fondu de fermeture
-    Anim hl_;                 // position (flottante) du pill de surlignage
+    Anim hl_;                 // progression 0→1 du pill entre hlFrom_ et hlTo_
+    int hlFrom_ = -1;         // case de DÉPART du morph (index dans la page)
+    int hlTo_ = -1;           // case d'ARRIVÉE
     Anim fade_{1.0, 1.0, {}, 0}; // fondu du CONTENU au refresh passif (async)
     bool shown_ = false;
     bool hiding_ = false;
@@ -98,5 +104,6 @@ private:
     bool listMode_ = false;   // rendu liste verticale (reformulation)
     bool loading_ = false;    // génération en cours → spinner animé
     QString headerText_;      // mode liste : libellé mode + badge source
+    QString searchText_;      // mode grille : requête du picker emoji
     Clock::time_point spinStart_{}; // origine de la rotation du spinner
 };
