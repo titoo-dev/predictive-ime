@@ -9,8 +9,8 @@ autocorrection, next-word prediction and an emoji picker. Offline, no telemetry.
 > Typing `je vais au travail aujourd'`, accepting the `aujourd'hui` completion, then **Super+;** `coeur` → ❤️. The candidate bar shows at most five ranked suggestions.
 
 The core runs on any stock fcitx5 (using its default candidate bar). The
-optional Qt Quick candidate bar (`qmlpanel`) needs a patched fcitx5 —
-see [docs/patched-fcitx5.md](docs/patched-fcitx5.md).
+optional caret-positioned Qt Quick candidate bar is a separate project:
+[fcitx5-qmlpanel](https://github.com/titoo-dev/fcitx5-qmlpanel).
 
 ## Install
 
@@ -24,7 +24,7 @@ see [docs/patched-fcitx5.md](docs/patched-fcitx5.md).
 **2. Build and install**
 
 ```sh
-cmake -B build -DBUILD_UI=OFF
+cmake -B build
 cmake --build build -j
 sudo cmake --install build
 ```

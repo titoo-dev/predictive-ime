@@ -8,8 +8,8 @@ on:
 # Proves the PORTABLE CORE (engine + daemon + preferences) builds and installs
 # against the STOCK fcitx5 of every major distro family. Package sets here were
 # each verified in a clean container on 2026-06-17 (see the spec's verification
-# log). qmlpanel (BUILD_UI=ON) is excluded: it needs a patched/upstream fcitx5
-# and gets its own job once that path lands (P0).
+# log). The Qt Quick panel is a separate project with its own CI:
+# https://github.com/titoo-dev/fcitx5-qmlpanel.
 jobs:
   core:
     name: core (${{ matrix.name }})
@@ -49,8 +49,8 @@ jobs:
       - name: Install build dependencies
         run: ${{ matrix.deps }}
       - uses: actions/checkout@v4
-      - name: Configure (core, BUILD_UI=OFF)
-        run: cmake -S . -B build -DBUILD_UI=OFF -DCMAKE_INSTALL_PREFIX=/usr
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_INSTALL_PREFIX=/usr
       - name: Build
         run: cmake --build build -j"$(nproc)"
       - name: Install (staged) and list artifacts

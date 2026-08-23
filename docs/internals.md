@@ -672,130 +672,21 @@ nix build ./ime#checks.x86_64-linux.panel
 - [ ] (Polish) auto-accent quand la forme sans accent est au dico (ex. `garcon`
       reste `garcon` car présent dans le corpus) — limite de qualité du corpus.
 
-## UI QML — barre de candidats (`ui/`)
+## UI QML — barre de candidats
 
-```sh
-nix build ./ime#fcitx5-patched   # fcitx5 + API waylandim publique (patch 4 lignes)
-nix build ./ime#qmlpanel         # l'addon UI Qt Quick (libqmlpanel)
-```
-
-Architecture : popup-surface input-method (`zwp_input_popup_surface_v2`)
-positionnée au caret par le compositeur (impossible avec un addon externe
-vanilla → patch fcitx5 `INSTALL` + `getInputMethodV2Raw`,
-cf `ui/waylandim-public.patch`). Rendu **software** offscreen
-(`QQuickView::grabWindow` → `QImage` → buffer `wl_shm`), sans event-loop Qt
-(monothread, comme le module wayland).
-
-**Surlignage** : le pill n'interpole PAS un index flottant mais une
-progression `hlT` 0→1 entre deux cases (`hlFrom` → `hlTo`), et QML lerpe
-directement leurs positions. Avec un index flottant, un saut de ligne dans la
-grille (±8) faisait défiler le pill par toutes les cases intermédiaires : il
-partait à droite au lieu de descendre. Maintenant le trajet est une droite,
-diagonale comprise (voir la capture `picker-morph-mid.png` du rendu de test).
-
-**Animations** : l'état (apparition, position du pill, fondu de fermeture)
-est avancé côté C++ (steady_clock + ease-out cubic), exposé au QML en context
-properties ; tant qu'une animation court, `qmlui.cpp` redemande une frame au
-compositeur (`wl_surface_frame`) et re-rend — le contrat Wayland exact, zéro
-timer. Apparition 140 ms, pill 110 ms, **fade-out 90 ms** avant le démappage.
-La surface/popup **persistent** entre les mots (unmap par buffer NULL) — zéro
-churn pendant la frappe. Un **indicateur de mode** discret (barrette accent =
-composition, neutre = suggestion passive) ouvre la barre à gauche.
-`QMLPANEL_ANIM_SCALE` étire les durées (debug/captures déterministes).
-
-Design **compact** (barre 34 px, chips 26 px, police 14 px) : chips
-horizontales denses (façon Gboard), **pill accent matugen** glissant sous le
-candidat surligné, liseré `outline`, police Maple Mono NF, emojis en fonte
-couleur (17 px). Couleurs lues de
-`~/.cache/DankMaterialShell/dms-colors.json` (live-reload au changement de
-thème), override via `~/.config/fcitx5/qmlpanel/colors.json`
-(`{surface,onSurface,accent,onAccent,outline,surfaceVariant,onSurfaceVariant,
-secondaryContainer,surfaceTint,tertiary,scrim}` + `mode` et `opacity`).
-
-**Palette dynamique DMS** : les rôles Material 3 sont pris dans
-`colors.{dark,light}` de matugen — `surface_container_high` (carte),
-`on_surface`, `primary`/`on_primary` (accent), `outline_variant`,
-`surface_container_highest` (champ de recherche), `on_surface_variant`,
-`secondary_container` (case sélectionnée), et `surface_tint` (= primary : la
-teinte du reflet, donc **la couleur du fond d'écran**), `tertiary` (2e accent :
-pagination du picker), `scrim` (ombre). Le mode clair/sombre se **vote** sur les
-16 couleurs `dank16` (`default` == `dark` ou == `light`) au lieu de trancher sur
-la première qui diffère : DMS écrit certaines entrées identiques dans les deux
-modes, et une seule suffisait à inverser tout le thème du panneau.
-
-**Style acrylique** (verre) : la carte est translucide — `glass` =
-`surface` + alpha (0,74 sombre / 0,82 clair, réglable par `"opacity"` dans
-l'override ou `QMLPANEL_OPACITY`), plus un **reflet** dégradé teinté
-`surface_tint` en haut, une **arête interne** claire (`on_surface` à 16 %), un
-liseré externe adouci et un **halo** d'ombre dans la marge de 5 px (deux anneaux
-`scrim` : le renderer software n'a ni DropShadow ni shader). L'alpha est porté
-par les COULEURS, jamais par `opacity` sur la carte — sinon les glyphes se
-délavaient aussi. Tout est dérivé de la palette, donc le verre suit matugen.
-Le vrai flou vient du compositeur : sous Hyprland il faut
-`decoration:blur:input_methods = true` (à côté de `blur.popups`) — sans lui, le
-panneau reste du verre *teinté* (le fond se voit net à travers), ce qui est
-lisible mais pas dépoli. `input_methods_ignorealpha` (0,2 par défaut) écarte du
-flou les pixels très transparents : le halo disparaît proprement quand le flou
-est actif, la carte reste. `verre-picker.png` / `verre-barre-mots.png`
-(cf `panel_preview`) composent le panneau sur un faux fond d'application —
-l'alpha d'un PNG à fond transparent ne se juge pas.
-
-Trois rendus dans la même surface, choisis par `gridMode`/`listMode` :
-**compact** (mots), **picker emoji** (Material 3 : champ de recherche pleine
-rondeur, grille 8 colonnes de cases 32 px, sélection `secondaryContainer`,
-aide clavier, état vide — cf section Emoji picker) et **liste** (reformulation).
-La loupe du champ de recherche est **dessinée** (deux rectangles) : le rendu est
-software et la fonte du panneau n'a pas toujours le glyphe.
-
-Un binaire de test rend ces états en PNG **sans compositeur** :
-`nix build ./ime#checks.x86_64-linux.panel` (source `ui/panel_preview.cpp`).
-Il sert de garde-fou — une erreur QML donne un composant nul, donc un panneau
-muet qui avale les frappes — et de relecture visuelle du design.
-
-**Évitement du texte** : le compositeur place la popup au caret ; s'il la pose
-SUR la ligne en cours de frappe (bas d'écran, rect curseur dégénéré côté
-app...), l'addon le détecte via l'événement `text_input_rectangle` (position
-de la ligne de texte dans nos coordonnées de surface) et décale la barre dans
-un canvas transparent — collée au-dessus de la ligne si la place existe, sinon
-juste en dessous. Hystérésis jusqu'au démappage (pas d'oscillation
-compositeur ↔ resize). Le texte reste visible à travers le transparent.
-
-**Ping du caret** (« le panneau ne suit pas le curseur dans Chrome/Discord ») :
-le compositeur ne place la popup au caret que si le client a publié son
-rectangle de curseur (`text-input-v3`, `set_cursor_rectangle`). Les clients
-Chromium (Chrome, Discord, VS Code…) ne le publient QUE quand une **préédition
-change** — c'est leur moteur de rendu qui remonte la position du caret, et il
-ne le fait que si l'état de saisie a bougé. Trace protocole d'un champ Chrome
-(`--enable-wayland-ime`, `WAYLAND_DEBUG=1`) :
-
-```
-enter / enable / commit                        ← focus : AUCUN rectangle
-preedit_string("b") … 45 ms → set_cursor_rectangle(406, 390, 0, 22)
-```
-
-La barre de mots suit donc le caret (elle pose un préedit client à chaque
-frappe), mais les panneaux qui laissent le préedit client VIDE — picker emoji
-(la requête vit dans le champ de recherche du panneau) et menu de langue —
-ne déclenchaient rien : faute de rectangle, Hyprland ancre la popup sur un bloc
-de **repli** de 500×500 au coin haut-gauche du client
-(`CInputPopup::updateBox`, branche `!cursorRect`) et le panneau restait scotché
-là. D'où `pingCaretRect` (engine) : à l'ouverture de ces panneaux, une
-préédition **zéro-largeur** (U+200B) est posée 200 ms — le temps que le client
-recalcule et publie sa position — puis effacée. Invisible dans l'application
-(aucun glyphe, le caret ne bouge pas), et rien ne peut être committé : la
-composition ne survit pas au ping (un clic ailleurs fait valider par Chromium
-la composition en cours, d'où la durée bornée). Pas de ping quand du texte est
-**sélectionné** : une composition remplace la sélection, et la reformulation en
-dépend.
-
-Activer : lancer fcitx5 patché avec `--ui qmlpanel` (sinon classicui reste
-l'UI). Test visuel headless : `./test-ui.sh` (PNG dans `/tmp/ime-ui/`).
+La barre de candidats Qt Quick (`qmlpanel`, popup au caret, picker emoji,
+mode liste) est un projet séparé — architecture, palette, animations et
+évitement du texte documentés dans son propre repo :
+<https://github.com/titoo-dev/fcitx5-qmlpanel> (`docs/internals.md`).
 
 ## Activer (quand on passera au test live)
 
 Dans la config système : importer `nixosModules.default` du flake + s'assurer
 de `i18n.inputMethod.type = "fcitx5"`. Le module ajoute l'addon à
 `i18n.inputMethod.fcitx5.addons` et lance `predictord` en service utilisateur.
+Pour la barre QML au caret, composer en plus le flake
+[fcitx5-qmlpanel](https://github.com/titoo-dev/fcitx5-qmlpanel) (overlay
+fcitx5 patché + addon `qmlpanel`, puis `--ui qmlpanel`).
 
 **Une seule source de lancement de fcitx5.** Le paquet fcitx5 installe un
 autostart XDG (`/etc/xdg/autostart/org.fcitx.Fcitx5.desktop`, sans

@@ -14,19 +14,13 @@ include(GNUInstallDirs)
 
 option(BUILD_ENGINE      "Build the fcitx5 'predict' engine addon"          ON)
 option(BUILD_DAEMON      "Build the n-gram prediction daemon (predictord)"  ON)
-option(BUILD_UI          "Build the Qt Quick candidate panel (qmlpanel)"    ON)
 option(BUILD_PREFERENCES "Build the Qt preferences app (ime-preferences)"   ON)
 option(INSTALL_SYSTEMD_USER_UNIT "Install a systemd user service for the daemon" ON)
 
-# NOTE on qmlpanel (BUILD_UI): the caret-positioned candidate bar needs the raw
-# zwp_input_method_v2 object, which a STOCK fcitx5 does NOT expose to external
-# addons. Verified by probing fcitx5-devel on 5.1.7/5.1.13/5.1.17/5.1.19: they
-# ship neither the waylandim public header, the ZwpInputMethodV2 wrapper, nor
-# rawPointer. So qmlpanel REQUIRES a fcitx5 carrying the waylandim public API —
-# patched (ui/waylandim-public.patch, as the flake does) or, once merged,
-# upstream. The portable CORE (engine + daemon + preferences) needs none of this
-# and builds against any stock fcitx5: pass -DBUILD_UI=OFF.
-# See docs/specs/2026-06-17-cross-distro-oss-design.md.
+# The optional Qt Quick candidate panel (qmlpanel) lives in its own project —
+# it needs a patched fcitx5 (waylandim public API), which the core does not:
+# https://github.com/titoo-dev/fcitx5-qmlpanel. Everything here builds against
+# any stock fcitx5.
 
 if(BUILD_ENGINE)
   add_subdirectory(engine)
@@ -34,11 +28,8 @@ endif()
 if(BUILD_DAEMON)
   add_subdirectory(daemon)
 endif()
-if(BUILD_UI)
-  add_subdirectory(ui)
-endif()
 if(BUILD_PREFERENCES)
-  add_subdirectory(ui/preferences)
+  add_subdirectory(preferences)
 endif()
 
 if(INSTALL_SYSTEMD_USER_UNIT AND BUILD_DAEMON)
@@ -53,5 +44,4 @@ if(INSTALL_SYSTEMD_USER_UNIT AND BUILD_DAEMON)
 endif()
 
 message(STATUS "predictive-ime: engine=${BUILD_ENGINE} daemon=${BUILD_DAEMON} "
-               "ui=${BUILD_UI} preferences=${BUILD_PREFERENCES} "
-               "(ui requires a patched/upstream fcitx5 — see comment above)")
+               "preferences=${BUILD_PREFERENCES}")

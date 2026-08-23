@@ -142,51 +142,20 @@
         python3 ${./daemon/build_emoji.py} ${emojiTest} $out/emoji.tsv \
           ${cldrEmojiFr} ${cldrEmojiEn}
       '';
-      # fcitx5 patché : expose l'accès brut à zwp_input_method_v2 aux addons UI
-      # externes (installe waylandim_public.h + le module cmake WaylandIM), pour
-      # que notre UI QML puisse créer la popup-surface positionnée au caret.
-      fcitx5-patched = pkgs.fcitx5.overrideAttrs (old: {
-        patches = (old.patches or [ ]) ++ [ ./ui/waylandim-public.patch ];
-      });
+      # NOTE : la barre de candidats Qt Quick (qmlpanel) vit dans son propre
+      # projet — elle exige un fcitx5 patché, contrairement au core :
+      # https://github.com/titoo-dev/fcitx5-qmlpanel (paquets qmlpanel,
+      # fcitx5-patched + overlay NixOS à composer avec ce flake-ci).
     in
     {
       packages.${system} = {
-        # fcitx5 avec l'API waylandim publique (pour l'UI QML).
-        fcitx5-patched = fcitx5-patched;
-
-        # Addon UI : popup-surface input-method au caret, rendu Qt Quick (QML).
-        qmlpanel = pkgs.stdenv.mkDerivation {
-          pname = "fcitx5-qmlpanel";
-          version = "0.1";
-          src = ./ui;
-          nativeBuildInputs = [
-            pkgs.cmake
-            pkgs.kdePackages.extra-cmake-modules
-            pkgs.pkg-config
-            pkgs.wayland-scanner
-            pkgs.qt6.qtbase
-            pkgs.qt6.qtdeclarative
-          ];
-          buildInputs = [
-            fcitx5-patched
-            pkgs.wayland
-            pkgs.qt6.qtbase
-            pkgs.qt6.qtdeclarative
-          ];
-          dontWrapQtApps = true; # addon (plugin .so), pas une appli : chemins bakés
-          cmakeFlags = [
-            "-DQMLPANEL_QT_PLUGIN_PATH=${pkgs.qt6.qtbase}/lib/qt-6/plugins:${pkgs.qt6.qtdeclarative}/lib/qt-6/plugins"
-            "-DQMLPANEL_QML_IMPORT_PATH=${pkgs.qt6.qtdeclarative}/lib/qt-6/qml"
-          ];
-        };
-
         # Popover de préférences (langue des suggestions + interrupteurs) :
         # petite appli Qt Quick qui édite ~/.config/ime-predictord/config.json
         # — rechargé à chaud par le daemon et l'engine, effet immédiat.
         ime-preferences = pkgs.stdenv.mkDerivation {
           pname = "ime-preferences";
           version = "0.1";
-          src = ./ui/preferences;
+          src = ./preferences;
           nativeBuildInputs = [
             pkgs.cmake
             pkgs.pkg-config
@@ -290,48 +259,6 @@
           installPhase = "touch $out";
         };
 
-        # Barre QML : rend les états (picker emoji, barre de mots) en PNG dans
-        # $out. Une erreur QML rend le composant nul — donc un panneau muet qui
-        # AVALE les frappes — et sort ici en échec. Les PNG restent consultables
-        # (`nix build .#checks.x86_64-linux.panel`) pour relire le design.
-        panel = pkgs.stdenv.mkDerivation {
-          pname = "fcitx5-qmlpanel-render-test";
-          version = "0.1";
-          src = ./ui;
-          nativeBuildInputs = [
-            pkgs.cmake
-            pkgs.kdePackages.extra-cmake-modules
-            pkgs.pkg-config
-            pkgs.wayland-scanner
-            pkgs.qt6.qtbase
-            pkgs.qt6.qtdeclarative
-          ];
-          buildInputs = [
-            fcitx5-patched
-            pkgs.wayland
-            pkgs.qt6.qtbase
-            pkgs.qt6.qtdeclarative
-            pkgs.noto-fonts-color-emoji
-          ];
-          dontWrapQtApps = true;
-          cmakeFlags = [
-            "-DBUILD_TESTING=ON"
-            "-DQMLPANEL_QT_PLUGIN_PATH=${pkgs.qt6.qtbase}/lib/qt-6/plugins:${pkgs.qt6.qtdeclarative}/lib/qt-6/plugins"
-            "-DQMLPANEL_QML_IMPORT_PATH=${pkgs.qt6.qtdeclarative}/lib/qt-6/qml"
-          ];
-          doCheck = true;
-          checkPhase = ''
-            runHook preCheck
-            export XDG_RUNTIME_DIR=$(mktemp -d) HOME=$(mktemp -d)
-            export FONTCONFIG_FILE=${pkgs.makeFontsConf {
-              fontDirectories = [ pkgs.noto-fonts-color-emoji pkgs.dejavu_fonts ];
-            }}
-            mkdir -p shots && ./panel_preview shots
-            runHook postCheck
-          '';
-          installPhase = "mkdir -p $out && cp shots/*.png $out/";
-        };
-
         # Daemon : la suite comportementale existante (modèle synthétique).
         daemon = pkgs.runCommand "ime-predictord-test"
           { nativeBuildInputs = [ pkgs.python3 ]; } ''
@@ -343,10 +270,11 @@
 
       # Module NixOS : branche l'addon dans fcitx5 + lance le daemon (service
       # utilisateur). À importer dans la config + `i18n.inputMethod.type="fcitx5"`.
-      # Module turn-key : importe-le et l'IME prédictif + sa barre QML sont
-      # câblés. Conçu SÛR pour le clavier (cf README, section sécurité).
-      #   - Sur Hyprland (WM nu), lance fcitx5 toi-même pour choisir l'UI QML :
-      #       hl.exec_cmd("fcitx5 -d --ui qmlpanel")   (dans hyprland.start)
+      # Module turn-key : importe-le et l'IME prédictif est câblé (barre de
+      # candidats fcitx5 standard). Conçu SÛR pour le clavier (cf README).
+      #   - Pour la barre QML au caret, composer avec le flake
+      #     github:titoo-dev/fcitx5-qmlpanel (overlay fcitx5 patché + addon,
+      #     puis lancer fcitx5 avec --ui qmlpanel).
       #   - Pour activer la prédiction en permanence : DefaultIM = "predict".
       nixosModules.default =
         { config, lib, pkgs, ... }:
@@ -367,16 +295,6 @@
             };
           };
           config = {
-          # fcitx5 patché : expose getInputMethodV2Raw aux addons UI → qmlpanel
-          # peut créer la popup-surface placée au caret. Patch minimal (4 lignes).
-          nixpkgs.overlays = [
-            (final: prev: {
-              fcitx5 = prev.fcitx5.overrideAttrs (old: {
-                patches = (old.patches or [ ]) ++ [ ./ui/waylandim-public.patch ];
-              });
-            })
-          ];
-
           i18n.inputMethod = {
             enable = true;
             type = "fcitx5";
@@ -387,11 +305,10 @@
               waylandFrontend = true;
               addons = [
                 self.packages.${system}.fcitx5-predict
-                self.packages.${system}.qmlpanel
               ];
               # Profil SÛR par défaut : clavier français d'abord (saisie 100%
-              # normale), predict en second → Ctrl+Espace active la prédiction
-              # (et la barre QML). Mettre DefaultIM="predict" pour l'avoir d'office.
+              # normale), predict en second → Ctrl+Espace active la prédiction.
+              # Mettre DefaultIM="predict" pour l'avoir d'office.
               settings.inputMethod = {
                 "Groups/0" = {
                   Name = "Default";
