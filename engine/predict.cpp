@@ -690,7 +690,7 @@ struct PredictState : public fcitx::InputContextProperty {
 class PredictCandidate : public fcitx::CandidateWord {
 public:
   // `autoApply` : ce candidat sera appliqué par l'Espace — marqué en GRAS dans
-  // le Text fcitx, l'UI (qmlpanel) le rend distinctement pour que
+  // le Text fcitx, l'UI (Opale) le rend distinctement pour que
   // l'utilisateur sache toujours ce que l'Espace va faire.
   explicit PredictCandidate(std::string text, bool autoApply = false)
       : text_(std::move(text)) {

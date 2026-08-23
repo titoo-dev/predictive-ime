@@ -142,9 +142,9 @@
         python3 ${./daemon/build_emoji.py} ${emojiTest} $out/emoji.tsv \
           ${cldrEmojiFr} ${cldrEmojiEn}
       '';
-      # NOTE : la barre de candidats Qt Quick (qmlpanel) vit dans son propre
+      # NOTE : la barre de candidats Qt Quick (Opale) vit dans son propre
       # projet — elle exige un fcitx5 patché, contrairement au core :
-      # https://github.com/titoo-dev/fcitx5-qmlpanel (paquets qmlpanel,
+      # https://github.com/titoo-dev/opale (paquets opale,
       # fcitx5-patched + overlay NixOS à composer avec ce flake-ci).
     in
     {
@@ -273,8 +273,8 @@
       # Module turn-key : importe-le et l'IME prédictif est câblé (barre de
       # candidats fcitx5 standard). Conçu SÛR pour le clavier (cf README).
       #   - Pour la barre QML au caret, composer avec le flake
-      #     github:titoo-dev/fcitx5-qmlpanel (overlay fcitx5 patché + addon,
-      #     puis lancer fcitx5 avec --ui qmlpanel).
+      #     github:titoo-dev/opale (overlay fcitx5 patché + addon,
+      #     puis lancer fcitx5 avec --ui opale).
       #   - Pour activer la prédiction en permanence : DefaultIM = "predict".
       nixosModules.default =
         { config, lib, pkgs, ... }:

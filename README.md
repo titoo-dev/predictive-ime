@@ -10,7 +10,7 @@ autocorrection, next-word prediction and an emoji picker. Offline, no telemetry.
 
 The core runs on any stock fcitx5 (using its default candidate bar). The
 optional caret-positioned Qt Quick candidate bar is a separate project:
-[fcitx5-qmlpanel](https://github.com/titoo-dev/fcitx5-qmlpanel).
+[Opale](https://github.com/titoo-dev/opale).
 
 ## Install
 

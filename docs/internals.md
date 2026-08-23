@@ -674,10 +674,10 @@ nix build ./ime#checks.x86_64-linux.panel
 
 ## UI QML — barre de candidats
 
-La barre de candidats Qt Quick (`qmlpanel`, popup au caret, picker emoji,
+La barre de candidats Qt Quick (**Opale**, popup au caret, picker emoji,
 mode liste) est un projet séparé — architecture, palette, animations et
 évitement du texte documentés dans son propre repo :
-<https://github.com/titoo-dev/fcitx5-qmlpanel> (`docs/internals.md`).
+<https://github.com/titoo-dev/opale> (`docs/internals.md`).
 
 ## Activer (quand on passera au test live)
 
@@ -685,8 +685,8 @@ Dans la config système : importer `nixosModules.default` du flake + s'assurer
 de `i18n.inputMethod.type = "fcitx5"`. Le module ajoute l'addon à
 `i18n.inputMethod.fcitx5.addons` et lance `predictord` en service utilisateur.
 Pour la barre QML au caret, composer en plus le flake
-[fcitx5-qmlpanel](https://github.com/titoo-dev/fcitx5-qmlpanel) (overlay
-fcitx5 patché + addon `qmlpanel`, puis `--ui qmlpanel`).
+[Opale](https://github.com/titoo-dev/opale) (overlay
+fcitx5 patché + addon `opale`, puis `--ui opale`).
 
 **Une seule source de lancement de fcitx5.** Le paquet fcitx5 installe un
 autostart XDG (`/etc/xdg/autostart/org.fcitx.Fcitx5.desktop`, sans

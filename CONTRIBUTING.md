@@ -12,8 +12,8 @@ method (FR/EN). Code is MIT; the model is built from open corpora (see
 | `daemon/` | `predictord` n-gram daemon + Python model builders | nlohmann_json (C++17); python3 (builders) |
 | `preferences/` | `ime-preferences` Qt app | Qt6 |
 
-The caret-positioned Qt Quick candidate bar (`qmlpanel`) lives in its own
-project: [fcitx5-qmlpanel](https://github.com/titoo-dev/fcitx5-qmlpanel).
+The caret-positioned Qt Quick candidate bar lives in its own project:
+[Opale](https://github.com/titoo-dev/opale).
 
 The engine talks to the daemon over a Unix socket (JSON protocol, documented in
 [`docs/internals.md`](docs/internals.md)). Each component builds standalone or
