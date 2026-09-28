@@ -65,6 +65,7 @@ Source: "{#BuildDir}\daemon\Release\predictord.exe"; DestDir: "{app}"; Flags: ig
 Source: "{#BuildDir}\daemon\Release\*.dll";          DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 ; Scripts d'exploitation (modèle, tâche de session, sondes).
 Source: "..\..\scripts\setup-windows.ps1";  DestDir: "{app}\scripts"; Flags: ignoreversion
+Source: "..\..\scripts\PredictLayout.ps1";  DestDir: "{app}\scripts"; Flags: ignoreversion
 Source: "..\..\scripts\probe-daemon.ps1";   DestDir: "{app}\scripts"; Flags: ignoreversion
 Source: "..\..\scripts\try-daemon.ps1";     DestDir: "{app}\scripts"; Flags: ignoreversion
 Source: "..\..\README.md";                  DestDir: "{app}"; Flags: ignoreversion

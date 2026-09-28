@@ -31,6 +31,15 @@ void openConfigInEditor() {
                   nullptr, SW_SHOWNORMAL);
 }
 
+// Trace de la disposition obtenue. JAMAIS de correction ici : basculer le HKL
+// du thread (ActivateKeyboardLayout) fait resélectionner la disposition simple
+// par le sélecteur de Windows — Predict était éjecté à chaque activation.
+void logLayout() {
+  layout::Status s = layout::current();
+  dbg("disposition lang=%04x active=%ls voulue=%ls %s", unsigned(s.lang),
+      s.active.c_str(), s.wanted.c_str(), s.matches ? "OK" : "DIFFERENTE");
+}
+
 std::wstring wideOf(const std::string &utf8) {
   auto u16 = core::toUtf16(utf8);
   return std::wstring(reinterpret_cast<const wchar_t *>(u16.data()),
@@ -523,13 +532,8 @@ STDMETHODIMP CTextService::ActivateEx(ITfThreadMgr *tm, TfClientId cid,
     }
     comp->Release();
   }
-  // Trace de la disposition réellement obtenue — postée : TSF ne bascule le
-  // HKL du thread qu'APRÈS le retour d'ActivateEx.
-  postToMain([] {
-    layout::Status s = layout::current();
-    dbg("disposition lang=%04x active=%ls voulue=%ls %s", unsigned(s.lang),
-        s.active.c_str(), s.wanted.c_str(), s.matches ? "OK" : "DIFFERENTE");
-  });
+  // Posté : TSF ne bascule le HKL du thread qu'APRÈS le retour d'ActivateEx.
+  postToMain([] { logLayout(); });
   // Indicateur dans la barre des tâches.
   ITfLangBarItemMgr *lbm = nullptr;
   if (SUCCEEDED(threadMgr_->QueryInterface(IID_ITfLangBarItemMgr,

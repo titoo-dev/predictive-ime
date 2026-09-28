@@ -15,7 +15,7 @@ namespace win {
 namespace {
 
 constexpr DWORD kSinkCookie = 0x50524544; // un seul abonné : cookie fixe
-enum MenuId : UINT { kMenuToggle = 1, kMenuSettings, kMenuHelp, kMenuFixLayout };
+enum MenuId : UINT { kMenuToggle = 1, kMenuSettings, kMenuHelp };
 constexpr wchar_t kHelpUrl[] = L"https://github.com/titoo-dev/predictive-ime";
 
 void addItem(ITfMenu *menu, UINT id, DWORD flags, const wchar_t *text) {
@@ -123,21 +123,13 @@ STDMETHODIMP CLangBarButton::InitMenu(ITfMenu *menu) {
   addItem(menu, kMenuToggle, enabled() ? TF_LBMENUF_CHECKED : 0,
           L"Prédiction activée");
   addItem(menu, 0, TF_LBMENUF_SEPARATOR, nullptr);
-  // Disposition clavier : affichée, et réparable quand elle ne correspond pas
-  // à celle des Paramètres (cf KeyboardLayout.h).
+  // Disposition clavier réellement active (cf KeyboardLayout.h) —
+  // informative : la corriger depuis le service éjecte Predict.
   layout::Status s = layout::current();
   if (!s.active.empty()) {
     std::wstring line = (s.matches ? L"Disposition : " : L"⚠ Disposition : ") +
                         layout::displayName(s.active);
     addItem(menu, 0, TF_LBMENUF_GRAYED, line.c_str());
-  }
-  if (layoutFixed_) {
-    addItem(menu, 0, TF_LBMENUF_GRAYED,
-            L"Disposition corrigée — effet à la prochaine ouverture de session");
-  } else if (!s.matches && !s.wanted.empty()) {
-    std::wstring fix =
-        L"Utiliser ma disposition (" + layout::displayName(s.wanted) + L")";
-    addItem(menu, kMenuFixLayout, 0, fix.c_str());
   }
   addItem(menu, 0, TF_LBMENUF_SEPARATOR, nullptr);
   addItem(menu, kMenuSettings, 0, L"Réglages…");
@@ -154,9 +146,6 @@ STDMETHODIMP CLangBarButton::OnMenuSelect(UINT id) {
     break;
   case kMenuSettings:
     svc_->openSettings();
-    break;
-  case kMenuFixLayout:
-    layoutFixed_ = layout::repair() > 0;
     break;
   case kMenuHelp:
     ::ShellExecuteW(nullptr, L"open", kHelpUrl, nullptr, nullptr,

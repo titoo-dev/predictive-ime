@@ -7,11 +7,8 @@
 namespace win::layout {
 namespace {
 
-// Langues sous lesquelles le profil Predict est inscrit (cf dllmain.cpp).
-const LANGID kProfileLangs[] = {MAKELANGID(LANG_FRENCH, SUBLANG_FRENCH),
-                                MAKELANGID(LANG_ENGLISH, SUBLANG_ENGLISH_US)};
-
-constexpr wchar_t kSubstitutes[] = L"Keyboard Layout\\Substitutes";
+constexpr wchar_t kLayouts[] =
+    L"SYSTEM\\CurrentControlSet\\Control\\Keyboard Layouts";
 
 std::wstring lower(std::wstring s) {
   for (auto &c : s)
@@ -26,13 +23,6 @@ bool isKlid(const std::wstring &s) {
     if (!std::iswxdigit(c))
       return false;
   return true;
-}
-
-// « 0000LLLL » : la disposition de base que TSF associe au profil de langue.
-std::wstring baseKlid(LANGID lang) {
-  wchar_t buf[9];
-  swprintf_s(buf, L"0000%04x", unsigned(lang));
-  return buf;
 }
 
 bool readString(HKEY root, const wchar_t *sub, const wchar_t *name,
@@ -102,14 +92,18 @@ Status current() {
   auto mine = userLayouts(s.lang);
   if (!mine.empty()) {
     s.wanted = mine.front();
-    s.matches = s.active.empty() || contains(mine, s.active);
+    s.matches = s.active.empty() || isUserLayout(s.active, mine);
   }
   return s;
 }
 
+bool isUserLayout(const std::wstring &klid,
+                  const std::vector<std::wstring> &mine) {
+  return contains(mine, klid);
+}
+
 std::wstring displayName(const std::wstring &klid) {
-  const std::wstring sub =
-      L"SYSTEM\\CurrentControlSet\\Control\\Keyboard Layouts\\" + klid;
+  const std::wstring sub = std::wstring(kLayouts) + L"\\" + klid;
   std::wstring indirect;
   if (readString(HKEY_LOCAL_MACHINE, sub.c_str(), L"Layout Display Name",
                  indirect)) {
@@ -123,46 +117,19 @@ std::wstring displayName(const std::wstring &klid) {
   return klid;
 }
 
-int repair(bool apply, std::vector<std::wstring> *plan) {
-  int changes = 0;
-  for (LANGID lang : kProfileLangs) {
-    auto mine = userLayouts(lang);
-    if (mine.empty())
-      continue; // langue absente des Paramètres : rien à aligner
-    const std::wstring base = baseKlid(lang);
-    std::wstring effective = base;
-    readString(HKEY_CURRENT_USER, kSubstitutes, base.c_str(), effective);
-    // Déjà une disposition de l'utilisateur : on ne touche à rien. C'est ce
-    // qui garantit qu'on ne modifie JAMAIS une disposition qu'il emploie.
-    if (contains(mine, effective))
+HKL substituteFrom(LANGID lang, const std::vector<std::wstring> &mine) {
+  for (const std::wstring &k : mine) {
+    if (!isKlid(k))
       continue;
-    const std::wstring &want = mine.front();
-    if (plan)
-      plan->push_back(base + L" : " + effective + L" -> " + want);
-    if (!apply) {
-      changes++;
-      continue;
-    }
-    LONG r;
-    if (lower(want) == lower(base)) {
-      // La base EST sa disposition : c'est la substitution qui est périmée.
-      r = ::RegDeleteKeyValueW(HKEY_CURRENT_USER, kSubstitutes, base.c_str());
-    } else {
-      r = ::RegSetKeyValueW(HKEY_CURRENT_USER, kSubstitutes, base.c_str(),
-                            REG_SZ, want.c_str(),
-                            DWORD((want.size() + 1) * sizeof(wchar_t)));
-    }
-    if (r == ERROR_SUCCESS)
-      changes++;
+    // Mot bas du KLID = langue de la disposition (0000040C, 0001040C « AZERTY
+    // standard »… sont françaises). Une autre langue serait ignorée par TSF.
+    const unsigned long klid = std::wcstoul(k.c_str(), nullptr, 16);
+    if (LOWORD(klid) == lang)
+      return reinterpret_cast<HKL>(static_cast<ULONG_PTR>(klid));
   }
-  return changes;
+  return nullptr;
 }
+
+HKL substituteFor(LANGID lang) { return substituteFrom(lang, userLayouts(lang)); }
 
 } // namespace win::layout
-
-// Point d'entrée rundll32 — l'installeur et setup-windows.ps1 l'appellent
-// dans le contexte de l'utilisateur :
-//   rundll32.exe predict-tsf.dll,FixKeyboardLayouts
-extern "C" void CALLBACK FixKeyboardLayoutsW(HWND, HINSTANCE, LPWSTR, int) {
-  win::layout::repair();
-}

@@ -53,8 +53,6 @@ private:
 
   LONG ref_ = 1;
   CTextService *svc_;
-  ITfLangBarItemSink *sink_ = nullptr;
-  bool layoutFixed_ = false; // correction écrite, en attente de reconnexion
-};
+  ITfLangBarItemSink *sink_ = nullptr;};
 
 } // namespace win

@@ -7,6 +7,7 @@
 // Sans (3), le service n'apparaît pas dans les applications modernes (UWP,
 // écran de connexion) — c'est le piège classique.
 #include "Guids.h"
+#include "KeyboardLayout.h"
 #include "TextService.h"
 
 #include <msctf.h>
@@ -166,7 +167,8 @@ STDAPI DllRegisterServer() {
       HRESULT r = mgr->RegisterProfile(
           CLSID_PredictTextService, lang.langid, GUID_PredictProfile,
           PREDICT_SERVICE_NAME, ULONG(wcslen(PREDICT_SERVICE_NAME)), path,
-          ULONG(wcslen(path)), 0, nullptr, 0, TRUE, 0);
+          ULONG(wcslen(path)), 0, win::layout::substituteFor(lang.langid), 0,
+          TRUE, 0);
       if (FAILED(r))
         hr = r;
     }

@@ -4,5 +4,3 @@ EXPORTS
     DllCanUnloadNow     PRIVATE
     DllRegisterServer   PRIVATE
     DllUnregisterServer PRIVATE
-    ; rundll32 predict-tsf.dll,FixKeyboardLayouts (cf KeyboardLayout.h)
-    FixKeyboardLayoutsW

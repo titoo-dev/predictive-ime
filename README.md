@@ -99,14 +99,14 @@ A **Predict** icon sits next to the language indicator on the taskbar: click it
 to pause or resume prediction in every app at once (the choice persists across
 reboots); right-click for settings and help.
 
-**Keyboard layout.** A text service has no layout of its own: Windows gives it
-its language's *base* layout, not the one you picked — e.g. English set to
-AZERTY still typed QWERTY under Predict, shortcuts included (Ctrl+Z arrived as
-Ctrl+W). Setup aligns that base with your layouts from Settings (per user, no
-admin rights, never touching a layout you use); it takes effect at your next
-sign-in. The taskbar icon's tooltip and menu show the layout actually in use
-and offer the same fix if it drifts. By hand:
-`rundll32 "<install dir>\predict-tsf.dll",FixKeyboardLayouts`.
+**Keyboard layout.** A text service has no layout of its own: unless told
+otherwise, Windows hands Predict **US QWERTY**, whatever you picked (shortcuts
+included: Ctrl+Z on AZERTY arrived as Ctrl+W). Registration therefore declares
+your layout for each profile — TSF only accepts a layout *of the profile's
+language*: French + AZERTY works, English + AZERTY cannot. Setup only offers
+Predict under languages where it will type like you (Predict FR predicts
+English too). The taskbar icon's tooltip and menu show the layout actually in
+use.
 
 The bar stays anchored to the word being typed: when an app has no layout yet
 (Firefox and Chrome often answer `TS_E_NOLAYOUT` on a word's first letter) it
@@ -122,6 +122,11 @@ $env:IME_PANEL_THEME = 'dark'   # or light; default: the Windows theme
 ```
 
 It captures every layout (plus the taskbar icon) as PNGs.
+
+Regression tests (also run by CI): `ctest --test-dir build-win-x64 -C Release`.
+`win-layout-installed` checks the IME *installed on your machine* — Predict
+must stay the active input method and type with your own layout; it is
+skipped where Predict is not installed.
 
 **Check the daemon on its own**
 

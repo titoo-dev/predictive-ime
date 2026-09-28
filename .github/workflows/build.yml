@@ -104,3 +104,8 @@ jobs:
             if ($exports -notmatch $fn) { throw "export $fn manquant" }
           }
           Write-Host "OK : daemon + text service, 4 exports COM"
+      # Non-régression du text service : disposition clavier, validation du
+      # caret, placement de la barre, règles du setup. win-layout-installed est
+      # sauté ici (Predict n'est pas installé sur le runner).
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure

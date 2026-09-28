@@ -34,27 +34,36 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# GUID du service et du profil — ils doivent coller à win/tsf/Guids.h.
-$PREDICT_CLSID   = '{5F0A1C7E-3B84-4D2E-9C31-7A6E2D4B8F10}'
-$PREDICT_PROFILE = '{5F0A1C7E-3B84-4D2E-9C31-7A6E2D4B8F11}'
+# GUID du service et du profil ($PREDICT_CLSID, $PREDICT_PROFILE — ils
+# doivent coller à win/tsf/Guids.h) et règles de disposition, partagés avec
+# scripts/tests/Test-PredictLayout.ps1.
+. (Join-Path $PSScriptRoot 'PredictLayout.ps1')
 
 # Enregistrer le profil ne suffit PAS à le faire apparaître : il faut encore
 # l'ajouter à la liste de saisie de l'utilisateur. Le format d'un « tip » est
 # LANGID:{CLSID}{PROFIL} — sans ça, « Predict » reste introuvable dans les
 # Paramètres et l'utilisateur croit que l'installation a échoué.
+#
+# Disposition : on ne le propose QUE là où il tapera comme l'utilisateur
+# (Test-PredictLayoutFits) — l'anglais configuré en AZERTY donnerait un
+# Predict EN en QWERTY. Predict FR prédit aussi l'anglais.
 function Add-PredictToLanguageList {
   try {
     $list = Get-WinUserLanguageList
     $changed = $false
     foreach ($lang in $list) {
-      $langid = switch -Wildcard ($lang.LanguageTag) {
-        'fr*' { '0C0C'; break }   # placeholder remplacé ci-dessous
-        'en*' { '0409'; break }
-        default { $null }
-      }
-      if ($lang.LanguageTag -like 'fr*') { $langid = '040C' }
+      $langid = Get-PredictLangId $lang.LanguageTag
       if (-not $langid) { continue }
-      $tip = "${langid}:$PREDICT_CLSID$PREDICT_PROFILE"
+      $tip = Get-PredictTip $langid
+      if (-not (Test-PredictLayoutFits $langid $lang.InputMethodTips)) {
+        if ($lang.InputMethodTips -contains $tip) {
+          [void] $lang.InputMethodTips.Remove($tip)
+          $changed = $true
+        }
+        $first = Get-PredictUserLayouts $lang.InputMethodTips | Select-Object -First 1
+        Write-Host "IME      : Predict non propose en $($lang.LanguageTag) — votre disposition $first n'est pas de cette langue, Windows l'y forcerait en QWERTY. Utilisez Predict (FR), qui predit aussi l'anglais." -ForegroundColor Yellow
+        continue
+      }
       if ($lang.InputMethodTips -notcontains $tip) {
         $lang.InputMethodTips.Add($tip)
         $changed = $true
@@ -62,7 +71,7 @@ function Add-PredictToLanguageList {
     }
     if ($changed) {
       Set-WinUserLanguageList $list -Force
-      Write-Host 'IME      : « Predict » ajoute a vos methodes de saisie (Win+Espace)'
+      Write-Host 'IME      : methodes de saisie mises a jour (Win+Espace)'
     } else {
       Write-Host 'IME      : deja present dans vos methodes de saisie'
     }
@@ -72,22 +81,23 @@ function Add-PredictToLanguageList {
   }
 }
 
-# Un text service n'a pas de disposition à lui : TSF lui donne la disposition
-# « de base » de sa langue (0000LLLL, via HKCU\Keyboard Layout\Substitutes),
-# PAS celle que l'utilisateur a choisie. Anglais configuré en AZERTY → Predict
-# tapait en QWERTY, raccourcis compris (Ctrl+Z arrivait comme Ctrl+W). La DLL
-# sait aligner cette base sur les Paramètres, par utilisateur, sans toucher à
-# une disposition employée (cf win/tsf/KeyboardLayout.h).
-function Sync-PredictKeyboardLayout([string] $dll) {
-  if (-not $dll -or -not (Test-Path $dll)) { return }
+# Windows charge la disposition déclarée pour Predict (0000LLLL) À TRAVERS
+# HKCU\Keyboard Layout\Substitutes. Tant que Predict n'en déclarait pas, il y
+# a écrit 0000040c → 00000409 (US), et recalcule ensuite cette entrée à
+# travers elle-même à chaque session : elle ne disparaît jamais seule, et
+# Predict tapait en QWERTY malgré l'AZERTY déclaré. Effet à la prochaine
+# ouverture de session.
+function Clear-PredictStaleSubstitute {
   $key = 'HKCU:\Keyboard Layout\Substitutes'
-  $before = (Get-ItemProperty $key -EA SilentlyContinue | Out-String)
-  Start-Process rundll32.exe -ArgumentList "`"$dll`",FixKeyboardLayouts" -Wait -WindowStyle Hidden
-  $after = (Get-ItemProperty $key -EA SilentlyContinue | Out-String)
-  if ($before -ne $after) {
-    Write-Host 'clavier  : disposition de Predict alignee sur la votre — effective a la prochaine ouverture de session' -ForegroundColor Yellow
-  } else {
-    Write-Host 'clavier  : disposition de Predict deja identique a la votre'
+  $props = Get-ItemProperty $key -EA SilentlyContinue
+  if (-not $props) { return }
+  $subs = @{}
+  foreach ($p in $props.PSObject.Properties) {
+    if ($p.Name -notlike 'PS*') { $subs[$p.Name] = [string] $p.Value }
+  }
+  foreach ($name in (Get-PredictStaleSubstitutes (Get-WinUserLanguageList) $subs)) {
+    Remove-ItemProperty $key -Name $name
+    Write-Host "clavier  : redirection $name -> $($subs[$name]) retiree — Predict tapera avec votre disposition a la prochaine ouverture de session" -ForegroundColor Yellow
   }
 }
 
@@ -343,7 +353,7 @@ if (-not $SkipIme) {
         if ($p.ExitCode -eq 0) {
           Write-Host "IME      : enregistre ($tsfDst)"
           Add-PredictToLanguageList
-          Sync-PredictKeyboardLayout $tsfDst
+          Clear-PredictStaleSubstitute
         }
         else { Write-Host "IME      : regsvr32 a echoue (code $($p.ExitCode))" -ForegroundColor Red }
       } else {
@@ -353,10 +363,9 @@ if (-not $SkipIme) {
     }
   }
 } elseif ($AddInputMethod) {
-  # Installeur : la DLL est inscrite, il reste à la proposer à l'utilisateur
-  # — avec SA disposition. Le script vit dans {app}\scripts, la DLL dans {app}.
+  # Installeur : la DLL est inscrite, il reste à la proposer à l'utilisateur.
   Add-PredictToLanguageList
-  Sync-PredictKeyboardLayout (Join-Path (Split-Path -Parent $PSScriptRoot) 'predict-tsf.dll')
+  Clear-PredictStaleSubstitute
 }
 
 # Relance du daemon si on l'a arrêté (ou s'il ne tournait pas et que
