@@ -11,7 +11,11 @@ include(GNUInstallDirs)
 find_package(Fcitx5Core REQUIRED)
 find_package(nlohmann_json REQUIRED)
 
-add_library(predict MODULE predict.cpp)
+# core/ : machine à états, protocole daemon, UTF-8/casse/typographie — partagé
+# avec le text service TSF de Windows (cf win/tsf). L'engine n'en est que
+# l'adaptateur fcitx5.
+add_library(predict MODULE predict.cpp ../core/engine_core.cpp)
+target_include_directories(predict PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/..")
 target_link_libraries(predict Fcitx5::Core nlohmann_json::nlohmann_json)
 set_target_properties(predict PROPERTIES PREFIX "lib")
 
@@ -52,6 +56,7 @@ if(BUILD_TESTING AND Fcitx5ModuleTestFrontend_FOUND AND Fcitx5ModuleTestIM_FOUND
   configure_file(predict-addon.conf "${TEST_DATA}/addon/predict.conf" COPYONLY)
 
   add_executable(test_predict_engine test_predict_engine.cpp)
+  target_include_directories(test_predict_engine PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/..")
   target_link_libraries(test_predict_engine
     Fcitx5::Core Fcitx5::Module::TestFrontend
     nlohmann_json::nlohmann_json Threads::Threads)

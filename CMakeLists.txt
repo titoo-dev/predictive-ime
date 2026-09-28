@@ -12,11 +12,32 @@ project(predictive-ime VERSION 0.1 LANGUAGES C CXX)
 
 include(GNUInstallDirs)
 
-option(BUILD_ENGINE      "Build the fcitx5 'predict' engine addon"          ON)
+# enable_testing() DOIT être appelé ici, au niveau racine : sans lui CMake ne
+# génère pas de CTestTestfile.cmake à la racine du build et `ctest --test-dir
+# build` ne voit AUCUN test, même si engine/ en enregistre.
+include(CTest)
+
+# Sur Windows, seul le daemon est portable : l'engine est un addon fcitx5 (X11/
+# Wayland) et qmlpanel/preferences sont Qt+Wayland. Le frontal Windows est un
+# text service TSF, construit séparément (win/tsf) — cf
+# docs/specs/2026-09-11-windows-tsf-port-design.md.
+if(WIN32)
+  set(_default_linux_parts OFF)
+else()
+  set(_default_linux_parts ON)
+endif()
+
+option(BUILD_ENGINE      "Build the fcitx5 'predict' engine addon"          ${_default_linux_parts})
 option(BUILD_DAEMON      "Build the n-gram prediction daemon (predictord)"  ON)
-option(BUILD_UI          "Build the Qt Quick candidate panel (qmlpanel)"    ON)
-option(BUILD_PREFERENCES "Build the Qt preferences app (ime-preferences)"   ON)
-option(INSTALL_SYSTEMD_USER_UNIT "Install a systemd user service for the daemon" ON)
+# Frontal Windows : text service TSF (l'équivalent de l'engine fcitx5).
+if(WIN32)
+  option(BUILD_TSF "Build the Windows TSF text service (predict-tsf.dll)" ON)
+else()
+  option(BUILD_TSF "Build the Windows TSF text service (predict-tsf.dll)" OFF)
+endif()
+option(BUILD_UI          "Build the Qt Quick candidate panel (qmlpanel)"    ${_default_linux_parts})
+option(BUILD_PREFERENCES "Build the Qt preferences app (ime-preferences)"   ${_default_linux_parts})
+option(INSTALL_SYSTEMD_USER_UNIT "Install a systemd user service for the daemon" ${_default_linux_parts})
 
 # NOTE on qmlpanel (BUILD_UI): the caret-positioned candidate bar needs the raw
 # zwp_input_method_v2 object, which a STOCK fcitx5 does NOT expose to external
@@ -33,6 +54,13 @@ if(BUILD_ENGINE)
 endif()
 if(BUILD_DAEMON)
   add_subdirectory(daemon)
+endif()
+if(BUILD_TSF)
+  # nlohmann_json est déjà trouvé par daemon/ quand il est activé ; le TSF peut
+  # aussi se construire seul.
+  find_package(nlohmann_json REQUIRED)
+  add_subdirectory(win/tsf)
+  add_subdirectory(win/tools)
 endif()
 if(BUILD_UI)
   add_subdirectory(ui)

@@ -56,13 +56,9 @@
 
 #include "reformulate_http.h" // reformulation via API externe (Groq), repli local
 
-#include <cerrno>
-#include <fcntl.h>
-#include <poll.h>
-#include <sys/socket.h>
-#include <sys/stat.h>
-#include <sys/un.h>
-#include <unistd.h>
+// Sockets, poll, fichiers et emplacements XDG/Windows — toute la divergence
+// Linux/Windows est ici, pas dans le corps du daemon (cf os_compat.h).
+#include "../core/os_compat.h"
 
 #include <nlohmann/json.hpp>
 using json = nlohmann::json;
@@ -775,21 +771,20 @@ struct Model {
   // $XDG_CONFIG_HOME/ime-predictord/{config.json,dict.txt,snippets.tsv} —
   // rechargés quand leur mtime change (stow-ables dans les dotfiles).
   std::string cfgDir_;
-  time_t cfgStamp_ = -1, dictStamp_ = -1, snipStamp_ = -1;
+  long long cfgStamp_ = -1, dictStamp_ = -1, snipStamp_ = -1;
   std::vector<std::pair<std::string, std::string>> snips_; // fold(trig) → texte
   std::unordered_map<std::string, std::unordered_set<std::string>>
       veto_; // fold(tapé) -> remplacements refusés (revert utilisateur)
   std::string vetoLog;
 
-  static time_t mtimeOf(const std::string &p) {
-    struct stat st {};
-    return ::stat(p.c_str(), &st) == 0 ? st.st_mtime : 0;
+  static long long mtimeOf(const std::string &p) {
+    return oscompat::fileMtime(p);
   }
 
   void maybeReload() {
     if (cfgDir_.empty())
       return;
-    time_t t = mtimeOf(cfgDir_ + "/config.json");
+    long long t = mtimeOf(cfgDir_ + "/config.json");
     if (t != cfgStamp_) {
       cfgStamp_ = t;
       Config fresh;
@@ -1975,12 +1970,25 @@ int main(int argc, char **argv) {
   // notamment les messages "learn" en fire-and-forget. Sans ça, le write côté
   // daemon lèverait SIGPIPE et TUERAIT le daemon : les prédictions mourraient
   // silencieusement après quelques mots (cause majeure de "pas robuste").
-  signal(SIGPIPE, SIG_IGN);
+  // (Windows : netInit fait aussi le WSAStartup — sans lui, socket() échoue.)
+  if (!oscompat::netInit()) {
+    fprintf(stderr, "[predictord] init réseau impossible\n");
+    return 1;
+  }
+
+  // Données apprises : $XDG_DATA_HOME/ime-predictord (Linux),
+  // %LOCALAPPDATA%\ime-predictord (Windows — hors profil itinérant).
+  std::string userDir = oscompat::dataDir();
+  oscompat::mkdirTree(userDir);
+  // Windows : couper le cordon avec la console du lanceur AVANT toute trace —
+  // sinon les lignes de chargement partent dans une console inexistante, et
+  // surtout le daemon mourrait avec elle.
+  oscompat::detachFromConsole(userDir + "/predictord.log");
 
   Model model;
   std::string wpath = argv[1];
   model.loadWords(wpath);
-  std::string dir = wpath.substr(0, wpath.find_last_of('/') + 1);
+  std::string dir = oscompat::dirOf(wpath);
   model.loadBigrams(dir);
   model.loadTrigrams(dir);
   model.loadPcont(dir);
@@ -1989,24 +1997,14 @@ int main(int argc, char **argv) {
   model.indexNgrams();
   model.finalize();
 
-  const char *xdg = getenv("XDG_DATA_HOME");
-  const char *home = getenv("HOME");
-  std::string userBase = xdg ? std::string(xdg)
-                             : std::string(home ? home : "/tmp") +
-                                   "/.local/share";
-  std::string userDir = userBase + "/ime-predictord";
-  mkdir(userBase.c_str(), 0755);
-  mkdir(userDir.c_str(), 0755);
   model.loadUser(userDir + "/user.log");
   model.loadUserTri(userDir + "/user.tri.log");
   model.loadVeto(userDir + "/veto.log");
 
-  // config/dictionnaire perso/snippets ($XDG_CONFIG_HOME/ime-predictord),
-  // rechargés à chaud sur mtime à chaque requête.
-  const char *xdgc = getenv("XDG_CONFIG_HOME");
-  model.cfgDir_ = (xdgc ? std::string(xdgc)
-                        : std::string(home ? home : "/tmp") + "/.config") +
-                  "/ime-predictord";
+  // config/dictionnaire perso/snippets ($XDG_CONFIG_HOME/ime-predictord,
+  // %APPDATA%\ime-predictord), rechargés à chaud sur mtime à chaque requête.
+  model.cfgDir_ = oscompat::configDir();
+  oscompat::mkdirTree(model.cfgDir_);
   model.maybeReload();
 
 #ifdef WITH_NEURAL
@@ -2048,18 +2046,22 @@ int main(int argc, char **argv) {
   };
   std::mutex dMu;
   std::vector<DeferredLine> dReady;
-  int wakePipe[2] = {-1, -1};
-  if (pipe(wakePipe) == 0) {
-    fcntl(wakePipe[0], F_SETFL, O_NONBLOCK);
-    fcntl(wakePipe[1], F_SETFL, O_NONBLOCK);
+  // Pipe sous Linux ; sous Windows une paire de sockets loopback, car WSAPoll
+  // ne surveille QUE des sockets (cf os_compat.h).
+  sock_t wakePipe[2] = {kBadSock, kBadSock};
+  if (!oscompat::wakePairCreate(wakePipe)) {
+    // Échec fatal, et pas seulement « pas de refresh » : sous Windows WSAPoll
+    // REFUSE un INVALID_SOCKET dans le tableau — la boucle partirait en
+    // erreur immédiate, donc en spin à 100 % de CPU.
+    fprintf(stderr, "[predictord] paire de réveil impossible\n");
+    return 1;
   }
   auto postLine = [&](uint64_t client, std::string line) {
     {
       std::lock_guard<std::mutex> lk(dMu);
       dReady.push_back({client, std::move(line)});
     }
-    ssize_t n = write(wakePipe[1], "x", 1);
-    (void)n;
+    oscompat::wakePairPost(wakePipe[1]);
   };
 
   // ---- REFORMULATION sur worker (A1) : l'appel Groq (secondes de réseau) ou
@@ -2208,20 +2210,35 @@ int main(int argc, char **argv) {
         std::lock_guard<std::mutex> lk(njMu);
         njDone.push_back({job.client, job.wide, job.ctx, std::move(out)});
       }
-      ssize_t n = write(wakePipe[1], "x", 1);
-      (void)n;
+      oscompat::wakePairPost(wakePipe[1]);
     }
   });
 #endif
 
-  std::string sockpath = argc > 2 ? argv[2] : "/tmp/ime-predictord.sock";
-  unlink(sockpath.c_str());
-  int srv = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0);
+  std::string sockpath =
+      argc > 2 ? std::string(argv[2]) : oscompat::defaultSockPath();
+  // Le dossier du socket doit exister AVANT bind() — sous Windows c'est un
+  // sous-dossier dédié (cf ipcDir : droits ouverts aux applis en bac à sable,
+  // sans exposer les journaux d'apprentissage).
+  oscompat::mkdirTree(oscompat::dirOf(sockpath));
+  // Reste d'un daemon tué : bind() refuserait un fichier de socket existant.
+  oscompat::unlinkFile(sockpath);
+  sock_t srv = socket(AF_UNIX, SOCK_STREAM, 0);
+  if (!oscompat::sockValid(srv)) {
+    fprintf(stderr, "[predictord] socket AF_UNIX indisponible\n");
+    return 1;
+  }
+  oscompat::sockNonBlock(srv); // SOCK_NONBLOCK n'existe pas côté Winsock
   sockaddr_un addr{};
   addr.sun_family = AF_UNIX;
-  strncpy(addr.sun_path, sockpath.c_str(), sizeof(addr.sun_path) - 1);
-  if (bind(srv, (sockaddr *)&addr, sizeof(addr)) < 0) {
-    perror("bind");
+  if (sockpath.size() >= sizeof(addr.sun_path)) {
+    fprintf(stderr, "[predictord] chemin de socket trop long (%zu > %zu)\n",
+            sockpath.size(), sizeof(addr.sun_path) - 1);
+    return 1;
+  }
+  memcpy(addr.sun_path, sockpath.c_str(), sockpath.size() + 1);
+  if (bind(srv, (sockaddr *)&addr, sizeof(addr)) != 0) {
+    fprintf(stderr, "[predictord] bind %s impossible\n", sockpath.c_str());
     return 1;
   }
   listen(srv, 16);
@@ -2364,7 +2381,7 @@ int main(int argc, char **argv) {
         // suite (pending:true), neural sur le thread de travail, refresh sur
         // la même connexion dès qu'il aboutit.
         bool deferred = neuralWants && model.cfg.asyncNeural &&
-                        req.value("async", false) && wakePipe[1] >= 0;
+                        req.value("async", false) && oscompat::sockValid(wakePipe[1]);
         if (deferred) {
           {
             std::lock_guard<std::mutex> lk(njMu);
@@ -2465,7 +2482,7 @@ int main(int argc, char **argv) {
   // L'ancienne boucle accept→read servait UNE connexion jusqu'à sa fermeture :
   // l'engine — synchrone sur le thread clavier de fcitx — attendait derrière.
   struct Client {
-    int fd;
+    sock_t fd;
     uint64_t seq; // identité stable (l'fd peut être réutilisé après close)
     std::string in, out;
   };
@@ -2481,20 +2498,25 @@ int main(int argc, char **argv) {
     for (auto &cl : clients)
       pfds.push_back(
           {cl.fd, short(POLLIN | (cl.out.empty() ? 0 : POLLOUT)), 0});
-    if (poll(pfds.data(), nfds_t(pfds.size()), -1) < 0)
+    if (oscompat::sockPoll(pfds.data(), nfds_t(pfds.size()), -1) < 0) {
+      // EINTR : on repart aussitôt. Toute AUTRE erreur est persistante — sans
+      // cette pause, un daemon de fond tournerait à 100 % de CPU en silence.
+      if (!oscompat::sockInterrupted())
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
       continue;
+    }
     size_t nOld = clients.size();
     if (pfds[0].revents & POLLIN)
       for (;;) {
-        int c = accept(srv, nullptr, nullptr);
-        if (c < 0)
+        sock_t c = accept(srv, nullptr, nullptr);
+        if (!oscompat::sockValid(c))
           break; // EAGAIN : plus personne en attente
-        fcntl(c, F_SETFL, fcntl(c, F_GETFL) | O_NONBLOCK);
+        oscompat::sockNonBlock(c);
         clients.push_back({c, ++clientSeq, {}, {}}); // servi au prochain tour
       }
     if (pfds[1].revents & POLLIN) {
       char sink[64];
-      while (read(wakePipe[0], sink, sizeof(sink)) > 0)
+      while (oscompat::wakePairDrain(wakePipe[0], sink, sizeof(sink)) > 0)
         ;
       // Lignes différées (reformulation — A1/A2) : recopiées telles quelles
       // dans le out-buffer du client visé (flush au POLLOUT du même tour ou
@@ -2506,7 +2528,7 @@ int main(int argc, char **argv) {
       }
       for (auto &dl : lines)
         for (auto &cl : clients)
-          if (cl.seq == dl.client && cl.fd >= 0) {
+          if (cl.seq == dl.client && oscompat::sockValid(cl.fd)) {
             cl.out += dl.line;
             break;
           }
@@ -2521,7 +2543,7 @@ int main(int argc, char **argv) {
       for (auto &d : ready) {
         Client *dst = nullptr;
         for (auto &cl : clients)
-          if (cl.seq == d.client && cl.fd >= 0) {
+          if (cl.seq == d.client && oscompat::sockValid(cl.fd)) {
             dst = &cl;
             break;
           }
@@ -2549,7 +2571,7 @@ int main(int argc, char **argv) {
       if (ev & (POLLIN | POLLHUP | POLLERR)) {
         char tmp[4096];
         for (;;) {
-          ssize_t n = read(cl.fd, tmp, sizeof(tmp));
+          ssize_t n = oscompat::sockRead(cl.fd, tmp, sizeof(tmp));
           if (n > 0) {
             cl.in.append(tmp, n);
             if (cl.in.size() > (64u << 10)) { // ligne sans fin : abus
@@ -2560,7 +2582,7 @@ int main(int argc, char **argv) {
           }
           if (n == 0)
             eof = true;
-          else if (errno != EAGAIN && errno != EWOULDBLOCK)
+          else if (!oscompat::sockWouldBlock())
             drop = true;
           break;
         }
@@ -2574,12 +2596,12 @@ int main(int argc, char **argv) {
       // flush non bloquant ; le reste partira sur POLLOUT. EPIPE = client
       // parti sans lire (learn fire-and-forget de l'engine) : on jette.
       while (!drop && !cl.out.empty()) {
-        ssize_t n = send(cl.fd, cl.out.data(), cl.out.size(), MSG_NOSIGNAL);
+        ssize_t n = oscompat::sockWrite(cl.fd, cl.out.data(), cl.out.size());
         if (n > 0) {
           cl.out.erase(0, size_t(n));
           continue;
         }
-        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+        if (n < 0 && oscompat::sockWouldBlock())
           break;
         drop = true;
         break;
@@ -2587,12 +2609,14 @@ int main(int argc, char **argv) {
       if (cl.out.size() > (1u << 20))
         drop = true; // lecteur trop lent : on ne tamponne pas à l'infini
       if (drop || (eof && cl.out.empty())) {
-        close(cl.fd);
-        cl.fd = -1;
+        oscompat::sockClose(cl.fd);
+        cl.fd = kBadSock;
       }
     }
     clients.erase(std::remove_if(clients.begin(), clients.end(),
-                                 [](const Client &c) { return c.fd < 0; }),
+                                 [](const Client &c) {
+                                   return !oscompat::sockValid(c.fd);
+                                 }),
                   clients.end());
   }
 }

@@ -53,6 +53,13 @@ jobs:
         run: cmake -S . -B build -DBUILD_UI=OFF -DCMAKE_INSTALL_PREFIX=/usr
       - name: Build
         run: cmake --build build -j"$(nproc)"
+      # Le harnais engine (headless, mock daemon in-process) se construit dès que
+      # la distro livre testfrontend/testim ; là où ils manquent (Debian/Ubuntu),
+      # CTest ne voit aucun test et la commande passe. Sans cette étape, le repo
+      # ne PROUVAIT que la compilation — un refactor du cœur pouvait casser le
+      # comportement sans qu'aucun job ne rougisse.
+      - name: Test
+        run: ctest --test-dir build --output-on-failure --no-tests=ignore
       - name: Install (staged) and list artifacts
         run: |
           DESTDIR="$PWD/stage" cmake --install build
@@ -61,3 +68,39 @@ jobs:
           test -n "$(find stage -name libpredict.so -print -quit)"
           test -f stage/usr/bin/predictord
           test -f stage/usr/lib/systemd/user/ime-predictord.service
+
+  # Windows : le daemon porté (AF_UNIX + WSAPoll) et le text service TSF, qui
+  # partagent core/ avec l'engine fcitx5 ci-dessus. Sans ce job, un changement
+  # dans core/ casserait Windows sans qu'aucun test Linux ne rougisse — et
+  # réciproquement.
+  windows:
+    name: windows (x64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies (vcpkg)
+        shell: pwsh
+        run: |
+          vcpkg install nlohmann-json:x64-windows curl:x64-windows
+      - name: Configure
+        shell: pwsh
+        run: |
+          cmake -S . -B build -A x64 `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows
+      - name: Build
+        run: cmake --build build --config Release --parallel
+      - name: Check artifacts
+        shell: pwsh
+        run: |
+          $exe = "build/daemon/Release/predictord.exe"
+          $dll = "build/win/tsf/Release/predict-tsf.dll"
+          if (-not (Test-Path $exe)) { throw "predictord.exe manquant" }
+          if (-not (Test-Path $dll)) { throw "predict-tsf.dll manquante" }
+          # Les 4 exports COM sont ce qui rend la DLL enregistrable : leur
+          # absence ne casse pas la compilation, seulement l'installation.
+          $exports = & dumpbin /exports $dll
+          foreach ($fn in 'DllGetClassObject','DllCanUnloadNow','DllRegisterServer','DllUnregisterServer') {
+            if ($exports -notmatch $fn) { throw "export $fn manquant" }
+          }
+          Write-Host "OK : daemon + text service, 4 exports COM"
