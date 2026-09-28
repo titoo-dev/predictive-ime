@@ -1,4 +1,5 @@
 #include "reformulate_http.h"
+#include "../core/os_compat.h" // dataDir() — emplacement de groq.key
 #include "reform_prompts.h"
 
 #include <algorithm>
@@ -73,12 +74,9 @@ std::string readKey(const std::string &cfgDir) {
   const char *env = getenv("GROQ_API_KEY");
   if (env && *env) return trimmed(env);
   std::vector<std::string> paths;
-  const char *xdgData = getenv("XDG_DATA_HOME");
-  const char *home = getenv("HOME");
-  if (xdgData && *xdgData)
-    paths.push_back(std::string(xdgData) + "/ime-predictord/groq.key");
-  else if (home)
-    paths.push_back(std::string(home) + "/.local/share/ime-predictord/groq.key");
+  // Même DATA dir que les journaux d'apprentissage — XDG sous Linux,
+  // %LOCALAPPDATA% sous Windows (cf os_compat.h).
+  paths.push_back(oscompat::dataDir() + "/groq.key");
   if (!cfgDir.empty())
     paths.push_back(cfgDir + "/groq.key"); // dernier recours (à gitignore)
   for (const auto &p : paths) {

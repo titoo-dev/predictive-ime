@@ -12,7 +12,7 @@ The core runs on any stock fcitx5 (using its default candidate bar). The
 optional Qt Quick candidate bar (`qmlpanel`) needs a patched fcitx5 —
 see [docs/patched-fcitx5.md](docs/patched-fcitx5.md).
 
-## Install
+## Install (Linux / fcitx5)
 
 **1. Dependencies**
 
@@ -44,6 +44,115 @@ systemctl --user enable --now ime-predictord.service
 ```
 
 Add `Predict` as an input method (e.g. with `fcitx5-configtool`) and restart fcitx5.
+
+## Install (Windows 10 1803+ / 11)
+
+Windows gets a native **TSF text service** (`predict-tsf.dll`) in place of the
+fcitx5 engine, plus the same `predictord` daemon. Both frontends share the
+input logic in [`core/`](core/) — see
+[docs/specs/2026-09-11-windows-tsf-port-design.md](docs/specs/2026-09-11-windows-tsf-port-design.md).
+
+**Easiest: the installer**
+
+```powershell
+.\dist\predictive-ime-0.1.0-x64.exe
+```
+
+It installs the text service under Program Files (a TSF DLL is loaded into
+every application, so it must live where an unprivileged process cannot
+rewrite it), registers it, grants `ALL APPLICATION PACKAGES` read access so
+Store apps can load it, sets up the model and the daemon's logon task, and
+adds **Predict** to your input methods so it shows up in **Win+Space** right
+away. Build it yourself with `iscc packaging\windows\predictive-ime.iss`
+(Inno Setup 6.6+ gives the wizard a dark mode that follows Windows).
+
+**Or from source**
+
+```powershell
+winget install Microsoft.VisualStudio.2022.BuildTools `
+  --override "--passive --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
+winget install Meta.Zstandard Git.Git
+
+.\scripts\build-windows.ps1          # predictord.exe + predict-tsf.dll
+.\scripts\setup-windows.ps1          # model, logon task, IME registration
+Start-ScheduledTask -TaskName ime-predictord
+```
+
+The Build Tools ship their own CMake and Ninja; vcpkg (`nlohmann-json`,
+`curl`) is bootstrapped by the build script. Run `setup-windows.ps1` from an
+**elevated** shell to have it register the text service; otherwise it prints
+the one `regsvr32` command to run yourself.
+
+Then pick **Predict** with **Win+Space** and start typing.
+
+**What it looks like.** The candidate bar is drawn with Direct2D/DirectWrite
+to match Windows 11 menus: rounded corners, shadow and border from DWM, your
+**accent color**, light/dark theme and **high contrast** followed live, color
+emoji, and text that stays sharp at any scaling, including in apps that don't
+handle DPI. The same three layouts as `qmlpanel`: word chips (the one Space
+will apply is outlined in the accent color), the emoji grid, and a numbered
+list for reformulation. The highlight slides between candidates; animations
+respect *Settings › Accessibility › Animation effects*. On Windows 10 the bar
+keeps square corners. For emoji on Windows, use **Win+;** — Windows keeps that
+shortcut for its own emoji panel, so the Linux **Super+;** picker does not
+apply there, and `:` types a plain colon on both systems.
+
+A **Predict** icon sits next to the language indicator on the taskbar: click it
+to pause or resume prediction in every app at once (the choice persists across
+reboots); right-click for settings and help.
+
+**Keyboard layout.** A text service has no layout of its own: unless told
+otherwise, Windows hands Predict **US QWERTY**, whatever you picked (shortcuts
+included: Ctrl+Z on AZERTY arrived as Ctrl+W). Registration therefore declares
+your layout for each profile — TSF only accepts a layout *of the profile's
+language*: French + AZERTY works, English + AZERTY cannot. Setup only offers
+Predict under languages where it will type like you (Predict FR predicts
+English too). The taskbar icon's tooltip and menu show the layout actually in
+use.
+
+The bar stays anchored to the word being typed: when an app has no layout yet
+(Firefox and Chrome often answer `TS_E_NOLAYOUT` on a word's first letter) it
+keeps its last position instead of jumping, and it follows the text when the
+window moves or scrolls.
+
+To preview the bar without installing anything:
+
+```powershell
+cmake --build build-win-x64 --config Release --target candidate-preview
+$env:IME_PANEL_THEME = 'dark'   # or light; default: the Windows theme
+.\build-win-x64\win\tools\Release\candidate-preview.exe $env:TEMP
+```
+
+It captures every layout (plus the taskbar icon) as PNGs.
+
+Regression tests (also run by CI): `ctest --test-dir build-win-x64 -C Release`.
+`win-layout-installed` checks the IME *installed on your machine* — Predict
+must stay the active input method and type with your own layout; it is
+skipped where Predict is not installed.
+
+**Check the daemon on its own**
+
+```powershell
+.\scripts\probe-daemon.ps1 -Context je -Prefix v
+# -> {"candidates":["vous","vais","veux","voudrais","voulais"], ...}
+.\scripts\try-daemon.ps1             # testeur interactif dans le terminal
+```
+
+`probe-daemon.ps1` is the Windows stand-in for `nc -U`: same line-delimited
+JSON over the same **AF_UNIX** socket (native since Windows 10 1803) that the
+text service uses. `try-daemon.ps1` is a terminal REPL that shows suggestions
+as you type — handy to judge the model without switching input method.
+
+**Where things live.** `%LOCALAPPDATA%\ime-predictord\` holds the model, the
+socket, the daemon log and the learned-word journals; `%APPDATA%\ime-predictord\`
+holds the editable settings (`config.json`, `dict.txt`, `snippets.tsv`) — the
+same split as XDG data vs. config on Linux.
+`.\scripts\setup-windows.ps1 -Uninstall` unregisters the IME and removes the
+logon task, leaving both directories intact.
+
+**Known limits on Windows.** The Qt preferences app and the Wayland `qmlpanel`
+are not ported — the candidate bar is drawn by the text service itself, and
+settings are edited in `config.json` (the taskbar icon's *Réglages…* opens it). The neural predictor is off, as on Linux.
 
 ## Configuration
 

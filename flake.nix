@@ -9,6 +9,16 @@
       system = "x86_64-linux";
       pkgs = import nixpkgs { inherit system; };
 
+      # engine/ et daemon/ incluent ../core/ (cœur partagé avec le text service
+      # Windows) : leur source doit l'embarquer. Seuls le composant et core/
+      # entrent dans le store — un changement ailleurs ne reconstruit rien.
+      withCore =
+        dir:
+        pkgs.lib.fileset.toSource {
+          root = ./.;
+          fileset = pkgs.lib.fileset.unions [ dir ./core ];
+        };
+
       # Listes de fréquence OpenSubtitles 2018 (hermitdave/FrequencyWords),
       # ~50k mots/langue, format "mot fréquence". Épinglées par hash → pures.
       fr50k = pkgs.fetchurl {
@@ -203,7 +213,8 @@
         predictord = pkgs.stdenv.mkDerivation {
           pname = "ime-predictord";
           version = "0.1";
-          src = ./daemon;
+          src = withCore ./daemon;
+          sourceRoot = "source/daemon";
           nativeBuildInputs = [ pkgs.cmake pkgs.pkg-config ];
           # curl : reformulation via API externe (Groq) — cf reformulate_http.cpp.
           buildInputs = [ pkgs.nlohmann_json pkgs.curl ];
@@ -215,7 +226,8 @@
         neural-predict = pkgs.stdenv.mkDerivation {
           pname = "neural-predict";
           version = "0.1";
-          src = ./daemon;
+          src = withCore ./daemon;
+          sourceRoot = "source/daemon";
           nativeBuildInputs = [ pkgs.cmake pkgs.makeWrapper pkgs.pkg-config ];
           buildInputs = [ pkgs.nlohmann_json pkgs.llama-cpp pkgs.curl ];
           cmakeFlags = [ "-DWITH_NEURAL=ON" ];
@@ -232,7 +244,8 @@
         predictord-neural = pkgs.stdenv.mkDerivation {
           pname = "ime-predictord-neural";
           version = "0.1";
-          src = ./daemon;
+          src = withCore ./daemon;
+          sourceRoot = "source/daemon";
           nativeBuildInputs = [ pkgs.cmake pkgs.makeWrapper pkgs.pkg-config ];
           buildInputs = [ pkgs.nlohmann_json pkgs.llama-cpp pkgs.curl ];
           cmakeFlags = [ "-DWITH_NEURAL=ON" ];
@@ -246,7 +259,8 @@
         fcitx5-predict = pkgs.stdenv.mkDerivation {
           pname = "fcitx5-predict";
           version = "0.1";
-          src = ./engine;
+          src = withCore ./engine;
+          sourceRoot = "source/engine";
           nativeBuildInputs = [
             pkgs.cmake
             pkgs.kdePackages.extra-cmake-modules
@@ -272,7 +286,8 @@
         engine = pkgs.stdenv.mkDerivation {
           pname = "fcitx5-predict-engine-test";
           version = "0.1";
-          src = ./engine;
+          src = withCore ./engine;
+          sourceRoot = "source/engine";
           nativeBuildInputs = [
             pkgs.cmake
             pkgs.kdePackages.extra-cmake-modules

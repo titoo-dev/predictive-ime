@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -29,6 +30,7 @@
 #include <fcitx/candidatelist.h>
 #include <fcitx/inputcontext.h>
 #include <fcitx/inputcontextmanager.h>
+#include <fcitx/inputmethodentry.h>
 #include <fcitx/inputmethodgroup.h>
 #include <fcitx/inputmethodmanager.h>
 #include <fcitx/inputpanel.h>
@@ -825,6 +827,82 @@ void ghosttyTests(Harness &h) {
 // L1 : Ctrl+Alt+R SANS sélection dans un champ court reformule tout le champ ;
 // le commit doit alors REMPLACER le champ (delete explicite) — commitString
 // seul INSÉRAIT la variante en plus du texte.
+// Le picker EMPRUNTE la méthode d'entrée : Super+; l'ouvre même quand une AUTRE
+// méthode est active (fcitx n'envoie les touches qu'à la méthode courante —
+// cf hotkeyWatcher_), et la RESTITUE une fois l'emoji choisi — sinon la
+// prédiction de texte restait allumée pour la suite. Équivalent headless de
+// test-hotkey.sh, qui exige sway. La restitution est POSTÉE (on ne bascule pas
+// d'IME en pleine touche) : vérifiée au tour de boucle suivant, puis `next`.
+void imBorrowTests(Harness h, fcitx::Instance *instance,
+                   std::function<void(Harness)> next) {
+  static std::unique_ptr<fcitx::EventSourceTime> t;
+  auto &imMgr = instance->inputMethodManager();
+  std::string other;
+  imMgr.foreachEntries([&](const fcitx::InputMethodEntry &e) {
+    if (other.empty() && e.addon() == "testim")
+      other = e.uniqueName();
+    return true;
+  });
+  if (other.empty()) {
+    check("emprunt: une 2e méthode (testim) est disponible", false, "aucune");
+    next(h);
+    return;
+  }
+  auto setGroup = [&imMgr](std::vector<std::string> ims) {
+    fcitx::InputMethodGroup group("Default");
+    for (auto &im : ims)
+      group.inputMethodList().push_back(fcitx::InputMethodGroupItem(im));
+    group.setDefaultInputMethod(ims.front());
+    imMgr.setGroup(std::move(group));
+  };
+  setGroup({other, "predict"});
+  h.reset();
+  h.setCaps(fcitx::CapabilityFlags{fcitx::CapabilityFlag::Preedit,
+                                   fcitx::CapabilityFlag::SurroundingText});
+  h.setSurrounding("ok", 2);
+  instance->setCurrentInputMethod(h.ic, other, /*local=*/true);
+  check("emprunt: pré — l'autre méthode est active",
+        instance->inputMethod(h.ic) == other, instance->inputMethod(h.ic));
+
+  h.daemon->setReply({"❤️", "💖"}, "❤️", false);
+  h.key("Super+semicolon");
+  check("emprunt: Super+; bascule sur predict",
+        instance->inputMethod(h.ic) == "predict", instance->inputMethod(h.ic));
+  check("emprunt: … et ouvre le picker", h.panelPreedit() == ":",
+        h.panelPreedit());
+  h.type("coeur");
+  h.expectCommit("❤️ ");
+  h.key("space");
+
+  t = instance->eventLoop().addTimeEvent(
+      CLOCK_MONOTONIC, fcitx::now(CLOCK_MONOTONIC) + 200000, 0,
+      [h, instance, other, next, setGroup](fcitx::EventSourceTime *,
+                                           uint64_t) mutable {
+        check("emprunt: la méthode d'origine est rendue après l'emoji",
+              instance->inputMethod(h.ic) == other,
+              instance->inputMethod(h.ic));
+        // Échap referme aussi, et rend aussi la main.
+        h.key("Super+semicolon");
+        h.key("Escape");
+        t = instance->eventLoop().addTimeEvent(
+            CLOCK_MONOTONIC, fcitx::now(CLOCK_MONOTONIC) + 200000, 0,
+            [h, instance, other, next, setGroup](fcitx::EventSourceTime *,
+                                                 uint64_t) mutable {
+              check("emprunt: Échap rend aussi la méthode d'origine",
+                    instance->inputMethod(h.ic) == other,
+                    instance->inputMethod(h.ic));
+              // retour au groupe « predict seul » pour la suite
+              setGroup({"predict"});
+              h.reset();
+              instance->setCurrentInputMethod(h.ic, "predict",
+                                              /*local=*/true);
+              next(h);
+              return false;
+            });
+        return false;
+      });
+}
+
 void reformTests(Harness h, fcitx::Instance *instance) {
   static std::unique_ptr<fcitx::EventSourceTime> t1, t2, t3, t4, t5;
   h.reset();
@@ -999,7 +1077,10 @@ int main() {
     surroundingContextTests(h);
     nextWordBarTests(h);
     ghosttyTests(h);
-    reformTests(h, &instance); // async — appelle instance.exit() à la fin
+    // async — l'emprunt d'IME puis la reformulation, qui appelle
+    // instance.exit() à la fin
+    imBorrowTests(h, &instance,
+                  [&instance](Harness h2) { reformTests(h2, &instance); });
   });
 
   instance.exec();

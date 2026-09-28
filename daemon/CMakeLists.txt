@@ -5,6 +5,14 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 include(GNUInstallDirs)
 
+# /utf-8 IMPÉRATIF sous MSVC : les sources sont en UTF-8 (accents français) et
+# le modèle parcourt l'UTF-8 octet par octet ; sans ce drapeau MSVC les relit
+# dans la codepage système et les suggestions accentuées sortent en mojibake.
+if(MSVC)
+  add_compile_options(/utf-8)
+  add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
+endif()
+
 find_package(nlohmann_json REQUIRED)
 # libcurl : reformulation via API externe (Groq) — cf reformulate_http.cpp.
 find_package(CURL REQUIRED)
@@ -12,6 +20,21 @@ find_package(CURL REQUIRED)
 add_executable(predictord predictord.cpp reformulate_http.cpp)
 target_link_libraries(predictord nlohmann_json::nlohmann_json CURL::libcurl)
 install(TARGETS predictord DESTINATION "${CMAKE_INSTALL_BINDIR}")
+
+# Windows : AF_UNIX natif (Win10 1803+) via ws2_32.
+if(WIN32)
+  target_link_libraries(predictord ws2_32)
+  # Sous-système WINDOWS, PAS console : une application console meurt en
+  # STATUS_CONTROL_C_EXIT (0xC000013A) quand la console qui l'a lancée se ferme
+  # — le daemon s'éteignait en cours de session. /ENTRY:mainCRTStartup garde le
+  # `int main(argc, argv)` standard (pas de WinMain à écrire), et
+  # detachFromConsole() se rattache au terminal quand il y en a un, sinon écrit
+  # dans %LOCALAPPDATA%\ime-predictord\predictord.log.
+  set_target_properties(predictord PROPERTIES WIN32_EXECUTABLE TRUE)
+  if(MSVC)
+    target_link_options(predictord PRIVATE /ENTRY:mainCRTStartup)
+  endif()
+endif()
 
 # Outil de bench (le "spike" latence), optionnel.
 add_executable(bench_ngram bench_ngram.cpp)

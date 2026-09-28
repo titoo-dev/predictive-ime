@@ -4,3 +4,10 @@
 result
 result-*
 /daemon/neural_predict
+
+# builds CMake hors arborescence (Linux : build/ ; Windows : build-win-<arch>/)
+/build/
+/build-win-*/
+
+# artefacts de packaging Windows (installeur genere)
+/dist/

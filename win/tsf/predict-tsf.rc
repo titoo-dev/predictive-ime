@@ -1,0 +1,42 @@
+// Ressources du text service.
+//
+// L'icône est la PREMIÈRE du module : RegisterProfile la désigne par l'index
+// 0, et c'est elle que Windows montre pour le clavier « Predict » (barre de
+// langue, paramètres). Sans elle le profil s'affichait avec une icône vide.
+// VERSIONINFO : ce qu'on lit dans Propriétés › Détails de la DLL, et ce que
+// l'installeur compare pour remplacer une version plus ancienne.
+#pragma code_page(65001) // source UTF-8 (accents, tiret cadratin)
+#include <winres.h>
+
+#define PREDICT_VER 0, 1, 0, 0
+#define PREDICT_VER_STR "0.1.0"
+
+1 ICON "predict.ico"
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION PREDICT_VER
+PRODUCTVERSION PREDICT_VER
+FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+FILEFLAGS 0
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_DLL
+FILESUBTYPE VFT2_UNKNOWN
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "040C04B0"
+    BEGIN
+      VALUE "CompanyName", "predictive-ime"
+      VALUE "FileDescription", "Predict — saisie prédictive FR/EN (text service TSF)"
+      VALUE "FileVersion", PREDICT_VER_STR
+      VALUE "InternalName", "predict-tsf"
+      VALUE "OriginalFilename", "predict-tsf.dll"
+      VALUE "ProductName", "predictive-ime"
+      VALUE "ProductVersion", PREDICT_VER_STR
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x040C, 1200
+  END
+END
