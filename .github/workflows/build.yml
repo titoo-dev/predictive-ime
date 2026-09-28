@@ -29,7 +29,7 @@ jobs:
             image: fedora:41
             deps: >-
               dnf -y install gcc-c++ cmake extra-cmake-modules pkgconf-pkg-config
-              git fcitx5-devel nlohmann-json-devel qt6-qtbase-devel qt6-qtdeclarative-devel
+              git fcitx5 fcitx5-devel nlohmann-json-devel qt6-qtbase-devel qt6-qtdeclarative-devel
               libcurl-devel
           - name: ubuntu
             image: ubuntu:24.04
@@ -99,9 +99,18 @@ jobs:
           if (-not (Test-Path $dll)) { throw "predict-tsf.dll manquante" }
           # Les 4 exports COM sont ce qui rend la DLL enregistrable : leur
           # absence ne casse pas la compilation, seulement l'installation.
-          $exports = & dumpbin /exports $dll
+          # dumpbin n'est pas sur le PATH du runner (hors invite développeur
+          # VS) : on le trouve via vswhere, livré avec Visual Studio.
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
+            -latest -products * -property installationPath
+          $dumpbin = Get-ChildItem "$vs\VC\Tools\MSVC" -Recurse -Filter dumpbin.exe |
+            Where-Object FullName -match 'Hostx64\\x64' | Select-Object -First 1
+          if (-not $dumpbin) { throw "dumpbin introuvable" }
+          $exports = & $dumpbin.FullName /exports $dll
           foreach ($fn in 'DllGetClassObject','DllCanUnloadNow','DllRegisterServer','DllUnregisterServer') {
-            if ($exports -notmatch $fn) { throw "export $fn manquant" }
+            # -match sur un TABLEAU rend les lignes qui correspondent (vide =
+            # absent) ; -notmatch rendrait les autres lignes, jamais vide.
+            if (-not ($exports -match "\b$fn\b")) { throw "export $fn manquant" }
           }
           Write-Host "OK : daemon + text service, 4 exports COM"
       # Non-régression du text service : disposition clavier, validation du

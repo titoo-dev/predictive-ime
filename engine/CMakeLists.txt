@@ -38,14 +38,22 @@ if(BUILD_TESTING)
   # (libpredict.so) doit rester buildable sur ces distros.
   find_package(Fcitx5ModuleTestFrontend QUIET)
   find_package(Fcitx5ModuleTestIM QUIET)
-endif()
-
-if(BUILD_TESTING AND Fcitx5ModuleTestFrontend_FOUND AND Fcitx5ModuleTestIM_FOUND)
 
   # Prefix du paquet fcitx5 (déduit du dossier CMake de Fcitx5Core) : addons de
-  # test (testfrontend/testim/testui) + leurs .conf.
+  # test (testfrontend/testim/testui) + leurs .conf. Les CONFIGS CMake de ces
+  # addons (dans le -devel) ne prouvent pas que les addons eux-mêmes sont là :
+  # Fedora les range dans lib64/ et dans le paquet runtime `fcitx5`, que
+  # fcitx5-devel ne tire pas. On cherche donc le .so réel, lib/ comme lib64/.
   get_filename_component(FCITX5_PREFIX "${Fcitx5Core_DIR}/../../.." ABSOLUTE)
-  set(FCITX5_ADDON_DIR "${FCITX5_PREFIX}/lib/fcitx5")
+  find_path(FCITX5_ADDON_DIR libtestfrontend.so
+    PATHS "${FCITX5_PREFIX}/lib/fcitx5" "${FCITX5_PREFIX}/lib64/fcitx5"
+          "${FCITX5_PREFIX}/${CMAKE_INSTALL_LIBDIR}/fcitx5"
+    NO_DEFAULT_PATH)
+endif()
+
+if(BUILD_TESTING AND Fcitx5ModuleTestFrontend_FOUND AND Fcitx5ModuleTestIM_FOUND
+   AND FCITX5_ADDON_DIR)
+
   set(FCITX5_DATA_DIR "${FCITX5_PREFIX}/share/fcitx5")
 
   # predict.conf doit être trouvable sous <data>/inputmethod et <data>/addon
