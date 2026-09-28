@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 
+#include <QColor>
 #include <QFile>
 #include <QFileInfo>
 #include <QGuiApplication>
@@ -16,14 +17,21 @@
 #include <QQuickWindow>
 #include <QSGRendererInterface>
 
-// QML : DEUX rendus dans une même surface, choisis par `listMode` —
-//  • COMPACT (mots / emoji) : barre de chips horizontales dense (façon Gboard),
-//    PILL accent qui GLISSE entre les candidats (hlPos flottant animé en C++).
+// QML : TROIS rendus dans une même surface, choisis par `listMode` / `gridMode` —
+//  • COMPACT (mots) : barre de chips horizontales dense (façon Gboard),
+//    PILL accent qui GLISSE entre les candidats (hlFrom→hlTo, progression
+//    hlT animée en C++ : trajet en ligne droite, diagonale comprise).
+//  • PICKER EMOJI (`gridMode`) : surface Material 3 — champ de recherche en
+//    tête (la requête ne va PLUS dans l'application, cf engine), grille 8
+//    colonnes de cases carrées, case sélectionnée en secondaryContainer, ligne
+//    d'aide clavier en bas, état vide quand la recherche ne rend rien. Largeur
+//    FIXE (8 colonnes) : la grille ne saute plus à chaque frappe.
 //  • LISTE (reformulation) : lignes verticales NUMÉROTÉES pleine largeur, texte
 //    qui passe à la ligne (les variantes sont des phrases — illisibles élidées à
 //    190px). Header de mode + ligne d'attente avec spinner (`spin`) quand
 //    `loading`. Apparition fade + slide-up commune (appear 0→1).
-// Couleurs via la context property `colors` (matugen, cf qmlui.cpp).
+// Couleurs via la context property `colors` (matugen → rôles Material 3, cf
+// qmlui.cpp / loadColors).
 static const char *kPanelQml = R"QML(
 import QtQuick
 
@@ -32,24 +40,78 @@ Item {
     implicitWidth: card.width + 10
     implicitHeight: card.height + 10
 
+    // Métriques Material 3 du picker (dp ≈ px ici : la surface est rendue à 1x)
+    readonly property int cell: 32          // case de la grille
+    readonly property int gap: 4
+    readonly property int pad: 10
+    readonly property int cols: 8
+
+    // HALO : ombre portée douce, dans la marge de 5 px autour de la carte. Le
+    // renderer software n'a ni DropShadow ni shader — deux anneaux translucides
+    // suffisent à détacher le verre du fond. (Avec le flou du compositeur, ces
+    // pixels très transparents sont écartés par input_methods_ignorealpha : le
+    // halo disparaît proprement, le verre reste.)
+    Rectangle {
+        anchors.fill: card
+        anchors.margins: -3
+        radius: card.radius + 3
+        color: colors.halo
+        opacity: appear * 0.55
+    }
+    Rectangle {
+        anchors.fill: card
+        anchors.margins: -1
+        radius: card.radius + 1
+        color: colors.halo
+        opacity: appear
+    }
+
     Rectangle {
         id: card
         x: 5
         y: 5 + (1 - appear) * 6        // slide-up à l'apparition
         opacity: appear
-        radius: listMode ? 14 : 11
-        color: colors.surface
+        // shape scale M3 : large (16) pour la surface picker, medium sinon
+        radius: gridMode ? 16 : (listMode ? 14 : 11)
+        // VERRE : fond translucide (cf loadColors → glass). Ce sont les COULEURS
+        // qui portent l'alpha, pas `opacity` : un opacity sur la carte
+        // délaverait aussi les glyphes, qui doivent rester nets.
+        color: colors.glass
         border.width: 1
-        border.color: colors.outline
-        width:  listMode ? listLayout.width  : compact.width
-        height: listMode ? listLayout.height : compact.height
+        border.color: colors.glassBorder
+        width:  listMode ? listLayout.width
+                         : (gridMode ? picker.width : compact.width)
+        height: listMode ? listLayout.height
+                         : (gridMode ? picker.height : compact.height)
 
-        // ===================== COMPACT (mots + emoji) =====================
+        // reflet : le haut du verre capte la lumière, teinté par la couleur
+        // dominante du thème (matugen) → le panneau prend la couleur du fond
+        // d'écran. Déclaré AVANT les contenus : il passe dessous.
+        Rectangle {
+            anchors.fill: parent
+            radius: parent.radius
+            gradient: Gradient {
+                GradientStop { position: 0.0; color: colors.sheen }
+                GradientStop { position: 0.6; color: "transparent" }
+            }
+        }
+        // arête interne claire : c'est ce liseré qui fait « verre » plutôt que
+        // « rectangle semi-transparent ».
+        Rectangle {
+            anchors.fill: parent
+            anchors.margins: 1
+            radius: Math.max(0, parent.radius - 1)
+            color: "transparent"
+            border.width: 1
+            border.color: colors.glassEdge
+        }
+
+        // ===================== COMPACT (mots) =====================
         Item {
             id: compact
-            visible: !listMode
+            visible: !listMode && !gridMode
             width: row.width + 18
-            height: row.height + 8     // 1 ligne = 34 ; grille emoji = 3 lignes
+            height: row.height + 8     // une seule ligne de chips : 34
 
             // indicateur de mode : accent = mot en cours (composition),
             // discret = barre passive (mot-suivant / amorce)
@@ -66,16 +128,17 @@ Item {
             // en x ET en y (la grille emoji a plusieurs lignes)
             Rectangle {
                 id: pill
-                visible: hlPos >= 0 && rep.count > 0
-                property real p: Math.max(0, Math.min(hlPos, rep.count - 1))
-                property int i0: Math.floor(p)
-                property real f: p - i0
-                property Item a: rep.count > 0 ? rep.itemAt(i0) : null
+                visible: highlight >= 0 && rep.count > 0
+                // interpolation DIRECTE entre la case de départ et celle
+                // d'arrivée (cf hlT côté C++) : trajet en ligne droite
+                property Item a: rep.count > 0
+                    ? rep.itemAt(Math.max(0, Math.min(hlFrom, rep.count - 1))) : null
                 property Item b: rep.count > 0
-                    ? rep.itemAt(Math.min(i0 + 1, rep.count - 1)) : null
-                x: a ? row.x + a.x + (b ? (b.x - a.x) * f : 0) : 0
-                y: a ? row.y + a.y + (b ? (b.y - a.y) * f : 0) : 0
-                width: a ? a.width + (b ? (b.width - a.width) * f : 0) : 0
+                    ? rep.itemAt(Math.max(0, Math.min(hlTo, rep.count - 1))) : null
+                property real f: hlT
+                x: a && b ? row.x + a.x + (b.x - a.x) * f : 0
+                y: a && b ? row.y + a.y + (b.y - a.y) * f : 0
+                width: a && b ? a.width + (b.width - a.width) * f : 0
                 height: 26
                 radius: 8
                 color: colors.accent
@@ -89,11 +152,10 @@ Item {
                 // fondu doux quand la barre PASSIVE se rafraîchit (refresh neural
                 // asynchrone) — la frappe (composition) reste instantanée
                 opacity: contentFade
-                // grille emoji : 8 colonnes ; sinon une seule ligne
-                columns: gridMode ? 8 : Math.max(1, rep.count)
+                columns: Math.max(1, rep.count)
                 Repeater {
                     id: rep
-                    model: listMode ? [] : candidates
+                    model: (listMode || gridMode) ? [] : candidates
                     delegate: Item {
                         required property int index
                         required property string modelData
@@ -103,7 +165,7 @@ Item {
                             index < emojiMark.length && emojiMark[index] === true
                         readonly property bool isAuto:
                             index < autoMark.length && autoMark[index] === true
-                        width: gridMode ? 30 : label.width + 16
+                        width: label.width + 16
                         height: 26
                         // liseré accent = « l'Espace appliquera CE candidat »
                         Rectangle {
@@ -113,7 +175,7 @@ Item {
                             border.width: 1
                             border.color: colors.accent
                             opacity: 0.9
-                            visible: isAuto && hlPos < 0
+                            visible: isAuto && highlight < 0
                         }
                         Text {
                             id: label
@@ -121,7 +183,7 @@ Item {
                             text: modelData
                             width: Math.min(implicitWidth, 190)
                             elide: Text.ElideRight
-                            color: hlPos >= 0 && index === Math.round(hlPos)
+                            color: index === highlight
                                    ? colors.onAccent : colors.onSurface
                             font.pixelSize: emoji ? 17 : 14
                             // NB: font.families (plural, QStringList) is NOT a
@@ -135,6 +197,193 @@ Item {
                         }
                     }
                 }
+            }
+        }
+
+        // ================== PICKER EMOJI (Material 3) ==================
+        // Surface autonome : champ de recherche + grille + aide clavier. La
+        // largeur est FIXE (8 colonnes) — une grille qui rétrécit à chaque
+        // frappe est illisible, et le champ de recherche a besoin d'un rail
+        // stable.
+        Item {
+            id: picker
+            visible: gridMode && !listMode
+            readonly property bool empty: candidates.length === 0
+            width: root.cols * root.cell + (root.cols - 1) * root.gap
+                   + 2 * root.pad
+            height: hint.y + hint.height + root.pad
+
+            // --- champ de recherche (M3 search bar : pleine rondeur) ---
+            Rectangle {
+                id: search
+                x: root.pad
+                y: root.pad
+                width: parent.width - 2 * root.pad
+                height: 30
+                radius: height / 2
+                color: colors.field       // posé SUR le verre (cf loadColors)
+
+                // loupe DESSINÉE : le rendu est software et la fonte du
+                // panneau n'a pas forcément le glyphe (⌕/nerd-font) — deux
+                // rectangles se rendent partout.
+                Item {
+                    id: lens
+                    x: 11
+                    width: 13
+                    height: 13
+                    anchors.verticalCenter: parent.verticalCenter
+                    Rectangle {
+                        width: 9; height: 9; radius: 4.5
+                        color: "transparent"
+                        border.width: 1.4
+                        border.color: colors.onSurfaceVariant
+                    }
+                    Rectangle {              // manche, à 45°
+                        x: 7.5; y: 7.5
+                        width: 5.5; height: 1.4; radius: 0.7
+                        transformOrigin: Item.TopLeft
+                        rotation: 45
+                        color: colors.onSurfaceVariant
+                    }
+                }
+
+                Text {
+                    id: qtext
+                    anchors.left: lens.right
+                    anchors.leftMargin: 8
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: searchText.length ? searchText
+                                            : "Rechercher un emoji"
+                    // requête longue : on élide par la GAUCHE, la fin de la
+                    // frappe (ce qu'on vient de taper) reste visible
+                    width: Math.min(implicitWidth, search.width - 52)
+                    elide: Text.ElideLeft
+                    color: searchText.length ? colors.onSurface
+                                             : colors.onSurfaceVariant
+                    opacity: searchText.length ? 1.0 : 0.75
+                    font.pixelSize: 13
+                    font.family: "Maple Mono NF"
+                }
+                Rectangle {                  // caret : point d'insertion
+                    visible: searchText.length > 0
+                    anchors.left: qtext.right
+                    anchors.leftMargin: 2
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: 1.5
+                    height: 15
+                    radius: 0.75
+                    color: colors.accent
+                }
+                Text {                       // page courante (« 2/4 »)
+                    visible: headerText.length > 0
+                    anchors.right: parent.right
+                    anchors.rightMargin: 12
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: headerText
+                    // 2e accent de la palette dynamique : la pagination ne se
+                    // confond plus avec le placeholder gris du champ.
+                    color: colors.tertiary
+                    font.pixelSize: 11
+                    font.family: "Maple Mono NF"
+                }
+            }
+
+            // pill de sélection : interpolation directe départ→arrivée en x ET
+            // en y (la grille a plusieurs lignes ; un saut de ligne descend
+            // en diagonale au lieu de balayer la ligne).
+            // M3 : état sélectionné = secondaryContainer.
+            Rectangle {
+                id: gpill
+                visible: highlight >= 0 && grep.count > 0
+                property Item a: grep.count > 0
+                    ? grep.itemAt(Math.max(0, Math.min(hlFrom, grep.count - 1))) : null
+                property Item b: grep.count > 0
+                    ? grep.itemAt(Math.max(0, Math.min(hlTo, grep.count - 1))) : null
+                property real f: hlT
+                x: a && b ? grid.x + a.x + (b.x - a.x) * f : 0
+                y: a && b ? grid.y + a.y + (b.y - a.y) * f : 0
+                width: root.cell
+                height: root.cell
+                radius: 10
+                color: colors.pillGlass
+            }
+
+            Grid {
+                id: grid
+                x: root.pad
+                y: search.y + search.height + root.pad
+                visible: !picker.empty
+                opacity: contentFade
+                columns: root.cols
+                spacing: root.gap
+                Repeater {
+                    id: grep
+                    model: gridMode ? candidates : []
+                    delegate: Item {
+                        required property int index
+                        required property string modelData
+                        readonly property bool isAuto:
+                            index < autoMark.length && autoMark[index] === true
+                        width: root.cell
+                        height: root.cell
+                        // liseré = « Entrée/Espace prendra celui-ci » tant
+                        // qu'on n'a pas navigué
+                        Rectangle {
+                            anchors.fill: parent
+                            radius: 10
+                            color: "transparent"
+                            border.width: 1
+                            border.color: colors.accent
+                            opacity: 0.55
+                            visible: isAuto && highlight < 0
+                        }
+                        Text {
+                            anchors.centerIn: parent
+                            text: modelData
+                            font.pixelSize: 19
+                            font.family: "Noto Color Emoji"
+                        }
+                    }
+                }
+            }
+
+            // état VIDE : la recherche ne rend rien. Le picker reste ouvert
+            // (fermer la barre à la première faute de frappe est brutal) et le
+            // dit — la frappe suivante peut retomber sur des résultats.
+            Text {
+                id: none
+                visible: picker.empty
+                x: root.pad
+                y: grid.y
+                width: parent.width - 2 * root.pad
+                height: 44
+                horizontalAlignment: Text.AlignHCenter
+                verticalAlignment: Text.AlignVCenter
+                elide: Text.ElideMiddle
+                text: searchText.length
+                      ? "Aucun emoji pour « " + searchText + " »"
+                      : "Aucun emoji"
+                color: colors.onSurfaceVariant
+                font.pixelSize: 12
+                font.family: "Maple Mono NF"
+            }
+
+            // aide clavier (M3 supporting text) : le picker vient d'un
+            // raccourci, ses touches ne s'apprennent nulle part ailleurs.
+            Text {
+                id: hint
+                x: root.pad
+                y: (picker.empty ? none.y + none.height
+                                 : grid.y + grid.height) + 7
+                width: parent.width - 2 * root.pad
+                horizontalAlignment: Text.AlignHCenter
+                text: "↑↓←→ naviguer · Entrée insérer · Échap fermer"
+                color: colors.onSurfaceVariant
+                // sur du verre, un texte de 10 px trop pâle se noie dans ce qui
+                // passe derrière — l'aide reste discrète mais lisible.
+                opacity: 0.9
+                font.pixelSize: 10
+                font.family: "Maple Mono NF"
             }
         }
 
@@ -215,8 +464,7 @@ Item {
                 delegate: Item {
                     required property int index
                     required property string modelData
-                    readonly property bool sel: hlPos >= 0
-                        && index === Math.round(hlPos)
+                    readonly property bool sel: index === highlight
                     width: listLayout.width
                     height: Math.max(30, vtxt.implicitHeight + 13)
 
@@ -301,6 +549,36 @@ qint64 colorsStamp() {
     return s;
 }
 
+// Couleur + alpha → "#AARRGGBB" (QML lit les chaînes hex ARGB). Tout le VERRE
+// se compose ici, en C++ : le rendu QML est software, il n'a ni shader ni
+// arithmétique de couleur commode.
+QString withAlpha(const QString &hex, double a) {
+    QColor c(hex);
+    if (!c.isValid())
+        return hex;
+    c.setAlphaF(float(std::clamp(a, 0.0, 1.0)));
+    return c.name(QColor::HexArgb);
+}
+
+// Opacité du VERRE (style acrylique). Hyprland floute ce qu'il y a DERRIÈRE la
+// popup si `decoration:blur:input_methods = true` — le panneau devient alors du
+// verre dépoli ; sans flou c'est du verre teinté, lisible quand même (les
+// glyphes, eux, restent opaques). Réglable : "opacity" dans colors.json, ou
+// QMLPANEL_OPACITY (levier de debug, comme QMLPANEL_ANIM_SCALE). 1 = opaque.
+double glassOpacity(const QJsonObject &ov, bool dark) {
+    double a = dark ? 0.74 : 0.82;
+    if (ov.contains("opacity"))
+        a = ov.value("opacity").toDouble(a);
+    QByteArray e = qgetenv("QMLPANEL_OPACITY");
+    if (!e.isEmpty()) {
+        bool ok = false;
+        double v = e.toDouble(&ok);
+        if (ok)
+            a = v;
+    }
+    return std::clamp(a, 0.3, 1.0);
+}
+
 // Palette = défauts Catppuccin → écrasés par DMS (matugen) → écrasés par un
 // override explicite. Material You : accent = primary, surface = container.
 // Mode CLAIR/SOMBRE : "mode" explicite dans l'override > détection DMS (dans
@@ -309,20 +587,34 @@ QVariantMap loadColors() {
     QJsonObject root = readJson(dmsColorsPath());
     QJsonObject ov = readJson(overrideColorsPath());
     bool dark = true;
-    QString mode = ov.value("mode").toString();
+    // QMLPANEL_MODE : force le thème (levier de debug/captures — cf
+    // panel_preview, qui rend les deux thèmes en un seul run).
+    QString mode = QString::fromLocal8Bit(qgetenv("QMLPANEL_MODE"));
+    if (mode != "light" && mode != "dark")
+        mode = ov.value("mode").toString();
     if (mode == "light" || mode == "dark") {
         dark = (mode == "dark");
     } else {
+        // VOTE sur les 16 couleurs, au lieu de trancher sur la première qui
+        // diffère : DMS écrit certaines entrées identiques en clair et en sombre
+        // (color0 ici), et une seule entrée incohérente suffisait à inverser
+        // tout le thème du panneau.
         QJsonObject d16 = root.value("dank16").toObject();
+        int votesDark = 0, votesLight = 0;
         for (const QString &k : d16.keys()) {
             QJsonObject col = d16.value(k).toObject();
             QString dv = col.value("dark").toString();
             QString lv = col.value("light").toString();
-            if (!dv.isEmpty() && dv != lv) {
-                dark = (col.value("default").toString() == dv);
-                break;
-            }
+            QString cur = col.value("default").toString();
+            if (dv.isEmpty() || dv == lv || cur.isEmpty())
+                continue; // n'apprend rien sur le mode
+            if (cur == dv)
+                votesDark++;
+            else if (cur == lv)
+                votesLight++;
         }
+        if (votesDark || votesLight)
+            dark = votesDark >= votesLight;
     }
 
     // défauts Catppuccin (mocha/latte) selon le mode détecté
@@ -332,6 +624,17 @@ QVariantMap loadColors() {
     c["accent"] = dark ? "#89b4fa" : "#1e66f5";
     c["onAccent"] = dark ? "#11111b" : "#ffffff";
     c["outline"] = dark ? "#45455a" : "#bcc0cc";
+    // rôles Material 3 du picker emoji : fond du champ de recherche, texte
+    // secondaire (placeholder, aide clavier), case sélectionnée.
+    c["surfaceVariant"] = dark ? "#313244" : "#ccd0da";
+    c["onSurfaceVariant"] = dark ? "#a6adc8" : "#6c6f85";
+    c["secondaryContainer"] = dark ? "#585b70" : "#acb0be";
+    // rôles du VERRE : teinte qui colore le reflet (Material You : surface_tint
+    // = primary, donc la couleur du fond d'écran), 2e accent (pagination), noir
+    // de l'ombre portée.
+    c["surfaceTint"] = dark ? "#89b4fa" : "#1e66f5";
+    c["tertiary"] = dark ? "#94e2d5" : "#179299";
+    c["scrim"] = "#000000";
 
     // 1) couleurs DMS/matugen (régénérées à chaque changement de thème)
     QJsonObject d = root.value("colors").toObject()
@@ -349,17 +652,61 @@ QVariantMap loadColors() {
         QString accent = pick({"primary"});
         QString onAccent = pick({"on_primary"});
         QString outline = pick({"outline_variant", "outline"});
+        QString surfaceVariant = pick({"surface_container_highest",
+                                       "surface_variant", "surface_container"});
+        QString onSurfaceVariant = pick({"on_surface_variant"});
+        QString secondaryContainer = pick({"secondary_container",
+                                           "surface_container_highest"});
+        QString surfaceTint = pick({"surface_tint", "primary"});
+        QString tertiary = pick({"tertiary", "secondary"});
+        QString scrim = pick({"scrim", "shadow"});
         if (!surface.isEmpty()) c["surface"] = surface;
         if (!onSurface.isEmpty()) c["onSurface"] = onSurface;
         if (!accent.isEmpty()) c["accent"] = accent;
         if (!onAccent.isEmpty()) c["onAccent"] = onAccent;
         if (!outline.isEmpty()) c["outline"] = outline;
+        if (!surfaceVariant.isEmpty()) c["surfaceVariant"] = surfaceVariant;
+        if (!onSurfaceVariant.isEmpty())
+            c["onSurfaceVariant"] = onSurfaceVariant;
+        if (!secondaryContainer.isEmpty())
+            c["secondaryContainer"] = secondaryContainer;
+        if (!surfaceTint.isEmpty()) c["surfaceTint"] = surfaceTint;
+        if (!tertiary.isEmpty()) c["tertiary"] = tertiary;
+        if (!scrim.isEmpty()) c["scrim"] = scrim;
     }
-    // 2) override explicite {surface,onSurface,accent,onAccent,outline,mode}
+    // 2) override explicite (mêmes clés + "mode" et "opacity")
     for (const QString &k :
-         {"surface", "onSurface", "accent", "onAccent", "outline"})
+         {"surface", "onSurface", "accent", "onAccent", "outline",
+          "surfaceVariant", "onSurfaceVariant", "secondaryContainer",
+          "surfaceTint", "tertiary", "scrim"})
         if (ov.contains(k))
             c[k] = ov.value(k).toString();
+
+    // 3) VERRE ACRYLIQUE — dérivé de la palette (donc dynamique : il suit
+    //    matugen), composé ici parce que le QML software ne sait pas le faire.
+    //      glass       fond translucide de la carte (le compositeur floute
+    //                  derrière si decoration:blur:input_methods est activé)
+    //      sheen       reflet haut, teinté par la couleur dominante du thème
+    //      glassEdge   arête interne claire (le « bord » du verre)
+    //      glassBorder liseré externe, plus discret qu'un outline plein
+    //      halo        ombre portée douce (pas de DropShadow en software)
+    //      field       champ de recherche du picker, posé SUR le verre
+    //      pillGlass   case emoji sélectionnée : presque opaque, elle doit
+    //                  rester lisible même sur un fond chargé
+    const double a = glassOpacity(ov, dark);
+    auto col = [&](const char *k) { return c.value(k).toString(); };
+    c["glass"] = withAlpha(col("surface"), a);
+    c["sheen"] = withAlpha(col("surfaceTint"), dark ? 0.10 : 0.07);
+    // arête : en SOMBRE, un filet de la couleur du texte fait la brillance ; en
+    // CLAIR il ferait une ombre — c'est du blanc qu'il faut (comme une vitre
+    // éclairée par le dessus).
+    c["glassEdge"] = dark ? withAlpha(col("onSurface"), 0.16)
+                          : withAlpha(QStringLiteral("#ffffff"), 0.60);
+    c["glassBorder"] = withAlpha(col("outline"), a < 1.0 ? 0.70 : 1.0);
+    c["halo"] = withAlpha(col("scrim"), dark ? 0.20 : 0.12);
+    c["field"] = withAlpha(col("surfaceVariant"), std::min(1.0, a + 0.05));
+    c["pillGlass"] = withAlpha(col("secondaryContainer"),
+                               std::min(1.0, a + 0.18));
     return c;
 }
 
@@ -442,7 +789,9 @@ PanelView::PanelView() {
     colorsStamp_ = colorsStamp();
     ctx->setContextProperty("candidates", QStringList{});
     ctx->setContextProperty("highlight", -1);
-    ctx->setContextProperty("hlPos", -1.0);
+    ctx->setContextProperty("hlFrom", -1);
+    ctx->setContextProperty("hlTo", -1);
+    ctx->setContextProperty("hlT", 1.0);
     ctx->setContextProperty("appear", 1.0);
     ctx->setContextProperty("contentFade", 1.0);
     ctx->setContextProperty("autoMark", QVariantList{});
@@ -454,6 +803,7 @@ PanelView::PanelView() {
     ctx->setContextProperty("loading", false);
     ctx->setContextProperty("spin", 0.0);
     ctx->setContextProperty("headerText", QString{});
+    ctx->setContextProperty("searchText", QString{});
 
     component_ = new QQmlComponent(view_->engine());
     component_->setData(kPanelQml, QUrl());
@@ -481,7 +831,8 @@ void PanelView::setColors(const QVariantMap &colors) {
 void PanelView::update(const QStringList &candidates, int highlight,
                        const QVariantList &autoMark, bool composing,
                        bool grid, const QStringList &labels, bool listMode,
-                       bool loading, const QString &headerText) {
+                       bool loading, const QString &headerText,
+                       const QString &searchText) {
     auto now = Clock::now();
     if (loading && !loading_)
         spinStart_ = now; // (re)démarre la rotation du spinner
@@ -502,12 +853,24 @@ void PanelView::update(const QStringList &candidates, int highlight,
         appear_.done(now))
         fade_ = {0.35, 1.0, now, animMs(80)};
     composing_ = composing;
-    if (candidates != cands_ || highlight < 0 || hl_.to < 0) {
+    // Surlignage : on anime une PROGRESSION 0→1 entre la case de DÉPART et
+    // celle d'ARRIVÉE, pas un index flottant. Avec un index flottant, un saut
+    // de ligne (±8 dans la grille) faisait défiler le pill par toutes les
+    // cases intermédiaires — il traversait l'écran de gauche à droite au lieu
+    // de descendre. Ici QML interpole directement entre deux cases : le
+    // déplacement est une droite, y compris en diagonale.
+    if (candidates != cands_ || highlight < 0 || highlight_ < 0) {
         // nouveau contenu (frappe) ou pas de surlignage de départ : pas de
         // morph — le pill saute (ou disparaît), seul Tab→Tab anime.
-        hl_ = {double(highlight), double(highlight), now, 0};
+        hlFrom_ = hlTo_ = highlight;
+        hl_ = {1.0, 1.0, now, 0};
     } else if (highlight != highlight_) {
-        hl_ = {hl_.at(now), double(highlight), now, animMs(110)};
+        // morph interrompu en vol : on repart de la case VISÉE (110 ms, la
+        // reprise ne se voit pas) plutôt que de plomber le code avec les
+        // positions en pixels, que seul QML connaît.
+        hlFrom_ = hl_.done(now) ? hlTo_ : hlTo_;
+        hlTo_ = highlight;
+        hl_ = {0.0, 1.0, now, animMs(110)};
     }
     if (candidates != cands_) {
         emojiMark_.clear();
@@ -522,6 +885,7 @@ void PanelView::update(const QStringList &candidates, int highlight,
     listMode_ = listMode;
     loading_ = loading;
     headerText_ = headerText;
+    searchText_ = searchText;
 }
 
 int PanelView::hideGraceMs() const { return animMs(90) + 80; }
@@ -550,8 +914,9 @@ void PanelView::hidden() {
     listMode_ = false;
     loading_ = false;
     headerText_.clear();
+    searchText_.clear();
     hl_ = {};
-    hl_.to = -1.0;
+    hlFrom_ = hlTo_ = -1;
     fade_ = {1.0, 1.0, {}, 0};
 }
 
@@ -581,7 +946,9 @@ QImage PanelView::render() {
     }
     ctx->setContextProperty("candidates", cands_);
     ctx->setContextProperty("highlight", highlight_);
-    ctx->setContextProperty("hlPos", hl_.at(now));
+    ctx->setContextProperty("hlFrom", hlFrom_);
+    ctx->setContextProperty("hlTo", hlTo_);
+    ctx->setContextProperty("hlT", hl_.at(now));
     ctx->setContextProperty("appear",
                             hiding_ ? hide_.at(now) : appear_.at(now));
     ctx->setContextProperty("contentFade", fade_.at(now));
@@ -593,6 +960,7 @@ QImage PanelView::render() {
     ctx->setContextProperty("listMode", listMode_);
     ctx->setContextProperty("loading", loading_);
     ctx->setContextProperty("headerText", headerText_);
+    ctx->setContextProperty("searchText", searchText_);
     // rotation du spinner : ~1 tour / 0,9 s tant que loading_
     double spin = 0.0;
     if (loading_) {

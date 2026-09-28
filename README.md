@@ -6,7 +6,7 @@ autocorrection, next-word prediction and an emoji picker. Offline, no telemetry.
 
 ![predictive-ime in action: next-word prediction, intra-word completion and the emoji picker](assets/demo.gif)
 
-> Typing `je vais au travail aujourd'`, accepting the `aujourd'hui` completion, then `:coeur` → ❤️. The candidate bar shows at most five ranked suggestions.
+> Typing `je vais au travail aujourd'`, accepting the `aujourd'hui` completion, then **Super+;** `coeur` → ❤️. The candidate bar shows at most five ranked suggestions.
 
 The core runs on any stock fcitx5 (using its default candidate bar). The
 optional Qt Quick candidate bar (`qmlpanel`) needs a patched fcitx5 —
@@ -90,6 +90,23 @@ learned words feel too weak on your corpus).
 bare proclitic `j'` (rarely the intended final word). `proclisisDemote`
 (default `6.0`) divides the score of a bare proclitic form (`j'`, `c'`, `qu'`,
 `d'`, `n'`, `s'`, `t'`, `m'`, `l'`) when you typed exactly that proclitic.
+
+**Emoji picker.** Always on, opened with **Super+;** at any point: empty
+buffer, mid-word (the word in progress is committed as typed), or with the
+next-word bar open; pressing it again closes the picker. It works **even when
+the predictive input method is not the active one** (the addon watches the
+shortcut before any input method, switches to `predict` and opens the picker),
+so no Ctrl+Space first. The switch is a **loan**: as soon as the picker closes
+(emoji inserted, Escape, shortcut pressed again, focus lost) your previous
+input method is restored, so picking an emoji never leaves text prediction
+turned on. It is a Material 3 surface with its own search field,
+so the query stays in the picker and is never typed into your document. Type a
+CLDR keyword (`coeur`, `soleil`, `fire`…) to filter the grid, or pick straight
+from your recently-used favourites. Up to 96 results, **24 per page**: arrows
+move cell by cell and by row, spilling over to the next/previous page at the
+edges, PgDn/PgUp jump a page, Home/End go to either end, and the current page
+shows as `2/4` in the search field. Enter inserts, Escape closes without
+inserting anything. A typed `:` is a plain character everywhere (`10:30`).
 
 **French typography (opt-in).** `frenchSpacing` (default `false`) inserts a
 narrow no-break space (U+202F) before `;` `:` `!` `?` and the closing guillemet

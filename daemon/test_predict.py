@@ -459,6 +459,23 @@ try:
     c = cands("coeur")
     check("emoji: hint — 'coeur' (mot normal) propose ❤️ en fin de barre",
           "❤️" in c, str(c))
+    # RÉCENCE : la grille nue ouvre sur les DERNIERS choisis, même moins utilisés
+    # que d'autres favoris (⭐ compte 2, 😊 compte 1 mais vient d'être inséré).
+    req({"learn": {"prev": "", "word": "😊"}})
+    c = cands(":")
+    check("emoji récents: ':' met le dernier choisi en tête (😊 avant ⭐)",
+          len(c) >= 2 and c[0] == "😊" and c[1] == "⭐", str(c[:3]))
+    req({"learn": {"prev": "", "word": "🐭"}})
+    c = cands(":")
+    check("emoji récents: le suivant pousse les autres (🐭, 😊, ⭐)",
+          c[:3] == ["🐭", "😊", "⭐"], str(c[:4]))
+    check("emoji récents: la grille reste complète (7 distincts)", len(c) == 7,
+          str(c))
+    # …et dans une RECHERCHE la récence ne fait que départager : ':s' matche
+    # star/sourire/souris, 🐭 (le plus récent) passe devant 😊 à usage égal.
+    c = cands(":s")
+    check("emoji récents: ':s' — à usage égal, le plus récent devant",
+          c.index("🐭") < c.index("😊"), str(c))
 
     # 8bis) RESTAURATION D'ACCENTS (fold-equal) + ghost découplé + barWords
     r = req({"prefix": "etre", "context": []})

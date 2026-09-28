@@ -19,13 +19,14 @@ ime/
   daemon/                # Track B — cerveau + câblage
     predictord.cpp       #   socket Unix + JSON ; modèle KN précalculé + emoji + apprentissage
     build_ngrams.py      #   corpus → modèle Kneser-Ney interpolé (offline, format TSV)
-    build_emoji.py       #   CLDR fr+en + emoji-test.txt → emoji.tsv (picker ':')
+    build_emoji.py       #   CLDR fr+en + emoji-test.txt → emoji.tsv (picker Super+;)
     eval_model.py        #   harness d'évaluation (hit@k, auto-KSR, autocorrection, latence)
     test_predict.py      #   tests comportementaux du daemon (27 cas)
     bench_ngram.cpp      #   "spike" latence (n-gram synthétique à l'échelle réelle)
     CMakeLists.txt
   ui/                    # barre de candidats Qt Quick (cf section UI QML)
   test-e2e.sh            # e2e assertif headless (sway + fcitx5 + wtype)
+  test-hotkey.sh         # e2e : picker sans activer l'IME, et méthode rendue après
   test-ui.sh             # captures visuelles headless (grim) + assertions d'animation
 ```
 
@@ -172,28 +173,91 @@ P1(w)    = 0.7·Pcont(w) + 0.3·Pfreq(w)
   filtrées par `emoji-test.txt` (liste autoritaire Unicode, formes
   fully-qualified pour le rendu couleur) + prior de popularité Unicode.
 
-## Emoji picker (préfixe `:`)
+## Emoji picker (raccourci `Super+;`)
 
-- `:` sur buffer vide démarre le picker (jamais en milieu de mot : `10:30`
-  et « bonjour : voici » tapent normalement ; `:` + Espace garde le littéral).
-- `:coeur`→❤️, `:soleil`→☀️, `:fete`→🎉 — recherche par mot-clé CLDR replié
-  (accents/ligatures : `:cœur` marche aussi), le nom canonique (tts) domine
-  les mots-clés, les **favoris appris remontent** (`learn` à chaque emoji
-  committé). `:` seul liste tes favoris puis une sélection courante.
-  **Tolérance aux fautes** : si le préfixe exact ne matche rien (requête ≥3),
-  transpositions et suppressions d'un caractère sont réessayées à score
-  pénalisé — `:ceour`→❤️, `:etoiel`→⭐, `:thumsb`→👍.
-- **Grille 3×8** : le mode emoji affiche jusqu'à 24 candidats en grille —
-  Tab/⇧Tab et **←/→ (entrée directe, sans Tab préalable)** se déplacent de
-  case en case, **↑/↓ sautent d'une ligne** (wrap), 1-6 sélectionnent sur la
-  première ligne, taper affine en live. `:` seul = tes favoris puis les
-  populaires (recently-used, façon Win+.). Le browsing par catégorie est
-  gratuit : `:animal`, `:fete`, `:main`…
+- `Super+;` ouvre le picker **à tout moment** : buffer vide, en plein mot (le
+  mot en cours est committé tel quel, sans apprentissage) ou barre
+  mot-suivant ouverte. Re-presser referme. `:` **tapé** n'est plus un
+  déclencheur : c'est un caractère normal partout (`10:30`, « bonjour :
+  voici »). En interne le buffer reste `:requête` (l'UI déduit le mode grille
+  de ce préfixe) — seule l'entrée dans le mode a changé.
+- **Même quand l'IME prédictif n'est PAS la méthode active** : fcitx n'envoie
+  les touches qu'à la méthode COURANTE, donc le raccourci serait mort tant
+  qu'on n'a pas fait Ctrl+Espace. L'addon écoute donc les touches en phase
+  `PreInputMethod` (`InputContextKeyEvent`, avant toute méthode) : si le
+  raccourci tombe alors qu'une autre méthode est active, il bascule sur
+  `predict` (`setCurrentInputMethod(ic, …, local=true)`) puis ouvre le picker.
+- **C'est un EMPRUNT, pas une bascule** : la méthode d'origine est mémorisée
+  (`imBeforePicker`) et RENDUE dès que le picker se referme — emoji committé,
+  Échap, re-appui sur le raccourci, perte de focus (`releaseBorrowedIm`, posté
+  au dispatcher : basculer d'IME en pleine main de touche rappellerait
+  `reset()`). Sans ça, choisir un emoji allumait la prédiction de texte pour
+  toute la frappe suivante. Couvert par `./test-hotkey.sh` (profil à deux
+  méthodes, attendu « ok❤️ bonjou » : le mot d'après reste littéral).
+  **Piège de test** : sous Hyprland, `wtype` téléverse son PROPRE keymap et le
+  compositeur résout le keycode dans le sien — le raccourci injecté arrive
+  sous une autre touche (ici `Super+Escape`, donc le menu d'alimentation DMS).
+  L'injection ne vaut que sous sway ; sous Hyprland, tester à la main.
+- `Super+;` puis `coeur`→❤️, `soleil`→☀️, `fete`→🎉 — recherche par mot-clé
+  CLDR replié (accents/ligatures : `cœur` marche aussi), le nom canonique
+  (tts) domine les mots-clés, les **favoris appris remontent** (`learn` à
+  chaque emoji committé). Sans requête : tes favoris puis une sélection
+  courante. **Tolérance aux fautes** : si le préfixe exact ne matche rien
+  (requête ≥3), transpositions et suppressions d'un caractère sont réessayées
+  à score pénalisé — `ceour`→❤️, `etoiel`→⭐, `thumsb`→👍.
+- **Champ de recherche** : la requête n'entre PLUS dans l'application. Elle
+  part dans le préedit du **panneau** (`inputPanel().setPreedit`), le préedit
+  CLIENT reste vide — la barre QML en fait un champ M3 (loupe dessinée,
+  placeholder, caret accent) et l'UI fcitx classique l'affiche au-dessus des
+  candidats. C'est aussi le marqueur de mode grille pour l'UI (`qmlui.cpp`
+  `emojiPicker()`), qui garde donc la barre affichée **même sans candidat**.
+- **Grille 3×8** (Material 3) : jusqu'à 24 candidats, cases de 32 px (rayon
+  10, sélection en `secondaryContainer`), largeur FIXE 8 colonnes — la grille
+  ne saute plus à chaque frappe. Surface `surface_container_high`, champ de
+  recherche `surface_container_highest`, textes secondaires
+  `on_surface_variant` ; ligne d'aide clavier en bas.
+- **Pagination** : le daemon rend jusqu'à 96 emojis (4 pages), la grille en
+  montre 24 (`kGridPage`). `pageStart` est l'index absolu du premier emoji
+  affiché ; les candidats envoyés à l'UI ne sont QUE la page courante, et tout
+  accès passe par `candOf(state, indexLocal)` — sinon Entrée committerait
+  l'emoji de la page 1. ↓ sur la dernière ligne et ↑ sur la première
+  **tournent la page** en gardant la colonne ; ←/→ débordent aussi ;
+  **PgDn/PgUp** sautent d'une page ; Début/Fin vont au tout début / à la toute
+  fin. L'indicateur « 2/4 » part en `auxUp` et s'affiche à droite du champ de
+  recherche. Toute frappe revient en page 1.
+- **Navigation** : Tab/⇧Tab et **←/→ (entrée directe, sans Tab préalable)** de
+  case en case, **↑/↓ d'une ligne** (±8), **Début/Fin** aux extrémités, 1-6
+  sur la première ligne, taper affine en live. En grille les flèches sont
+  **bornées** (`navigate(..., clamp=true)`) au sein d'une page : ← sur la 1re
+  case ne renvoie plus à la dernière. Tab, lui, cycle toujours.
+- **Aucun résultat** : le picker reste ouvert et affiche « Aucun emoji pour
+  … » (fermer la barre à la première faute de frappe est brutal, la frappe
+  suivante peut retomber sur des résultats). Le littéral `:zzz` n'est jamais
+  proposé en candidat.
+- Picker nu = **récents**, puis favoris, puis populaires (façon Win+.). La 1re
+  rangée (`kRecentRow` = 8, les colonnes de la grille) liste les **derniers
+  emojis choisis**, du plus récent au moins récent ; le reste suit l'usage
+  (compteur appris), puis les populaires CLDR remplissent la grille. Borner les
+  récents à une rangée est délibéré : en MRU pur, toute la grille se
+  réorganisait à chaque insertion et la mémoire des positions sautait ; là,
+  seule la 1re ligne bouge. Dans une **recherche**, la récence n'est qu'un
+  départage (`kRecencyBonus`, ≤ 2 points contre 10 + compteur d'usage pour
+  « déjà utilisé ») : l'habitude reste le signal principal.
+  La récence ne coûte **aucun fichier** : `user.log` est rejoué dans l'ordre, donc
+  le dernier événement d'un mot donne son rang (`userSeq`). `ageUser` recompacte
+  le journal **en ordre de récence** — sinon le MRU repartait dans un ordre
+  arbitraire après chaque compaction (tous les 512 commits).
+  Le browsing par catégorie est gratuit : `animal`, `fete`, `main`…
 - Espace committe l'emoji du haut (avec espace), **Entrée le surligné — ou le
-  premier si on n'a pas encore navigué** (sans espace ; le `:` nu garde son
-  comportement littéral). Vaut aussi pour les snippets (`;mail` + Entrée →
-  expansion). En complétion normale, un mot qui est exactement un mot-clé
-  (« coeur ») propose l'emoji en fin de barre.
+  premier si on n'a pas encore navigué** (sans espace), y compris picker nu
+  (le 1er favori). Vaut aussi pour les snippets (`;mail` + Entrée →
+  expansion ; `;` nu reste littéral, c'est un caractère TAPÉ). En complétion
+  normale, un mot qui est exactement un mot-clé (« coeur ») propose l'emoji en
+  fin de barre.
+- **Annuler ne colle rien** : Échap, une ponctuation, Super+; à nouveau — tout
+  chemin « littéral » FERME le picker au lieu de committer `:requête` (le `:`
+  vient du raccourci, pas de la frappe). Garde unique en tête de `commitWord`
+  (`isEmojiBuffer && raw == buffer`), donc tous les appelants en héritent.
 
 ## Reformulation (Ctrl+Alt+R sur une sélection)
 
@@ -241,7 +305,7 @@ P1(w)    = 0.7·Pcont(w) + 0.3·Pfreq(w)
   **droite** ; en navigation, ←/→ se déplacent et **1-6** sélectionnent
   directement. Espace/Entrée valident le surligné. ↑/↓ ne sont **pas**
   capturés (ils déplacent le curseur dans un éditeur multi-lignes) — sauf en
-  **grille emoji** (`:`), où ils sautent d'une ligne (±8, wrap) — et les
+  **grille emoji** (`Super+;`), où ils sautent d'une ligne (±8, borné) — et les
   raccourcis à modificateur (Ctrl+Tab, Ctrl+Entrée…) committent le littéral
   puis **passent** à l'application. Un appui de modificateur seul (Shift…)
   ne touche à rien — ni au mot en cours, ni à la barre, ni au revert.
@@ -259,8 +323,44 @@ P1(w)    = 0.7·Pcont(w) + 0.3·Pfreq(w)
 - **Backspace juste après une auto-application** : REVERT — le mot remplacé
   est effacé, le littéral tapé revient en composition, et l'Espace suivant le
   respecte (pas de re-correction). La fenêtre survit aux modificateurs.
+- **Effacer n'applique jamais** (`erasing`) : après un Backspace — dans la
+  composition comme sur un mot recomposé — plus de **fantôme** ni
+  d'**auto-application** tant qu'un caractère n'a pas été retapé. Sans ce frein,
+  effacer ne servait à rien : la complétion du préfixe raccourci remettait
+  aussitôt ce qu'on venait d'enlever (⌫ sur `bonjour` réaffichait `bonjour`,
+  cursor entre `bonjou` et `r`), et l'Espace committait la complétion refusée —
+  pire sur une recomposition, où effacer l'espace après `salut` proposait
+  `salutation` que l'Espace appliquait. Les **candidats restent** (Tab/1-6
+  choisissent encore) : c'est l'application AUTOMATIQUE qu'on retire, pas la
+  suggestion. Même durée de vie que `vetoAuto` (le mot en cours).
+  `ghostShown()` centralise les conditions d'affichage du fantôme, parce que la
+  touche → s'en sert aussi : sinon → accepterait une complétion invisible.
 - **Ctrl+Backspace en composition** : ABANDONNE le mot en cours — rien n'est
   committé, rien n'est appris.
+
+### Éditer le texte déjà écrit : `canEditSurrounding` (crash client)
+
+Tout ce qui touche au texte DÉJÀ dans l'application (revert, recomposition,
+fine insécable, reformulation) passe par `canEditSurrounding()`, qui exige que
+**ce client** ait publié un texte environnant depuis qu'il a le focus
+(événement `InputContextSurroundingTextUpdated`, drapeau `sawSurrounding`
+remis à zéro au changement de focus).
+
+La capacité annoncée par fcitx ne suffit pas, et ça se paie cher : un terminal
+GTK4 (**ghostty**) active text-input-v3 sans jamais appeler
+`set_surrounding_text`, donc son tampon côté GTK reste `NULL` — mais le cache
+de fcitx, lui, peut contenir le texte d'un AUTRE contexte. La suppression
+passait alors la validation de fcitx
+(`waylandimserverv2.cpp`, bornes vérifiées contre CE cache), arrivait chez un
+client sans tampon, et `text_input_delete_surrounding_text` déréférençait
+`NULL` dans `g_utf8_pointer_to_offset` : **SIGSEGV du client**. Symptôme vu :
+ghostty disparaît au premier Backspace après avoir tapé un mot, IME actif.
+Trace protocole du bug : `delete_surrounding_text(3, 0)` alors que le client
+n'avait envoyé aucun `set_surrounding_text`.
+
+`deleteSurroundingBefore` vérifie en plus ses bornes AVANT d'émettre (l'ordre
+comptait : la vérification ne protégeait que la copie locale, la requête
+partait quand même). GTK4 ne valide rien de son côté, d'où la prudence ici.
 - **Échap** : ANNULE la suggestion (en composition le littéral est committé
   tel quel, rien n'est appris — annuler ≠ valider) ou ferme la barre
   mot-suivant, puis la touche **file à l'application** (vim sort du mode
@@ -368,7 +468,11 @@ nix build ./ime#model            # modèle KN + emoji (corpus épinglés)
 # tests comportementaux du cerveau (27 cas : accents, fautes, contexte, KN, emoji) :
 python3 ime/daemon/test_predict.py "$(nix build ./ime#predictord --no-link --print-out-paths)/bin/predictord"
 ./ime/test-e2e.sh                # e2e assertif (sway headless, AZERTY, 15 cas)
+./ime/test-hotkey.sh             # picker sans activer l'IME + méthode d'entrée rendue
 ./ime/test-ui.sh                 # captures visuelles + assertions d'animation
+# rendu hors ligne de la barre (états QML → PNG, sans compositeur) : le résultat
+# est le dossier de captures, à ouvrir pour relire le design.
+nix build ./ime#checks.x86_64-linux.panel
 ```
 
 ## État
@@ -392,9 +496,10 @@ python3 ime/daemon/test_predict.py "$(nix build ./ime#predictord --no-link --pri
 - [x] **Datasets enrichis** — Leipzig news 300K + Tatoeba conversationnel
       (OPUS, immuable), harness d'évaluation `eval_model.py` (ablation
       complète baseline → KN → corpus).
-- [x] **Emoji picker** — `:mot-clé` (CLDR fr+en, filtre emoji-test.txt, formes
-      fully-qualified, prior de popularité, favoris appris), hint emoji en
-      complétion normale. e2e : `:coeur ` → `❤️ `.
+- [x] **Emoji picker** — `Super+;` + mot-clé (CLDR fr+en, filtre
+      emoji-test.txt, formes fully-qualified, prior de popularité, favoris
+      appris), hint emoji en complétion normale. e2e : `Super+;` `coeur ` →
+      `❤️ `.
 - [x] **UI QML v2 — design + animations** : apparition fade+slide (140 ms),
       pill accent qui **glisse** entre candidats (110 ms, ease-out cubic),
       boucle de frames pilotée par `wl_callback` (frame callbacks Wayland),
@@ -581,6 +686,13 @@ cf `ui/waylandim-public.patch`). Rendu **software** offscreen
 (`QQuickView::grabWindow` → `QImage` → buffer `wl_shm`), sans event-loop Qt
 (monothread, comme le module wayland).
 
+**Surlignage** : le pill n'interpole PAS un index flottant mais une
+progression `hlT` 0→1 entre deux cases (`hlFrom` → `hlTo`), et QML lerpe
+directement leurs positions. Avec un index flottant, un saut de ligne dans la
+grille (±8) faisait défiler le pill par toutes les cases intermédiaires : il
+partait à droite au lieu de descendre. Maintenant le trajet est une droite,
+diagonale comprise (voir la capture `picker-morph-mid.png` du rendu de test).
+
 **Animations** : l'état (apparition, position du pill, fondu de fermeture)
 est avancé côté C++ (steady_clock + ease-out cubic), exposé au QML en context
 properties ; tant qu'une animation court, `qmlui.cpp` redemande une frame au
@@ -597,7 +709,48 @@ candidat surligné, liseré `outline`, police Maple Mono NF, emojis en fonte
 couleur (17 px). Couleurs lues de
 `~/.cache/DankMaterialShell/dms-colors.json` (live-reload au changement de
 thème), override via `~/.config/fcitx5/qmlpanel/colors.json`
-(`{surface,onSurface,accent,onAccent,outline}`).
+(`{surface,onSurface,accent,onAccent,outline,surfaceVariant,onSurfaceVariant,
+secondaryContainer,surfaceTint,tertiary,scrim}` + `mode` et `opacity`).
+
+**Palette dynamique DMS** : les rôles Material 3 sont pris dans
+`colors.{dark,light}` de matugen — `surface_container_high` (carte),
+`on_surface`, `primary`/`on_primary` (accent), `outline_variant`,
+`surface_container_highest` (champ de recherche), `on_surface_variant`,
+`secondary_container` (case sélectionnée), et `surface_tint` (= primary : la
+teinte du reflet, donc **la couleur du fond d'écran**), `tertiary` (2e accent :
+pagination du picker), `scrim` (ombre). Le mode clair/sombre se **vote** sur les
+16 couleurs `dank16` (`default` == `dark` ou == `light`) au lieu de trancher sur
+la première qui diffère : DMS écrit certaines entrées identiques dans les deux
+modes, et une seule suffisait à inverser tout le thème du panneau.
+
+**Style acrylique** (verre) : la carte est translucide — `glass` =
+`surface` + alpha (0,74 sombre / 0,82 clair, réglable par `"opacity"` dans
+l'override ou `QMLPANEL_OPACITY`), plus un **reflet** dégradé teinté
+`surface_tint` en haut, une **arête interne** claire (`on_surface` à 16 %), un
+liseré externe adouci et un **halo** d'ombre dans la marge de 5 px (deux anneaux
+`scrim` : le renderer software n'a ni DropShadow ni shader). L'alpha est porté
+par les COULEURS, jamais par `opacity` sur la carte — sinon les glyphes se
+délavaient aussi. Tout est dérivé de la palette, donc le verre suit matugen.
+Le vrai flou vient du compositeur : sous Hyprland il faut
+`decoration:blur:input_methods = true` (à côté de `blur.popups`) — sans lui, le
+panneau reste du verre *teinté* (le fond se voit net à travers), ce qui est
+lisible mais pas dépoli. `input_methods_ignorealpha` (0,2 par défaut) écarte du
+flou les pixels très transparents : le halo disparaît proprement quand le flou
+est actif, la carte reste. `verre-picker.png` / `verre-barre-mots.png`
+(cf `panel_preview`) composent le panneau sur un faux fond d'application —
+l'alpha d'un PNG à fond transparent ne se juge pas.
+
+Trois rendus dans la même surface, choisis par `gridMode`/`listMode` :
+**compact** (mots), **picker emoji** (Material 3 : champ de recherche pleine
+rondeur, grille 8 colonnes de cases 32 px, sélection `secondaryContainer`,
+aide clavier, état vide — cf section Emoji picker) et **liste** (reformulation).
+La loupe du champ de recherche est **dessinée** (deux rectangles) : le rendu est
+software et la fonte du panneau n'a pas toujours le glyphe.
+
+Un binaire de test rend ces états en PNG **sans compositeur** :
+`nix build ./ime#checks.x86_64-linux.panel` (source `ui/panel_preview.cpp`).
+Il sert de garde-fou — une erreur QML donne un composant nul, donc un panneau
+muet qui avale les frappes — et de relecture visuelle du design.
 
 **Évitement du texte** : le compositeur place la popup au caret ; s'il la pose
 SUR la ligne en cours de frappe (bas d'écran, rect curseur dégénéré côté
@@ -606,6 +759,34 @@ de la ligne de texte dans nos coordonnées de surface) et décale la barre dans
 un canvas transparent — collée au-dessus de la ligne si la place existe, sinon
 juste en dessous. Hystérésis jusqu'au démappage (pas d'oscillation
 compositeur ↔ resize). Le texte reste visible à travers le transparent.
+
+**Ping du caret** (« le panneau ne suit pas le curseur dans Chrome/Discord ») :
+le compositeur ne place la popup au caret que si le client a publié son
+rectangle de curseur (`text-input-v3`, `set_cursor_rectangle`). Les clients
+Chromium (Chrome, Discord, VS Code…) ne le publient QUE quand une **préédition
+change** — c'est leur moteur de rendu qui remonte la position du caret, et il
+ne le fait que si l'état de saisie a bougé. Trace protocole d'un champ Chrome
+(`--enable-wayland-ime`, `WAYLAND_DEBUG=1`) :
+
+```
+enter / enable / commit                        ← focus : AUCUN rectangle
+preedit_string("b") … 45 ms → set_cursor_rectangle(406, 390, 0, 22)
+```
+
+La barre de mots suit donc le caret (elle pose un préedit client à chaque
+frappe), mais les panneaux qui laissent le préedit client VIDE — picker emoji
+(la requête vit dans le champ de recherche du panneau) et menu de langue —
+ne déclenchaient rien : faute de rectangle, Hyprland ancre la popup sur un bloc
+de **repli** de 500×500 au coin haut-gauche du client
+(`CInputPopup::updateBox`, branche `!cursorRect`) et le panneau restait scotché
+là. D'où `pingCaretRect` (engine) : à l'ouverture de ces panneaux, une
+préédition **zéro-largeur** (U+200B) est posée 200 ms — le temps que le client
+recalcule et publie sa position — puis effacée. Invisible dans l'application
+(aucun glyphe, le caret ne bouge pas), et rien ne peut être committé : la
+composition ne survit pas au ping (un clic ailleurs fait valider par Chromium
+la composition en cours, d'où la durée bornée). Pas de ping quand du texte est
+**sélectionné** : une composition remplace la sélection, et la reformulation en
+dépend.
 
 Activer : lancer fcitx5 patché avec `--ui qmlpanel` (sinon classicui reste
 l'UI). Test visuel headless : `./test-ui.sh` (PNG dans `/tmp/ime-ui/`).

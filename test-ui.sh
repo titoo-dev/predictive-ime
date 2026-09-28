@@ -6,21 +6,21 @@
 #   2-nav-pill.png        pill accent sur le candidat surligné (Tab)
 #   3-pill-morph-mid.png  pill EN COURS de glissement (anim ralentie ×20)
 #   4-nextword.png        barre mot-suivant après commit ("je ")
-#   5-emoji.png           picker emoji (":coeur")
+#   5-emoji.png           picker emoji (Super+; puis "coeur")
 #   6-appear-mid.png      barre EN COURS d'apparition (fade+slide, anim ×20)
 # Vérifie aussi (assertions) que les mid-frames diffèrent des états stables —
 # preuve que la boucle de frames Wayland anime réellement.
 set -uo pipefail
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" # le repo lui-même (son NOM ne compte pas)
 OUT=/tmp/ime-ui; rm -rf "$OUT"; mkdir -p "$OUT"
 WT="$OUT/wt"; mkdir -p "$WT/config/fcitx5" "$WT/cache" "$WT/xdg"
 
 echo "==> build paquets + outils"
-ENGINE=$(nix build "$REPO/ime#fcitx5-predict" --no-link --print-out-paths 2>/dev/null)
-QMLUI=$(nix build "$REPO/ime#qmlpanel" --no-link --print-out-paths 2>/dev/null)
-FCITX5=$(nix build "$REPO/ime#fcitx5-patched" --no-link --print-out-paths 2>/dev/null)
-DAEMON=$(nix build "$REPO/ime#predictord" --no-link --print-out-paths 2>/dev/null)
-MODEL=$(nix build  "$REPO/ime#model" --no-link --print-out-paths 2>/dev/null)
+ENGINE=$(nix build "$REPO#fcitx5-predict" --no-link --print-out-paths 2>/dev/null)
+QMLUI=$(nix build "$REPO#qmlpanel" --no-link --print-out-paths 2>/dev/null)
+FCITX5=$(nix build "$REPO#fcitx5-patched" --no-link --print-out-paths 2>/dev/null)
+DAEMON=$(nix build "$REPO#predictord" --no-link --print-out-paths 2>/dev/null)
+MODEL=$(nix build  "$REPO#model" --no-link --print-out-paths 2>/dev/null)
 SWAY=$(nix build  nixpkgs#sway   --no-link --print-out-paths 2>/dev/null)
 ZENITY=$(nix build nixpkgs#zenity --no-link --print-out-paths 2>/dev/null)
 WTYPE=$(nix build nixpkgs#wtype --no-link --print-out-paths 2>/dev/null)/bin/wtype
@@ -120,7 +120,7 @@ inj -d 60 -- "je "; sleep 3.5; shot 4-nextword.png
 # la taille grille. Avant le fix (resize + re-grab dans PanelView::render),
 # elle restait CLIPÉE à la hauteur de la barre mot-suivant (2e rangée coupée)
 # jusqu'à la frappe suivante — à inspecter : rangées entières visibles.
-inj -d 60 -- ":"; sleep 1.5; shot 5a-emoji-first-frame.png
+inj -M logo -k semicolon -m logo; sleep 1.5; shot 5a-emoji-first-frame.png
 inj -d 60 -- "coeur"; sleep 2.5; shot 5-emoji.png
 inj -k Tab; sleep 3.0; shot 5b-emoji-nav.png
 inj -k Down; sleep 3.0; shot 5c-emoji-row2.png
