@@ -6,18 +6,20 @@ import Install from "@/components/Install";
 import Nav from "@/components/Nav";
 import Privacy from "@/components/Privacy";
 import VideoSection from "@/components/VideoSection";
+import { getWindowsRelease } from "@/lib/release";
 
-export default function Home() {
+export default async function Home() {
+  const release = await getWindowsRelease();
   return (
     <>
       <Nav />
       <main className="flex-1">
-        <Hero />
+        <Hero release={release} />
         <VideoSection />
         <Features />
         <HowItWorks />
         <Privacy />
-        <Install />
+        <Install release={release} />
       </main>
       <Footer />
     </>

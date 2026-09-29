@@ -1,9 +1,9 @@
+import type { WindowsRelease } from "@/lib/release";
+import DownloadButton from "./DownloadButton";
 import { LinuxIcon, WindowsIcon } from "./Hero";
 import Reveal from "./Reveal";
 
-const RELEASES = "https://github.com/titoo-dev/predictive-ime/releases";
-
-export default function Install() {
+export default function Install({ release }: { release: WindowsRelease }) {
   return (
     <section id="install" className="scroll-mt-20 border-t hairline py-20 sm:py-28">
       <div className="mx-auto max-w-6xl px-5">
@@ -16,7 +16,8 @@ export default function Install() {
           </h2>
           <p className="mt-4 text-[16px] text-ink-2 sm:text-[17px]">
             Un installeur sur Windows, quatre commandes sur Linux. Le modèle est
-            téléchargé une fois, puis tout se passe hors ligne.
+            livré dans l'installeur (téléchargé une fois sur Linux), puis tout se
+            passe hors ligne.
           </p>
         </Reveal>
 
@@ -31,8 +32,10 @@ export default function Install() {
               <ol className="mt-4 space-y-3 text-[14.5px] text-ink-2">
                 <Step n={1}>
                   Téléchargez et lancez{" "}
-                  <code>predictive-ime-0.1.0-x64.exe</code>. Il enregistre le
-                  service, installe le modèle et la tâche de démarrage.
+                  <code>{release.fileName ?? "predictive-ime-x64.exe"}</code>. Il
+                  enregistre le service, installe le modèle (livré dedans, rien à
+                  télécharger) et la tâche de démarrage, puis ouvre le panneau
+                  d&apos;administration.
                 </Step>
                 <Step n={2}>
                   Appuyez sur <kbd className="key">Win</kbd>{" "}
@@ -44,10 +47,7 @@ export default function Install() {
                   ouvre les emojis, l&apos;icône de la barre des tâches met en pause.
                 </Step>
               </ol>
-              <a href={RELEASES} target="_blank" rel="noreferrer" className="btn-primary mt-6">
-                Télécharger l&apos;installeur
-                <ArrowIcon />
-              </a>
+              <DownloadButton release={release} className="mt-6 !items-start" />
               <p className="mt-4 text-[12.5px] text-ink-3">Ou depuis les sources :</p>
               <pre className="code mt-2">
                 <span className="c"># Build Tools + zstd, puis :</span>
@@ -146,10 +146,3 @@ function Step({ n, children }: { n: number; children: React.ReactNode }) {
   );
 }
 
-function ArrowIcon() {
-  return (
-    <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-      <path d="M5 12h14M13 6l6 6-6 6" />
-    </svg>
-  );
-}

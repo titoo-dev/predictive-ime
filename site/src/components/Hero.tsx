@@ -1,7 +1,9 @@
+import type { WindowsRelease } from "@/lib/release";
+import DownloadButton from "./DownloadButton";
 import HeroDemo from "./HeroDemo";
 import Reveal from "./Reveal";
 
-export default function Hero() {
+export default function Hero({ release }: { release: WindowsRelease }) {
   return (
     <section id="top" className="relative overflow-hidden">
       {/* Fond Mica + blobs de la vidéo */}
@@ -48,11 +50,8 @@ export default function Hero() {
             </p>
           </Reveal>
           <Reveal delay={240}>
-            <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
-              <a href="#install" className="btn-primary">
-                <WindowsIcon />
-                Télécharger pour Windows
-              </a>
+            <div className="mt-8 flex flex-wrap items-start justify-center gap-3">
+              <DownloadButton release={release} details={false} />
               <a href="#install" className="btn-secondary">
                 <LinuxIcon />
                 Installer sur Linux
@@ -61,7 +60,9 @@ export default function Hero() {
           </Reveal>
           <Reveal delay={320}>
             <p className="mt-5 text-[13px] text-ink-3">
-              Open source · MIT · Windows 10 1803+ / 11 · fcitx5
+              {release.available
+                ? `v${release.version} · ${release.sizeMb} Mo · Windows 10 1803+ / 11 x64 · Linux fcitx5 · MIT`
+                : "Open source · MIT · Windows 10 1803+ / 11 · fcitx5"}
             </p>
           </Reveal>
         </div>
