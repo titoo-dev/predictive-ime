@@ -1,0 +1,414 @@
+@import "tailwindcss";
+
+/* Palette dérivée de la vidéo (Windows 11 clair + accents Material). */
+:root {
+  --mica: #f3f3f3;
+  --mica-2: #fafafa;
+  --mica-3: #eef1f6;
+  --layer: #ffffff;
+  --stroke: rgba(0, 0, 0, 0.0578);
+  --stroke-strong: rgba(0, 0, 0, 0.16);
+  --text: #1b1b1b;
+  --text-2: #5d5d5d;
+  --text-3: #8a8a8a;
+  --accent: #005fb8;
+  --accent-soft: rgba(0, 95, 184, 0.1);
+
+  --m-blue: #1976d2;
+  --m-blue-l: #2196f3;
+  --m-purple: #8e24aa;
+  --m-purple-l: #ab47bc;
+  --m-teal: #00796b;
+  --m-teal-l: #26a69a;
+  --m-amber: #ffb300;
+  --m-amber-l: #ffca28;
+  --m-pink: #c2185b;
+  --m-pink-l: #ec407a;
+  --m-green: #2e7d32;
+  --m-green-l: #66bb6a;
+  --m-orange: #ef6c00;
+  --m-orange-l: #ffa726;
+  --m-indigo: #3949ab;
+
+  --blob-a: #90caf9;
+  --blob-b: #ce93d8;
+  --blob-c: #80cbc4;
+}
+
+@theme inline {
+  --color-mica: var(--mica);
+  --color-layer: var(--layer);
+  --color-ink: var(--text);
+  --color-ink-2: var(--text-2);
+  --color-ink-3: var(--text-3);
+  --color-accent: var(--accent);
+  --color-m-blue: var(--m-blue);
+  --color-m-blue-l: var(--m-blue-l);
+  --color-m-purple: var(--m-purple);
+  --color-m-teal: var(--m-teal);
+  --color-m-amber: var(--m-amber);
+  --color-m-pink: var(--m-pink);
+  --color-m-green: var(--m-green);
+  --color-m-orange: var(--m-orange);
+  --color-m-indigo: var(--m-indigo);
+  --font-sans: var(--font-geist-sans), "Segoe UI Variable Display", "Segoe UI", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), "Cascadia Code", Consolas, ui-monospace, monospace;
+}
+
+html {
+  scroll-behavior: smooth;
+  overflow-x: clip;
+}
+
+body {
+  background: var(--mica);
+  color: var(--text);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background: rgba(25, 118, 210, 0.2);
+}
+
+/* ---------- Utilitaires de style ---------- */
+
+.grad-text {
+  background: linear-gradient(90deg, var(--m-blue), var(--m-purple), var(--m-pink));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.hairline {
+  border-color: var(--stroke-strong);
+}
+
+.card {
+  background: rgba(255, 255, 255, 0.85);
+  border: 1px solid var(--stroke-strong);
+  border-radius: 16px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.035);
+  transition:
+    transform 0.35s cubic-bezier(0.2, 0.8, 0.2, 1),
+    box-shadow 0.35s cubic-bezier(0.2, 0.8, 0.2, 1),
+    border-color 0.35s;
+}
+.card:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.08);
+  border-color: color-mix(in srgb, var(--c, var(--accent)) 45%, transparent);
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  text-align: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--stroke-strong);
+  background: rgba(255, 255, 255, 0.7);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-2);
+}
+
+.key {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  height: 26px;
+  padding: 0 8px;
+  border-radius: 6px;
+  background: #fff;
+  border: 1px solid var(--stroke-strong);
+  border-bottom-width: 3px;
+  border-bottom-color: rgba(0, 0, 0, 0.22);
+  font-size: 12px;
+  font-weight: 600;
+  font-family: var(--font-sans);
+  color: var(--text);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.06);
+}
+
+.btn-primary {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 44px;
+  padding: 0 20px;
+  border-radius: 999px;
+  background: var(--text);
+  color: #fff;
+  font-weight: 500;
+  font-size: 15px;
+  transition:
+    background 0.2s,
+    transform 0.2s;
+}
+.btn-primary:hover {
+  background: #000;
+  transform: translateY(-1px);
+}
+
+.btn-secondary {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 44px;
+  padding: 0 20px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.85);
+  border: 1px solid var(--stroke-strong);
+  color: var(--text);
+  font-weight: 500;
+  font-size: 15px;
+  transition:
+    border-color 0.2s,
+    background 0.2s,
+    transform 0.2s;
+}
+.btn-secondary:hover {
+  border-color: rgba(0, 0, 0, 0.3);
+  background: #fff;
+  transform: translateY(-1px);
+}
+
+/* Grille de fond façon Vercel (lignes fines + croix aux intersections). */
+.bg-grid {
+  background-image:
+    linear-gradient(to right, rgba(0, 0, 0, 0.045) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(0, 0, 0, 0.045) 1px, transparent 1px);
+  background-size: 64px 64px;
+  mask-image: radial-gradient(ellipse at center, black 40%, transparent 75%);
+}
+
+.bg-dots {
+  background-image: radial-gradient(rgba(0, 0, 0, 0.06) 1px, transparent 1px);
+  background-size: 6px 6px;
+}
+
+/* Blobs Mica (comme dans la vidéo) */
+.blob {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(80px);
+  opacity: 0.4;
+  pointer-events: none;
+  will-change: transform;
+}
+
+pre.code {
+  max-width: 100%;
+  background: #1b1b1b;
+  color: #f3f3f3;
+  border-radius: 12px;
+  padding: 16px 18px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.6;
+  overflow-x: auto;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.14);
+}
+pre.code .c {
+  color: #8a8a8a;
+}
+pre.code .k {
+  color: #90caf9;
+}
+pre.code .s {
+  color: #ce93d8;
+}
+
+/* ---------- Animations ---------- */
+
+@keyframes float-a {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0);
+  }
+  50% {
+    transform: translate3d(40px, 30px, 0);
+  }
+}
+@keyframes float-b {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0);
+  }
+  50% {
+    transform: translate3d(-50px, 20px, 0);
+  }
+}
+@keyframes float-c {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0);
+  }
+  50% {
+    transform: translate3d(20px, -40px, 0);
+  }
+}
+.anim-float-a {
+  animation: float-a 18s ease-in-out infinite;
+}
+.anim-float-b {
+  animation: float-b 22s ease-in-out infinite;
+}
+.anim-float-c {
+  animation: float-c 26s ease-in-out infinite;
+}
+
+@keyframes spin-slow {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.anim-spin-slow {
+  animation: spin-slow 40s linear infinite;
+  transform-origin: center;
+}
+.anim-spin-rev {
+  animation: spin-slow 60s linear infinite reverse;
+  transform-origin: center;
+}
+
+@keyframes dash {
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+@keyframes flow {
+  to {
+    stroke-dashoffset: -40;
+  }
+}
+.anim-flow {
+  stroke-dasharray: 6 8;
+  animation: flow 1.2s linear infinite;
+}
+
+@keyframes pulse-ring {
+  0% {
+    transform: scale(0.8);
+    opacity: 0.6;
+  }
+  100% {
+    transform: scale(1.6);
+    opacity: 0;
+  }
+}
+.anim-pulse-ring {
+  animation: pulse-ring 2.4s cubic-bezier(0.2, 0.8, 0.2, 1) infinite;
+  transform-origin: center;
+}
+
+@keyframes bob {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-6px);
+  }
+}
+.anim-bob {
+  animation: bob 3.2s ease-in-out infinite;
+}
+
+@keyframes caret {
+  0%,
+  49% {
+    opacity: 1;
+  }
+  50%,
+  100% {
+    opacity: 0;
+  }
+}
+.anim-caret {
+  animation: caret 1s steps(1) infinite;
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: 200% 50%;
+  }
+  100% {
+    background-position: -200% 50%;
+  }
+}
+.grad-text-anim {
+  background: linear-gradient(
+    90deg,
+    var(--m-blue),
+    var(--m-purple),
+    var(--m-pink),
+    var(--m-purple),
+    var(--m-blue)
+  );
+  background-size: 300% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: shimmer 8s linear infinite;
+}
+
+/* Révélation au scroll (classe posée par <Reveal/>). */
+.reveal {
+  opacity: 0;
+  transform: translateY(18px);
+  transition:
+    opacity 0.7s cubic-bezier(0.2, 0.8, 0.2, 1),
+    transform 0.7s cubic-bezier(0.2, 0.8, 0.2, 1);
+  transition-delay: var(--delay, 0ms);
+}
+.reveal.is-visible {
+  opacity: 1;
+  transform: none;
+}
+
+/* Tracé SVG : dessin de contour quand la section devient visible. */
+.draw path,
+.draw circle,
+.draw rect,
+.draw line,
+.draw polyline {
+  stroke-dasharray: var(--len, 300);
+  stroke-dashoffset: var(--len, 300);
+}
+.is-visible .draw path,
+.is-visible .draw circle,
+.is-visible .draw rect,
+.is-visible .draw line,
+.is-visible .draw polyline {
+  animation: dash 1.4s cubic-bezier(0.2, 0.8, 0.2, 1) forwards;
+  animation-delay: var(--d, 0s);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+  .reveal {
+    opacity: 1;
+    transform: none;
+  }
+  .draw path,
+  .draw circle,
+  .draw rect,
+  .draw line,
+  .draw polyline {
+    stroke-dashoffset: 0;
+  }
+}
