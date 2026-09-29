@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   Construit predictord.exe sous Windows (MSVC + vcpkg).
 

@@ -123,10 +123,14 @@ Windows gets a native **TSF text service** (`predict-tsf.dll`) in place of the f
 **Easiest: the installer**
 
 ```powershell
-.\dist\predictive-ime-0.1.0-x64.exe
+.\dist\predictive-ime-0.1.0-x64.exe          # or /VERYSILENT /NORESTART for unattended installs
 ```
 
-It installs the text service under Program Files (a TSF DLL is loaded into every application, so it must live where an unprivileged process cannot rewrite it), registers it, grants `ALL APPLICATION PACKAGES` read access so Store apps can load it, sets up the model and the daemon's logon task, and adds **Predict** to your input methods so it shows up in **Win+Space** right away. Build it yourself with `iscc packaging\windows\predictive-ime.iss` (Inno Setup 6.6+ gives the wizard a dark mode that follows Windows).
+It installs the text service under Program Files (a TSF DLL is loaded into every application, so it must live where an unprivileged process cannot rewrite it), registers it, grants `ALL APPLICATION PACKAGES` read access so Store apps can load it, **ships the model inside** (no download, no zstd needed on the target machine), sets up the daemon's logon task, and adds **Predict** to your input methods so it shows up in **Win+Space** right away. The last page offers to open the **administration panel**. Any failure of the per-user setup step is reported, with its log in `%LOCALAPPDATA%\ime-predictord\setup.log`.
+
+Build the installer yourself with `.\scripts\package-windows.ps1` — it builds, runs the tests, stages the model, compiles the Inno Setup script (`packaging\windows\predictive-ime.iss`, Inno Setup 6.6+ gives the wizard a dark mode that follows Windows) and writes a `.sha256` next to the result.
+
+**Administration panel.** `predict-admin.exe` (Start menu › *Predict — Administration*, or right-click the taskbar icon › *Réglages…*) edits everything without touching a file: suggestion language, number of candidates, autocorrection, French typography, ranking knobs, daemon timeouts — plus the **reformulation API key** (Ctrl+Alt+R uses an OpenAI-compatible endpoint, Groq by default; the key lives in `%LOCALAPPDATA%\ime-predictord\groq.key`, never in `config.json`) with a *Tester la clé* button that asks the daemon to validate it. The *Service* tab shows whether the daemon answers and the text service is registered, starts/stops/restarts the daemon, runs a quick prediction test, opens the log, `dict.txt` and `snippets.tsv`, and can forget the learned words. Everything is per-user, nothing needs elevation, and changes are picked up live.
 
 **Or from source**
 
@@ -192,7 +196,7 @@ Regression tests (also run by CI): `ctest --test-dir build-win-x64 -C Release`. 
 
 `%LOCALAPPDATA%\ime-predictord\` holds the model, the socket, the daemon log and the learned-word journals; `%APPDATA%\ime-predictord\` holds the editable settings (`config.json`, `dict.txt`, `snippets.tsv`) — the same split as XDG data vs. config on Linux. `.\scripts\setup-windows.ps1 -Uninstall` unregisters the IME and removes the logon task, leaving both directories intact.
 
-The Qt preferences app and the Wayland `qmlpanel` are not ported — the candidate bar is drawn by the text service itself, and settings are edited in `config.json` (the taskbar icon's *Réglages…* opens it). The neural predictor is off, as on Linux.
+The Qt preferences app and the Wayland `qmlpanel` are not ported — the candidate bar is drawn by the text service itself, and settings are edited with the administration panel (or directly in `config.json`). The neural predictor is off, as on Linux.
 
 </details>
 

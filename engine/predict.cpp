@@ -204,15 +204,11 @@ public:
 
   void commitText(const std::string &utf8) override { ic_->commitString(utf8); }
 
-  void setPreedit(const std::string &typed, const std::string &ghost) override {
+  void setPreedit(const std::string &typed) override {
     fcitx::Text preedit;
     if (!typed.empty())
       preedit.append(typed,
                      fcitx::TextFormatFlags{fcitx::TextFormatFlag::Underline});
-    if (!ghost.empty())
-      preedit.append(ghost,
-                     fcitx::TextFormatFlags{fcitx::TextFormatFlag::Underline} |
-                         fcitx::TextFormatFlag::Italic);
     preedit.setCursor(typed.size());
     ic_->inputPanel().setClientPreedit(preedit);
     ic_->updatePreedit();
@@ -436,7 +432,7 @@ public:
           caretPing_.reset();
           auto *ic = instance_->inputContextManager().findByUUID(uuid);
           // N'efface QUE notre ping : entre-temps la frappe a pu reprendre —
-          // effacer le préedit du mot en cours ferait disparaître le fantôme.
+          // effacer le préedit du mot en cours le ferait disparaître.
           if (!ic || ic->inputPanel().clientPreedit().toString() != kCaretPing)
             return true;
           ic->inputPanel().setClientPreedit(fcitx::Text{});

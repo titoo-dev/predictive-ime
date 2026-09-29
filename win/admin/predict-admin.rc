@@ -1,0 +1,195 @@
+// Ressources du panneau d'administration : dialogues, icône, version, manifeste.
+//
+// Les dialogues sont décrits en UNITÉS DE DIALOGUE : avec le manifeste
+// PerMonitorV2, Windows les met lui-même à l'échelle de l'écran (texte net,
+// aucune arithmétique DPI dans le code).
+#pragma code_page(65001) // source UTF-8 (accents)
+#include <winres.h>
+#include "resource.h"
+
+#define PREDICT_VER 0, 1, 0, 0
+#define PREDICT_VER_STR "0.1.0"
+
+IDI_PREDICT ICON "../tsf/predict.ico"
+
+// Manifeste (contrôles communs v6, DPI, UTF-8) — ID 1 = CREATEPROCESS_MANIFEST_RESOURCE_ID.
+1 24 "predict-admin.manifest"
+
+// ----------------------------------------------------------------- principal
+IDD_MAIN DIALOGEX 0, 0, 444, 318
+STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX
+CAPTION "Predict — Administration"
+FONT 9, "Segoe UI", 400, 0, 0x0
+BEGIN
+    CONTROL         "", IDC_TABS, "SysTabControl32", WS_TABSTOP | WS_CLIPCHILDREN, 7, 7, 430, 282
+    LTEXT           "", IDC_STATUS, 7, 298, 250, 10, SS_NOPREFIX
+    DEFPUSHBUTTON   "OK", IDOK, 272, 296, 52, 15
+    PUSHBUTTON      "Annuler", IDCANCEL, 329, 296, 52, 15
+    PUSHBUTTON      "Appliquer", IDC_APPLY, 386, 296, 52, 15
+END
+
+// ------------------------------------------------------------------- Général
+IDD_PAGE_GENERAL DIALOGEX 0, 0, 420, 258
+STYLE DS_SETFONT | DS_CONTROL | WS_CHILD
+FONT 9, "Segoe UI", 400, 0, 0x0
+BEGIN
+    GROUPBOX        "Suggestions", -1, 7, 6, 406, 84
+    LTEXT           "Langue des suggestions :", -1, 18, 22, 90, 9
+    COMBOBOX        IDC_LANG, 112, 20, 130, 80, CBS_DROPDOWNLIST | WS_TABSTOP
+    LTEXT           "Candidats dans la barre :", -1, 258, 22, 90, 9
+    COMBOBOX        IDC_BARWORDS, 350, 20, 40, 100, CBS_DROPDOWNLIST | WS_TABSTOP
+    CONTROL         "Proposer le mot suivant dès qu'un mot est validé (barre spéculative)", IDC_NEXTWORDBAR,
+                    "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 18, 42, 380, 10
+    CONTROL         "Autoriser les suggestions de plusieurs mots dans le mot suivant", IDC_MULTIWORD,
+                    "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 18, 56, 380, 10
+    CONTROL         "Échap ferme la barre puis atteint l'application (vim quitte le mode insertion)", IDC_ESCAPEFORWARD,
+                    "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 18, 70, 380, 10
+
+    GROUPBOX        "Correction", -1, 7, 96, 406, 50
+    CONTROL         "Espace applique la correction dominante (dont → don't, im → I'm)", IDC_AUTOAPPLY,
+                    "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 18, 112, 380, 10
+    CONTROL         "Restaurer les accents oubliés (cafe → café, etre → être)", IDC_ACCENTRESTORE,
+                    "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 18, 126, 380, 10
+
+    GROUPBOX        "Typographie française", -1, 7, 152, 406, 50
+    CONTROL         "Espace fine insécable avant ; : ! ? et à l'intérieur des guillemets « »", IDC_FRENCHSPACING,
+                    "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 18, 168, 380, 10
+    CONTROL         "Majuscule automatique en début de champ et après . ! ?", IDC_AUTOCAP,
+                    "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 18, 182, 380, 10
+
+    GROUPBOX        "Terminaux", -1, 7, 208, 406, 44
+    LTEXT           "Programmes où la barre mot-suivant est masquée (elle traîne derrière le curseur dans certains terminaux) — séparés par des virgules :", -1, 18, 220, 388, 16
+    EDITTEXT        IDC_EXCLUDE, 18, 236, 388, 12, ES_AUTOHSCROLL
+END
+
+// --------------------------------------------------------- Reformulation (IA)
+IDD_PAGE_REFORM DIALOGEX 0, 0, 420, 258
+STYLE DS_SETFONT | DS_CONTROL | WS_CHILD
+FONT 9, "Segoe UI", 400, 0, 0x0
+BEGIN
+    LTEXT           "Ctrl+Alt+R sur une sélection propose des reformulations via une API compatible OpenAI (Groq par défaut). C'est la seule fonction qui utilise le réseau : la prédiction reste 100 % locale. La clé vit dans groq.key, jamais dans config.json.",
+                    -1, 7, 6, 406, 36, SS_NOPREFIX
+
+    GROUPBOX        "Clé API", -1, 7, 48, 406, 76
+    LTEXT           "Clé :", -1, 18, 66, 24, 9
+    EDITTEXT        IDC_APIKEY, 44, 64, 290, 12, ES_PASSWORD | ES_AUTOHSCROLL
+    CONTROL         "Afficher", IDC_SHOWKEY, "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 342, 65, 60, 10
+    LTEXT           "", IDC_KEYSTATUS, 18, 82, 388, 9, SS_NOPREFIX
+    PUSHBUTTON      "Enregistrer la clé", IDC_SAVEKEY, 18, 100, 82, 15
+    PUSHBUTTON      "Tester la clé", IDC_TESTKEY, 104, 100, 70, 15
+    PUSHBUTTON      "Supprimer", IDC_DELKEY, 178, 100, 60, 15
+    PUSHBUTTON      "Obtenir une clé Groq…", IDC_GETKEY, 300, 100, 100, 15
+
+    GROUPBOX        "Service de reformulation", -1, 7, 130, 406, 92
+    LTEXT           "Endpoint :", -1, 18, 148, 48, 9
+    EDITTEXT        IDC_BASEURL, 68, 146, 334, 12, ES_AUTOHSCROLL
+    LTEXT           "Modèle :", -1, 18, 166, 48, 9
+    EDITTEXT        IDC_MODEL, 68, 164, 200, 12, ES_AUTOHSCROLL
+    LTEXT           "Délai (ms) :", -1, 18, 184, 48, 9
+    EDITTEXT        IDC_TIMEOUT, 68, 182, 50, 12, ES_NUMBER | ES_AUTOHSCROLL
+    LTEXT           "Variantes proposées :", -1, 140, 184, 80, 9
+    COMBOBOX        IDC_REFORMCOUNT, 222, 182, 40, 100, CBS_DROPDOWNLIST | WS_TABSTOP
+    LTEXT           "Tout endpoint « chat/completions » compatible OpenAI fonctionne (Groq, OpenAI, Mistral, Ollama local…). Les variantes s'affichent dans la barre ; ←/→ change de mode.",
+                    -1, 18, 200, 388, 18, SS_NOPREFIX
+END
+
+// -------------------------------------------------------------------- Avancé
+IDD_PAGE_ADVANCED DIALOGEX 0, 0, 420, 258
+STYLE DS_SETFONT | DS_CONTROL | WS_CHILD
+FONT 9, "Segoe UI", 400, 0, 0x0
+BEGIN
+    GROUPBOX        "Classement des candidats", -1, 7, 6, 406, 124
+    LTEXT           "Accord grammatical (agreeBoost) :", -1, 18, 24, 150, 9
+    EDITTEXT        IDC_AGREE, 170, 22, 50, 12, ES_AUTOHSCROLL
+    LTEXT           "2.0 — plus haut = accord genre/nombre plus agressif", -1, 228, 24, 180, 9
+    LTEXT           "Récence du document (recencyBoost) :", -1, 18, 42, 150, 9
+    EDITTEXT        IDC_RECENCY, 170, 40, 50, 12, ES_AUTOHSCROLL
+    LTEXT           "1.3 — mots déjà présents avant le curseur ; 1.0 désactive", -1, 228, 42, 180, 9
+    LTEXT           "Mots appris (learnedBoost) :", -1, 18, 60, 150, 9
+    EDITTEXT        IDC_LEARNED, 170, 58, 50, 12, ES_AUTOHSCROLL
+    LTEXT           "1.0 — poids de votre vocabulaire appris", -1, 228, 60, 180, 9
+    LTEXT           "Plancher des mots appris (learnedFloor) :", -1, 18, 78, 150, 9
+    EDITTEXT        IDC_LEARNEDFLOOR, 170, 76, 50, 12, ES_AUTOHSCROLL
+    LTEXT           "150000 — fréquence minimale d'un mot appris fiable", -1, 228, 78, 180, 9
+    LTEXT           "Proclitiques nus (proclisisDemote) :", -1, 18, 96, 150, 9
+    EDITTEXT        IDC_PROCLISIS, 170, 94, 50, 12, ES_AUTOHSCROLL
+    LTEXT           "25 — divise le score de j', c', qu'… tapés seuls", -1, 228, 96, 180, 9
+    LTEXT           "Dominance pour auto-appliquer (autoDom) :", -1, 18, 114, 150, 9
+    EDITTEXT        IDC_AUTODOM, 170, 112, 50, 12, ES_AUTOHSCROLL
+    LTEXT           "2.0 — écart 1er/2e exigé pour qu'Espace corrige", -1, 228, 114, 180, 9
+
+    GROUPBOX        "Délais de réponse du daemon (ms)", -1, 7, 136, 406, 46
+    LTEXT           "Complétion (socketTimeoutMs) :", -1, 18, 154, 150, 9
+    EDITTEXT        IDC_SOCKTIMEOUT, 170, 152, 50, 12, ES_NUMBER | ES_AUTOHSCROLL
+    LTEXT           "Mot suivant (nextWordTimeoutMs) :", -1, 228, 154, 120, 9
+    EDITTEXT        IDC_NEXTTIMEOUT, 350, 152, 50, 12, ES_NUMBER | ES_AUTOHSCROLL
+    LTEXT           "150 ms par défaut. Passé ce délai, on tape sans candidat : le clavier ne gèle jamais.", -1, 18, 168, 388, 9
+
+    LTEXT           "Un champ vide reprend la valeur par défaut. Les réglages sont relus à chaud par le daemon et par le service texte, sans redémarrage.",
+                    -1, 7, 190, 406, 18, SS_NOPREFIX
+    PUSHBUTTON      "Valeurs par défaut", IDC_RESETADV, 7, 212, 90, 15
+END
+
+// ------------------------------------------------------------------- Service
+IDD_PAGE_SERVICE DIALOGEX 0, 0, 420, 258
+STYLE DS_SETFONT | DS_CONTROL | WS_CHILD
+FONT 9, "Segoe UI", 400, 0, 0x0
+BEGIN
+    GROUPBOX        "Daemon de prédiction (predictord)", -1, 7, 6, 406, 56
+    LTEXT           "…", IDC_DAEMONSTATUS, 18, 22, 388, 9, SS_NOPREFIX
+    PUSHBUTTON      "Démarrer", IDC_START, 18, 38, 60, 15
+    PUSHBUTTON      "Arrêter", IDC_STOP, 82, 38, 60, 15
+    PUSHBUTTON      "Redémarrer", IDC_RESTART, 146, 38, 60, 15
+    PUSHBUTTON      "Journal…", IDC_OPENLOG, 210, 38, 60, 15
+
+    GROUPBOX        "Méthode de saisie (service texte TSF)", -1, 7, 68, 406, 40
+    LTEXT           "…", IDC_IMESTATUS, 18, 84, 388, 18, SS_NOPREFIX
+
+    GROUPBOX        "Test rapide", -1, 7, 114, 406, 60
+    LTEXT           "Contexte :", -1, 18, 132, 40, 9
+    EDITTEXT        IDC_TCONTEXT, 60, 130, 120, 12, ES_AUTOHSCROLL
+    LTEXT           "Préfixe :", -1, 190, 132, 34, 9
+    EDITTEXT        IDC_TPREFIX, 226, 130, 60, 12, ES_AUTOHSCROLL
+    PUSHBUTTON      "Tester", IDC_TEST, 296, 129, 60, 15
+    LTEXT           "", IDC_TRESULT, 18, 150, 388, 18, SS_NOPREFIX
+
+    GROUPBOX        "Fichiers", -1, 7, 180, 406, 50
+    PUSHBUTTON      "Dossier des réglages", IDC_OPENCFG, 18, 196, 88, 15
+    PUSHBUTTON      "dict.txt", IDC_OPENDICT, 110, 196, 50, 15
+    PUSHBUTTON      "snippets.tsv", IDC_OPENSNIP, 164, 196, 56, 15
+    PUSHBUTTON      "Dossier des données", IDC_OPENDATA, 224, 196, 88, 15
+    PUSHBUTTON      "Oublier les mots appris…", IDC_CLEARLEARNED, 316, 196, 90, 15
+    LTEXT           "dict.txt : vos mots (prénoms, jargon), un par ligne, jamais corrigés. snippets.tsv : abréviation ⇥ texte.", -1, 18, 214, 388, 9
+
+    LTEXT           "", IDC_VERSION, 7, 240, 300, 9, SS_NOPREFIX
+    PUSHBUTTON      "Site du projet", IDC_GITHUB, 343, 236, 70, 15
+END
+
+// ------------------------------------------------------------------- version
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION PREDICT_VER
+PRODUCTVERSION PREDICT_VER
+FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+FILEFLAGS 0
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_APP
+FILESUBTYPE VFT2_UNKNOWN
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "040C04B0"
+    BEGIN
+      VALUE "CompanyName", "predictive-ime"
+      VALUE "FileDescription", "Predict — panneau d'administration"
+      VALUE "FileVersion", PREDICT_VER_STR
+      VALUE "InternalName", "predict-admin"
+      VALUE "OriginalFilename", "predict-admin.exe"
+      VALUE "ProductName", "predictive-ime"
+      VALUE "ProductVersion", PREDICT_VER_STR
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x040C, 1200
+  END
+END

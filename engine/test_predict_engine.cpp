@@ -302,22 +302,22 @@ void backspaceTests(Harness &h) {
   check("backspace: Ctrl+Backspace ferme la barre (input vidé)",
         h.candidates().empty(), h.candidates().empty() ? "" : h.candidates()[0]);
 
-  // EFFACER NE DOIT PAS RE-APPLIQUER. Le fantôme complétait le préfixe RACCOURCI
-  // par le Backspace : effacer la dernière lettre la remettait aussitôt (⌫ sur
-  // « bonjour » réaffichait « bonjour »), et l'Espace committait la complétion
-  // qu'on venait d'enlever. Effacer est un geste de correction : plus de fantôme
-  // ni d'auto-application tant qu'on n'a pas retapé.
+  // EFFACER NE DOIT PAS RE-APPLIQUER. L'Espace committait la complétion du
+  // préfixe RACCOURCI par le Backspace — celle qu'on venait d'enlever. Effacer
+  // est un geste de correction : plus d'auto-application tant qu'on n'a pas
+  // retapé.
   h.reset();
   h.setCaps(fcitx::CapabilityFlags{fcitx::CapabilityFlag::Preedit,
                                    fcitx::CapabilityFlag::SurroundingText});
   h.setSurrounding("", 0);
   h.daemon->setReply({"bonjour", "bonsoir"}, "bonjour", false);
-  h.type("bonjour");
-  check("effacer: pré — le fantôme s'affiche pendant la frappe",
-        h.preedit() == "bonjour", h.preedit());
-  h.key("BackSpace");
-  check("effacer: le fantôme ne remet PAS la lettre effacée",
+  h.type("bonjou");
+  check("préedit: seule la frappe s'affiche (pas de texte fantôme)",
         h.preedit() == "bonjou", h.preedit());
+  h.type("r");
+  h.key("BackSpace");
+  check("effacer: le préedit suit la frappe", h.preedit() == "bonjou",
+        h.preedit());
   check("effacer: les candidats restent (Tab choisit encore)",
         !h.candidates().empty(),
         h.candidates().empty() ? "vide" : h.candidates()[0]);
@@ -326,9 +326,9 @@ void backspaceTests(Harness &h) {
   check("effacer: l'Espace n'auto-applique plus la complétion refusée", true);
   // …mais retaper un caractère réarme la proposition.
   h.type("bonjou");
-  check("effacer: retaper réarme le fantôme", h.preedit() == "bonjour",
-        h.preedit());
-  h.expectCommit("bonjour ");
+  check("effacer: retaper ne montre toujours que la frappe",
+        h.preedit() == "bonjou", h.preedit());
+  h.expectCommit("bonjour "); // l'Espace réapplique la complétion
   h.type(" ");
 }
 
@@ -653,9 +653,9 @@ void recomposeTests(Harness &h) {
 
   // RECOMPOSER N'APPLIQUE RIEN. Le mot revient TEL QUEL : reculer sur du texte
   // déjà écrit est une correction, pas une nouvelle frappe. Avant, effacer
-  // l'espace après « salut » rendait « salutation » (fantôme d'une complétion
-  // longue) et l'Espace suivant committait « salutation » — la barre mot-suivant
-  // marchait, on effaçait, et ça appliquait tout seul.
+  // l'espace après « salut » puis appuyer sur Espace committait « salutation »
+  // (complétion longue) — la barre mot-suivant marchait, on effaçait, et ça
+  // appliquait tout seul.
   h.reset();
   h.setCaps(fcitx::CapabilityFlags{fcitx::CapabilityFlag::Preedit,
                                    fcitx::CapabilityFlag::SurroundingText});
@@ -667,7 +667,7 @@ void recomposeTests(Harness &h) {
   h.setSurrounding("salut ", 6);
   h.daemon->setReply({"salutation", "salut"}, "salutation", false);
   h.key("BackSpace");
-  check("recompose: le mot revient sans fantôme", h.preedit() == "salut",
+  check("recompose: le mot revient tel quel", h.preedit() == "salut",
         h.preedit());
   h.expectCommit("salut ");
   h.type(" ");

@@ -100,9 +100,6 @@ private:
   bool turnPage(PredictState &st, int delta, int column);
   // « 2/4 », vide s'il n'y a qu'une page.
   std::string pageIndicator(const PredictState &st) const;
-  // Le texte FANTÔME est-il affiché ? Un seul endroit : ce que
-  // updateCompletion peint et ce que la touche → accepte doivent coïncider.
-  bool ghostShown(const PredictState &st) const;
   const std::string &highlighted(PredictState &st);
   std::string chooseOnSpace(PredictState &st);
   void frenchThinBefore(PredictState &st);

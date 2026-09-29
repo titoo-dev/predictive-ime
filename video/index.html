@@ -1,0 +1,653 @@
+<!doctype html>
+<html lang="fr" data-resolution="landscape">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=1920, height=1080" />
+    <title>Predict — motion design (Windows 11 light)</title>
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      @font-face { font-family: 'Segoe UI Emoji'; src: local('Segoe UI Emoji'); }
+      @font-face { font-family: 'Apple Color Emoji'; src: local('Apple Color Emoji'); }
+      @font-face { font-family: 'Noto Color Emoji'; src: local('Noto Color Emoji'); }
+      @font-face { font-family: 'Segoe UI Variable Display'; src: local('Segoe UI Variable Display'), local('Segoe UI Variable'); }
+      @font-face { font-family: 'Segoe UI Variable Text'; src: local('Segoe UI Variable Text'), local('Segoe UI Variable'); }
+      @font-face { font-family: 'Segoe UI'; src: local('Segoe UI'); }
+      @font-face { font-family: 'Cascadia Code'; src: local('Cascadia Code'); }
+      @font-face { font-family: 'Cascadia Mono'; src: local('Cascadia Mono'); }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      :root {
+        /* Windows 11 light */
+        --mica: #f3f3f3;
+        --layer: #ffffff;
+        --card: rgba(255, 255, 255, 0.85);
+        --stroke: rgba(0, 0, 0, 0.0578);
+        --stroke-strong: rgba(0, 0, 0, 0.16);
+        --text: #1b1b1b;
+        --text-2: #5d5d5d;
+        --accent: #005fb8;           /* accent par défaut de Windows 11 (clair) */
+        --accent-soft: rgba(0, 95, 184, 0.10);
+        /* Material */
+        --m-blue: #1976d2;   --m-blue-l: #2196f3;
+        --m-purple: #8e24aa; --m-purple-l: #ab47bc;
+        --m-teal: #00796b;   --m-teal-l: #26a69a;
+        --m-amber: #ffb300;  --m-amber-l: #ffca28;
+        --m-pink: #c2185b;   --m-pink-l: #ec407a;
+        --m-green: #2e7d32;  --m-green-l: #66bb6a;
+        --m-orange: #ef6c00; --m-orange-l: #ffa726;
+        --m-indigo: #3949ab;
+        --font: "Segoe UI Variable Display", "Segoe UI Variable Text", "Segoe UI", ui-sans-serif, system-ui, sans-serif;
+        --mono: "Cascadia Code", "Cascadia Mono", Consolas, ui-monospace, monospace;
+        --emoji: "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif;
+      }
+      html, body {
+        width: 1920px; height: 1080px; overflow: hidden;
+        background: var(--mica); font-family: var(--font); color: var(--text);
+        -webkit-font-smoothing: antialiased;
+      }
+      #root { position: relative; width: 1920px; height: 1080px; overflow: hidden; }
+      .clip { position: absolute; inset: 0; }
+      .inner { position: absolute; inset: 0; }
+      .center { display: flex; flex-direction: column; align-items: center; justify-content: center; }
+      .hidden { opacity: 0; }
+
+      /* ---------- Mica background ---------- */
+      #bg { background: linear-gradient(160deg, #fafafa 0%, #f3f3f3 50%, #eef1f6 100%); }
+      .blob { position: absolute; border-radius: 50%; filter: blur(70px); opacity: 0.35; }
+      #blob-a { width: 900px; height: 900px; left: -300px; top: -350px; background: #90caf9; }
+      #blob-b { width: 800px; height: 800px; right: -300px; top: -200px; background: #ce93d8; }
+      #blob-c { width: 700px; height: 700px; left: 700px; bottom: -450px; background: #80cbc4; }
+      #noise {
+        position: absolute; inset: 0; opacity: 0.5;
+        background-image: radial-gradient(rgba(0,0,0,0.035) 1px, transparent 1px);
+        background-size: 6px 6px;
+      }
+
+      /* ---------- Wipe (transitions) ---------- */
+      #wipe {
+        position: absolute; top: -200px; left: 0; width: 2400px; height: 1480px;
+        background: var(--m-blue-l); left: -2600px;
+        transform-origin: 50% 50%;
+      }
+
+      /* ---------- Material shapes ---------- */
+      .shape { position: absolute; opacity: 0; will-change: transform; }
+      .circle { border-radius: 50%; }
+      .rsq { border-radius: 28%; }
+      .pillsh { border-radius: 999px; }
+      .tri {
+        width: 0; height: 0; border-left: 90px solid transparent; border-right: 90px solid transparent;
+        border-bottom: 156px solid var(--m-amber-l);
+      }
+
+      /* ---------- Typography ---------- */
+      .eyebrow { font-size: 26px; letter-spacing: 0.3em; text-transform: uppercase; color: #3a3a3a; font-weight: 600; }
+      .headline { font-size: 150px; font-weight: 700; letter-spacing: -0.05em; line-height: 1.0; text-align: center; }
+      .headline .w { display: inline-block; opacity: 0; }
+      .h2 { font-size: 78px; font-weight: 700; letter-spacing: -0.04em; }
+      .sub { font-size: 40px; color: var(--text-2); font-weight: 500; }
+      .grad {
+        background: linear-gradient(90deg, var(--m-blue), var(--m-purple), var(--m-pink));
+        -webkit-background-clip: text; background-clip: text; color: transparent;
+      }
+      .brand { display: inline-flex; align-items: center; gap: 22px; }
+      .mark {
+        width: 84px; height: 84px; border-radius: 20px; display: grid; place-items: center;
+        background: linear-gradient(135deg, var(--m-blue-l), var(--m-blue) 60%, var(--m-indigo));
+        box-shadow: 0 16px 40px rgba(25, 118, 210, 0.35), inset 0 1px 0 rgba(255,255,255,0.4);
+        font-weight: 800; font-size: 50px; color: #fff; letter-spacing: -0.05em;
+      }
+      .brand-name { font-size: 64px; font-weight: 700; letter-spacing: -0.04em; }
+      .callout {
+        position: absolute; display: inline-flex; align-items: center; gap: 12px;
+        padding: 14px 26px; border-radius: 999px; color: #fff;
+        font-size: 28px; font-weight: 600; opacity: 0;
+        box-shadow: 0 12px 30px rgba(0,0,0,0.14);
+      }
+      .callout .dot { width: 12px; height: 12px; border-radius: 50%; background: #fff; }
+      .c-blue { background: var(--m-blue); } .c-purple { background: var(--m-purple); }
+      .c-teal { background: var(--m-teal); } .c-pink { background: var(--m-pink); }
+      .c-green { background: var(--m-green); } .c-orange { background: var(--m-orange); }
+      .c-indigo { background: var(--m-indigo); }
+
+      /* ---------- Windows 11 chrome ---------- */
+      .key {
+        display: inline-flex; align-items: center; justify-content: center;
+        min-width: 130px; height: 64px; padding: 0 24px; border-radius: 8px;
+        background: #fff; border: 1px solid var(--stroke-strong); border-bottom: 4px solid rgba(0,0,0,0.22);
+        font-size: 28px; font-weight: 600; color: var(--text);
+        box-shadow: 0 6px 16px rgba(0,0,0,0.08);
+      }
+      .win-logo { display: grid; grid-template-columns: 1fr 1fr; gap: 3px; width: 26px; height: 26px; margin-right: 12px; }
+      .win-logo i { background: var(--accent); display: block; }
+      .keys { display: inline-flex; align-items: center; gap: 14px; }
+      .keys .plus { font-size: 30px; color: var(--text-2); }
+
+      .taskbar {
+        position: absolute; left: 0; right: 0; bottom: 0; height: 84px;
+        background: rgba(243, 243, 243, 0.92); border-top: 1px solid var(--stroke);
+        backdrop-filter: blur(30px); opacity: 0;
+      }
+      .tb-center { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); display: flex; gap: 14px; }
+      .tb-icon { width: 60px; height: 60px; border-radius: 8px; display: grid; place-items: center; }
+      .tb-icon .glyph { width: 34px; height: 34px; border-radius: 8px; }
+      .tb-icon .start { display: grid; grid-template-columns: 1fr 1fr; gap: 3px; width: 32px; height: 32px; }
+      .tb-icon .start i { background: var(--accent); display: block; border-radius: 2px; }
+      .tb-tray {
+        position: absolute; right: 24px; top: 50%; transform: translateY(-50%);
+        display: flex; align-items: center; gap: 26px; font-size: 22px; color: var(--text);
+      }
+      .tb-tray .lang { font-weight: 700; padding: 8px 12px; border-radius: 6px; }
+      .tb-tray .pmark {
+        width: 34px; height: 34px; border-radius: 9px; display: grid; place-items: center;
+        background: linear-gradient(135deg, var(--m-blue-l), var(--m-blue)); color: #fff; font-weight: 800; font-size: 20px;
+      }
+      .tb-tray .clock { text-align: right; line-height: 1.2; font-size: 20px; }
+
+      .flyout {
+        position: absolute; right: 24px; bottom: 100px; width: 520px; padding: 10px;
+        background: rgba(252, 252, 252, 0.96); border: 1px solid var(--stroke);
+        border-radius: 8px; box-shadow: 0 16px 48px rgba(0,0,0,0.16); opacity: 0;
+        transform-origin: 100% 100%;
+      }
+      .fly-item {
+        display: flex; align-items: center; gap: 18px; padding: 16px 18px; border-radius: 6px; position: relative;
+      }
+      .fly-item .code { font-weight: 700; font-size: 22px; width: 64px; }
+      .fly-item .name { font-size: 24px; }
+      .fly-item .name small { display: block; font-size: 20px; color: var(--text-2); }
+      .fly-item.sel { background: rgba(0,0,0,0.045); }
+      .fly-item.sel::before {
+        content: ""; position: absolute; left: 0; top: 18px; bottom: 18px; width: 4px; border-radius: 4px; background: var(--accent);
+      }
+      .fly-foot { padding: 14px 18px; font-size: 22px; color: var(--text-2); border-top: 1px solid var(--stroke); margin-top: 6px; }
+
+      .window {
+        position: absolute; border-radius: 8px; overflow: hidden;
+        background: var(--layer); border: 1px solid var(--stroke-strong);
+        box-shadow: 0 32px 80px rgba(0,0,0,0.18), 0 2px 6px rgba(0,0,0,0.06);
+        transform-origin: 50% 50%;
+      }
+      .titlebar {
+        height: 60px; display: flex; align-items: center; padding: 0 0 0 20px;
+        background: var(--mica); font-size: 22px; color: var(--text);
+      }
+      .titlebar .appicon { width: 26px; height: 26px; border-radius: 6px; background: var(--m-blue-l); margin-right: 14px; }
+      .titlebar .tab {
+        display: inline-flex; align-items: center; gap: 14px; height: 44px; padding: 0 20px;
+        background: var(--layer); border-radius: 8px 8px 0 0; margin-top: 16px; margin-left: 12px;
+      }
+      .titlebar .caption { margin-left: auto; display: flex; height: 100%; }
+      .titlebar .caption span { width: 68px; display: grid; place-items: center; font-size: 20px; color: var(--text); }
+      .menubar { height: 46px; display: flex; align-items: center; gap: 32px; padding: 0 26px; font-size: 22px; color: var(--text); border-bottom: 1px solid var(--stroke); }
+      .editor {
+        padding: 56px 80px; font-size: 62px; font-weight: 500; letter-spacing: -0.015em;
+        line-height: 1.35; color: var(--text); white-space: pre-wrap;
+        font-family: "Segoe UI Variable Text", "Segoe UI", var(--font);
+      }
+      .editor .ch { opacity: 0; }
+      .editor .pre { color: var(--text-2); }
+      .caret { display: inline-block; width: 4px; height: 66px; background: var(--text); vertical-align: -10px; margin-left: 2px; }
+      .ghost { color: #6b6b6b; opacity: 0; display: inline-block; transform-origin: 0 50%; }
+      .committed { opacity: 0; display: inline-block; }
+
+      .bar {
+        position: absolute; left: 80px; top: 232px;
+        display: flex; gap: 8px; padding: 8px;
+        background: #fbfbfb; border: 1px solid var(--stroke-strong); border-radius: 8px;
+        box-shadow: 0 16px 40px rgba(0,0,0,0.16); opacity: 0; transform-origin: 0 0;
+      }
+      .chip {
+        padding: 12px 22px; border-radius: 6px; font-size: 34px; font-weight: 500; color: var(--text);
+        background: transparent; white-space: nowrap;
+      }
+      .chip.hi { background: var(--accent-soft); box-shadow: inset 0 0 0 2px var(--accent); color: var(--accent); }
+      #space-key { position: absolute; left: 80px; top: 420px; width: 520px; opacity: 0; transform-origin: 50% 100%; }
+
+      /* Emoji panel (Win+;) */
+      .epanel {
+        position: absolute; left: 80px; top: 232px; width: 640px; padding: 14px;
+        background: #fbfbfb; border: 1px solid var(--stroke-strong); border-radius: 8px;
+        box-shadow: 0 16px 40px rgba(0,0,0,0.16); opacity: 0; transform-origin: 0 0;
+      }
+      .esearch {
+        display: flex; align-items: center; gap: 12px; height: 54px; padding: 0 16px;
+        background: #fff; border: 1px solid var(--stroke-strong); border-bottom: 2px solid var(--accent); border-radius: 6px;
+        font-size: 26px; color: var(--text);
+      }
+      .esearch .ph { color: var(--text-2); }
+      .esearch .ch { opacity: 0; }
+      .ecats { display: flex; gap: 10px; margin: 12px 0; }
+      .ecats i { width: 42px; height: 42px; border-radius: 6px; background: rgba(0,0,0,0.05); display: block; }
+      .ecats i.on { background: var(--accent-soft); box-shadow: inset 0 -3px 0 var(--accent); }
+      .egrid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; }
+      .egrid .e {
+        height: 92px; border-radius: 6px; display: grid; place-items: center; font-size: 54px;
+        font-family: var(--emoji); opacity: 0;
+      }
+      .egrid .e.hi { background: var(--accent-soft); box-shadow: inset 0 0 0 2px var(--accent); }
+      #hero-emoji {
+        position: absolute; left: 1380px; top: 300px; font-size: 300px; font-family: var(--emoji); opacity: 0;
+        filter: drop-shadow(0 30px 50px rgba(233, 30, 99, 0.35));
+      }
+      .confetti { position: absolute; left: 1530px; top: 450px; width: 26px; height: 26px; border-radius: 50%; opacity: 0; }
+
+      /* Toggles (Fluent) */
+      .setting {
+        display: flex; align-items: center; justify-content: space-between; gap: 40px;
+        width: 720px; padding: 22px 30px; border-radius: 8px;
+        background: var(--card); border: 1px solid var(--stroke); box-shadow: 0 6px 20px rgba(0,0,0,0.06);
+        font-size: 30px; opacity: 0;
+      }
+      .setting .lbl small { display: block; font-size: 22px; color: var(--text-2); }
+      .toggle { position: relative; width: 84px; height: 40px; border-radius: 999px; border: 2px solid #8a8a8a; background: transparent; flex: none; }
+      .toggle .knob { position: absolute; left: 6px; top: 6px; width: 24px; height: 24px; border-radius: 50%; background: #5d5d5d; }
+      .toggle.on { background: var(--accent); border-color: var(--accent); }
+      .toggle.on .knob { background: #fff; left: 50px; }
+      .tstate { width: 130px; text-align: right; color: var(--text-2); font-size: 26px; flex: none; }
+
+      /* Features */
+      .features { position: absolute; left: 140px; right: 140px; top: 290px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 28px; }
+      .card {
+        padding: 38px 38px 42px; border-radius: 12px; background: var(--layer);
+        border: 1px solid var(--stroke); box-shadow: 0 20px 50px rgba(0,0,0,0.10);
+        opacity: 0; transform-origin: 50% 100%; overflow: hidden; position: relative;
+      }
+      .card::before { content: ""; position: absolute; left: 0; top: 0; right: 0; height: 8px; background: var(--c); }
+      .card .ico {
+        width: 68px; height: 68px; border-radius: 16px; display: grid; place-items: center;
+        background: var(--c); color: #fff; font-size: 32px; font-weight: 800; margin-bottom: 24px;
+        box-shadow: 0 10px 24px rgba(0,0,0,0.15);
+      }
+      .card h3 { font-size: 36px; font-weight: 700; letter-spacing: -0.03em; margin-bottom: 10px; }
+      .card p { font-size: 25px; color: var(--text-2); line-height: 1.35; }
+      .card code { font-family: var(--mono); color: var(--text); font-size: 23px; background: rgba(0,0,0,0.05); padding: 2px 8px; border-radius: 4px; }
+      #features-title { position: absolute; left: 0; right: 0; top: 140px; text-align: center; opacity: 0; }
+
+      /* Offline */
+      #off-num { font-size: 260px; font-weight: 800; letter-spacing: -0.06em; line-height: 0.95; color: var(--m-green); opacity: 0; }
+      #off-num span { font-size: 150px; letter-spacing: -0.03em; }
+      #off-txt { font-size: 110px; font-weight: 700; letter-spacing: -0.05em; opacity: 0; margin-top: -6px; }
+      #off-sub { margin-top: 14px; opacity: 0; }
+      #off-settings { display: flex; flex-direction: column; gap: 14px; margin-top: 40px; }
+
+      /* Platforms */
+      .plat {
+        position: absolute; top: 50%; width: 560px; height: 300px; margin-top: -150px;
+        border-radius: 12px; display: flex; flex-direction: column; justify-content: center; gap: 12px;
+        padding: 0 50px; background: var(--layer); border: 1px solid var(--stroke);
+        box-shadow: 0 24px 60px rgba(0,0,0,0.12); opacity: 0; overflow: hidden;
+      }
+      .plat::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 10px; background: var(--c); }
+      .plat .os { font-size: 56px; font-weight: 700; letter-spacing: -0.03em; }
+      .plat .how { font-size: 27px; color: var(--text-2); }
+      .plat .pill { align-self: flex-start; margin-top: 8px; padding: 8px 18px; border-radius: 6px; font-family: var(--mono); font-size: 22px; background: rgba(0,0,0,0.05); }
+      #plat-linux { left: 200px; --c: var(--m-orange); }
+      #plat-win { right: 200px; --c: var(--m-blue); }
+      #core-pill {
+        position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+        padding: 20px 34px; border-radius: 999px; color: #fff; font-size: 30px; font-weight: 700;
+        background: linear-gradient(135deg, var(--m-purple), var(--m-pink)); box-shadow: 0 16px 40px rgba(194,24,91,0.35); opacity: 0;
+      }
+      .link-line { position: absolute; top: 50%; height: 6px; margin-top: -3px; width: 0; border-radius: 3px; background: var(--m-purple); }
+      #line-l { left: 760px; } #line-r { right: 760px; background: var(--m-pink); }
+      #plat-title { position: absolute; left: 0; right: 0; top: 170px; text-align: center; opacity: 0; }
+
+      /* Outro */
+      .btn-accent {
+        display: inline-flex; align-items: center; gap: 14px; margin-top: 44px; padding: 20px 40px; border-radius: 6px;
+        background: var(--accent); color: #fff; font-size: 34px; font-weight: 600; opacity: 0;
+        box-shadow: 0 12px 30px rgba(0,95,184,0.35);
+      }
+      #outro-url { margin-top: 26px; font-family: var(--mono); font-size: 34px; color: var(--text-2); opacity: 0; }
+      #outro-line { margin-top: 26px; opacity: 0; }
+    </style>
+  </head>
+  <body>
+    <div id="root" data-composition-id="main" data-start="0" data-duration="36" data-width="1920" data-height="1080">
+
+      <!-- Background (Mica) -->
+      <div id="bg" class="clip" data-start="0" data-duration="36" data-track-index="0">
+        <div id="blob-a" class="blob"></div>
+        <div id="blob-b" class="blob"></div>
+        <div id="blob-c" class="blob"></div>
+        <div id="noise"></div>
+      </div>
+
+      <!-- Scene 1 : hook -->
+      <section id="s1" class="clip" data-start="0" data-duration="4.6" data-track-index="1">
+        <div class="inner" id="s1-inner">
+          <div class="shape circle" id="sh1" style="left: 120px; top: 120px; width: 260px; height: 260px; background: var(--m-blue-l);"></div>
+          <div class="shape rsq" id="sh2" style="right: 160px; top: 90px; width: 220px; height: 220px; background: var(--m-purple-l);"></div>
+          <div class="shape pillsh" id="sh3" style="left: 220px; bottom: 120px; width: 380px; height: 120px; background: var(--m-teal-l);"></div>
+          <div class="shape tri" id="sh4" style="right: 260px; bottom: 120px;"></div>
+          <div class="shape circle" id="sh5" style="left: 1500px; top: 520px; width: 90px; height: 90px; background: var(--m-pink-l);"></div>
+          <div class="shape rsq" id="sh6" style="right: 560px; bottom: 300px; width: 70px; height: 70px; background: var(--m-amber-l);"></div>
+          <div class="inner center">
+            <div class="eyebrow hidden" id="s1-eyebrow">Saisie prédictive · Français / English</div>
+            <h1 class="headline" id="s1-h" style="margin-top: 24px;">
+              <span class="w">Vous</span> <span class="w">tapez.</span><br />
+              <span class="w grad">Il</span> <span class="w grad">devine.</span>
+            </h1>
+            <div class="brand hidden" id="s1-brand" style="margin-top: 50px;"><div class="mark">P</div><div class="brand-name">Predict</div></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Scene 2 : Win+Space -->
+      <section id="s2" class="clip" data-start="4.6" data-duration="4.4" data-track-index="1">
+        <div class="inner" id="s2-inner">
+          <div class="inner" style="left: 320px; top: 300px; right: auto; bottom: auto; opacity: 0;" id="s2-copy">
+            <div class="eyebrow">Étape 1</div>
+            <div class="h2" style="margin-top: 14px;">Choisissez <span class="grad">Predict</span></div>
+            <div class="sub" style="margin-top: 14px;">comme n'importe quelle langue.</div>
+            <div class="keys" style="margin-top: 40px;">
+              <span class="key" id="k-win"><span class="win-logo"><i></i><i></i><i></i><i></i></span>Win</span>
+              <span class="plus">+</span>
+              <span class="key" id="k-space" style="min-width: 260px;">Espace</span>
+            </div>
+          </div>
+          <div class="flyout" id="flyout">
+            <div class="fly-item"><span class="code">FRA</span><span class="name">Français (France)<small>Clavier français</small></span></div>
+            <div class="fly-item sel"><span class="code">FRA</span><span class="name">Français (France)<small>Predict</small></span></div>
+            <div class="fly-item"><span class="code">ENG</span><span class="name">English (United States)<small>US</small></span></div>
+            <div class="fly-foot">Autres paramètres de clavier</div>
+          </div>
+          <div class="taskbar" id="taskbar">
+            <div class="tb-center">
+              <div class="tb-icon"><div class="start"><i></i><i></i><i></i><i></i></div></div>
+              <div class="tb-icon"><div class="glyph" style="background: #616161; border-radius: 50%; width: 30px; height: 30px;"></div></div>
+              <div class="tb-icon"><div class="glyph" style="background: #5c6bc0;"></div></div>
+              <div class="tb-icon"><div class="glyph" style="background: var(--m-amber);"></div></div>
+              <div class="tb-icon"><div class="glyph" style="background: var(--m-blue-l);"></div></div>
+              <div class="tb-icon"><div class="glyph" style="background: var(--m-teal-l); border-radius: 50%;"></div></div>
+            </div>
+            <div class="tb-tray">
+              <span class="lang" id="tb-lang">FRA</span>
+              <span class="pmark">P</span>
+              <span class="clock">12:19<br />29/09/2026</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Scene 3 : Notepad demo -->
+      <section id="s3" class="clip" data-start="9.0" data-duration="8.0" data-track-index="1">
+        <div class="inner" id="s3-inner">
+          <div class="window hidden" id="win3" style="left: 200px; top: 150px; width: 1520px; height: 700px;">
+            <div class="titlebar"><span class="appicon"></span><span class="tab">notes.txt <span style="color: var(--text-2)">✕</span></span>
+              <div class="caption"><span>—</span><span>☐</span><span>✕</span></div></div>
+            <div class="menubar"><span>Fichier</span><span>Modifier</span><span>Affichage</span></div>
+            <div class="editor"><span id="typed3"></span><span class="ghost" id="ghost3">hui</span><span class="caret" id="caret3"></span></div>
+            <div class="bar" id="bar-next" style="top: 262px;">
+              <div class="chip hi">travail</div><div class="chip">bureau</div><div class="chip">lit</div><div class="chip">cinéma</div><div class="chip">marché</div>
+            </div>
+            <div class="bar" id="bar-comp" style="top: 262px;">
+              <div class="chip hi">aujourd'hui</div><div class="chip">aujourd'</div>
+            </div>
+            <div class="bar" id="bar-after" style="top: 262px;">
+              <div class="chip hi">et</div><div class="chip">pour</div><div class="chip">à</div><div class="chip">avec</div><div class="chip">mais</div>
+            </div>
+            <div class="key" id="space-key" style="top: 450px;">Espace</div>
+          </div>
+          <div class="callout c-blue" id="co-next" style="left: 1180px; top: 400px;"><span class="dot"></span>Mot suivant prédit</div>
+          <div class="callout c-purple" id="co-comp" style="left: 1180px; top: 400px;"><span class="dot"></span>Complétion en un geste</div>
+          <div class="callout c-teal" id="co-learn" style="left: 1180px; top: 400px;"><span class="dot"></span>Contexte + accord grammatical</div>
+        </div>
+      </section>
+
+      <!-- Scene 4 : emoji -->
+      <section id="s4" class="clip" data-start="17.0" data-duration="5.0" data-track-index="1">
+        <div class="inner" id="s4-inner">
+          <div class="keys" id="hotkey" style="position: absolute; left: 200px; top: 60px; opacity: 0;">
+            <span class="key"><span class="win-logo"><i></i><i></i><i></i><i></i></span>Win</span><span class="plus">+</span><span class="key">;</span>
+          </div>
+          <div class="window hidden" id="win4" style="left: 200px; top: 170px; width: 1100px; height: 720px;">
+            <div class="titlebar"><span class="appicon" style="background: var(--m-green-l);"></span><span class="tab">message.txt</span>
+              <div class="caption"><span>—</span><span>☐</span><span>✕</span></div></div>
+            <div class="menubar"><span>Fichier</span><span>Modifier</span><span>Affichage</span></div>
+            <div class="editor" style="font-size: 56px;"><span class="pre">Merci pour tout </span><span id="typed4"></span><span class="committed" id="heart4" style="font-family: var(--emoji);">❤️</span><span class="caret" id="caret4"></span></div>
+            <div class="epanel" id="epanel" style="top: 250px;">
+              <div class="esearch"><span>🔍</span><span id="esearch-txt"></span><span class="ph" id="esearch-ph">Rechercher un emoji</span></div>
+              <div class="ecats"><i class="on"></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+              <div class="egrid">
+                <div class="e hi">❤️</div><div class="e">💙</div><div class="e">💛</div><div class="e">💖</div><div class="e">💕</div><div class="e">🫶</div>
+                <div class="e">💗</div><div class="e">💜</div><div class="e">🧡</div><div class="e">💚</div><div class="e">❣️</div><div class="e">💘</div>
+              </div>
+            </div>
+          </div>
+          <div id="hero-emoji">❤️</div>
+          <div class="confetti" id="cf0" style="background: var(--m-blue-l);"></div><div class="confetti" id="cf1" style="background: var(--m-amber-l);"></div>
+          <div class="confetti" id="cf2" style="background: var(--m-teal-l);"></div><div class="confetti" id="cf3" style="background: var(--m-purple-l);"></div>
+          <div class="confetti" id="cf4" style="background: var(--m-pink-l);"></div><div class="confetti" id="cf5" style="background: var(--m-green-l);"></div>
+          <div class="confetti" id="cf6" style="background: var(--m-orange-l);"></div><div class="confetti" id="cf7" style="background: var(--m-indigo);"></div>
+          <div class="confetti" id="cf8" style="background: var(--m-blue-l);"></div><div class="confetti" id="cf9" style="background: var(--m-pink-l);"></div>
+          <div class="callout c-pink" id="co-emoji" style="left: 1340px; top: 760px;"><span class="dot"></span>Emojis par leur nom</div>
+        </div>
+      </section>
+
+      <!-- Scene 5 : features -->
+      <section id="s5" class="clip" data-start="22.0" data-duration="5.6" data-track-index="1">
+        <div class="inner" id="s5-inner">
+          <div class="shape circle" id="sh7" style="left: -200px; top: -200px; width: 560px; height: 560px; background: var(--m-amber-l); opacity: 0;"></div>
+          <div class="shape rsq" id="sh8" style="right: -160px; bottom: -160px; width: 480px; height: 480px; background: var(--m-teal-l); opacity: 0;"></div>
+          <div id="features-title" class="h2">Tout ce qu'il fait <span class="grad">pendant que vous écrivez</span></div>
+          <div class="features">
+            <div class="card" style="--c: var(--m-blue);"><div class="ico">ab</div><h3>Complétion de mot</h3><p><code>aujourd'</code> → <code>aujourd'hui</code>, jusqu'à cinq suggestions classées.</p></div>
+            <div class="card" style="--c: var(--m-purple);"><div class="ico">→</div><h3>Mot suivant</h3><p>Un n‑gramme local propose la suite dès que vous validez.</p></div>
+            <div class="card" style="--c: var(--m-teal);"><div class="ico">✓</div><h3>Correction automatique</h3><p><code>dont</code> → <code>don't</code>, <code>im</code> → <code>I'm</code>, sans quitter le clavier.</p></div>
+            <div class="card" style="--c: var(--m-orange);"><div class="ico">é</div><h3>Accord grammatical</h3><p><code>les petits chat</code> → <code>chats</code> grâce au lexique Lefff.</p></div>
+            <div class="card" style="--c: var(--m-pink);"><div class="ico">★</div><h3>Il apprend vos mots</h3><p>Prénoms, jargon, tics de langage : appris et reclassés sur votre usage.</p></div>
+            <div class="card" style="--c: var(--m-green);"><div class="ico">☺</div><h3>Emojis par leur nom</h3><p><code>coeur</code> → ❤️, <code>feu</code> → 🔥, en un raccourci.</p></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Scene 6 : offline -->
+      <section id="s6" class="clip" data-start="27.6" data-duration="4.4" data-track-index="1">
+        <div class="inner center" id="s6-inner">
+          <div class="shape circle" id="sh9" style="left: 1420px; top: 60px; width: 420px; height: 420px; background: var(--m-green-l); opacity: 0;"></div>
+          <div class="shape circle" id="sh10" style="left: 120px; bottom: 60px; width: 220px; height: 220px; background: var(--m-teal-l); opacity: 0;"></div>
+          <div id="off-num"><span id="off-counter">0</span><span> %</span></div>
+          <div id="off-txt">hors ligne.</div>
+          <div id="off-sub" class="sub">Zéro télémétrie. Vos mots restent sur votre PC.</div>
+          <div id="off-settings">
+            <div class="setting"><span class="lbl">Modèle local<small>Toutes les prédictions sont calculées sur cet appareil</small></span><span class="tstate" id="ts1">Activé</span><span class="toggle on"><span class="knob" id="knob1"></span></span></div>
+            <div class="setting"><span class="lbl">Télémétrie<small>Aucune donnée n'est envoyée</small></span><span class="tstate" id="ts2">Désactivé</span><span class="toggle" id="tg2"><span class="knob" id="knob2"></span></span></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Scene 7 : platforms -->
+      <section id="s7" class="clip" data-start="32.0" data-duration="2.6" data-track-index="1">
+        <div class="inner" id="s7-inner">
+          <div id="plat-title" class="h2">Un moteur, <span class="grad">deux systèmes</span></div>
+          <div class="plat" id="plat-linux"><div class="os">Linux</div><div class="how">Moteur fcitx5 + barre Qt Quick</div><div class="pill">fcitx5 + ime-predictord.service</div></div>
+          <div class="plat" id="plat-win"><div class="os">Windows 10 / 11</div><div class="how">Service TSF natif, Direct2D, couleur d'accent</div><div class="pill">Win + Espace → Predict</div></div>
+          <div class="link-line" id="line-l"></div><div class="link-line" id="line-r"></div>
+          <div id="core-pill">core partagé</div>
+        </div>
+      </section>
+
+      <!-- Scene 8 : outro -->
+      <section id="s8" class="clip" data-start="34.6" data-duration="1.4" data-track-index="1">
+        <div class="inner center" id="s8-inner">
+          <div class="brand hidden" id="s8-brand" style="transform: scale(1.35);"><div class="mark">P</div><div class="brand-name">Predict</div></div>
+          <div id="outro-line" class="sub">Écrivez plus vite. Sans rien envoyer.</div>
+          <div class="btn-accent" id="outro-btn">Installer Predict</div>
+          <div id="outro-url">github.com/titoo-dev/predictive-ime</div>
+        </div>
+      </section>
+
+      <!-- Musique de fond (générée par scripts/make-bgm.mjs) -->
+      <audio id="bgm" data-start="0" data-duration="36" data-track-index="3" data-volume="0.7" data-fade-in="0.3" data-fade-out="1.5" src="assets/bgm.m4a"></audio>
+
+      <!-- Wipe overlay (above everything) -->
+      <div id="wipe" class="clip" data-start="0" data-duration="36" data-track-index="2" style="left: -2600px; top: -200px; right: auto; bottom: auto;"></div>
+    </div>
+
+    <script>
+      const tl = gsap.timeline({ paused: true });
+      const EASE = "power3.out";
+
+      function typeText(target, text, start, cps) {
+        const el = document.getElementById(target);
+        let t = start;
+        for (const ch of text) {
+          const s = document.createElement("span");
+          s.className = "ch"; s.textContent = ch; el.appendChild(s);
+          tl.set(s, { opacity: 1 }, t);
+          t += 1 / cps;
+        }
+        return t;
+      }
+      function pop(sel, t, from, to, dur = 0.7, ease = EASE) {
+        tl.fromTo(sel, from, { ...to, duration: dur, ease, immediateRender: false }, t);
+      }
+      function fadeOut(sel, t, dur = 0.35, extra = {}) {
+        tl.to(sel, { opacity: 0, duration: dur, ease: "power2.in", ...extra }, t);
+      }
+      function blink(sel, start, end) {
+        tl.to(sel, { opacity: 0, duration: 0.5, ease: "steps(1)", repeat: Math.floor((end - start) / 0.5), yoyo: true }, start);
+      }
+      function press(sel, t) {
+        tl.to(sel, { scaleY: 0.86, y: 4, duration: 0.1, ease: "power1.in" }, t);
+        tl.to(sel, { scaleY: 1, y: 0, duration: 0.25, ease: "back.out(2.5)" }, t + 0.1);
+      }
+      // Colored wipe: a skewed block crosses the frame left → right, fully covering it at time t
+      function wipe(t, color) {
+        tl.set("#wipe", { backgroundColor: color }, t - 0.43);
+        tl.fromTo("#wipe", { x: 0, skewX: -12 }, { x: 2600, duration: 0.42, ease: "power4.in", immediateRender: false }, t - 0.42);
+        tl.to("#wipe", { x: 5200, duration: 0.42, ease: "power4.out" }, t);
+      }
+      function shapeIn(sel, t, rot = 0, ease = "back.out(2)") {
+        tl.fromTo(sel, { opacity: 0, scale: 0, rotation: rot - 60 }, { opacity: 1, scale: 1, rotation: rot, duration: 0.8, ease, immediateRender: false }, t);
+      }
+
+      // ---------- background drift ----------
+      tl.to("#blob-a", { x: 320, y: 200, duration: 36, ease: "sine.inOut" }, 0);
+      tl.to("#blob-b", { x: -360, y: 240, duration: 36, ease: "sine.inOut" }, 0);
+      tl.to("#blob-c", { x: 200, y: -180, duration: 36, ease: "sine.inOut" }, 0);
+
+      // ---------- scene 1 : hook (0 – 4.6) ----------
+      shapeIn("#sh1", 0.05, 0); shapeIn("#sh2", 0.15, 20); shapeIn("#sh3", 0.25, -12); shapeIn("#sh4", 0.35, 0); shapeIn("#sh5", 0.45); shapeIn("#sh6", 0.5, 30);
+      tl.to("#sh1", { y: 60, x: 30, duration: 4, ease: "sine.inOut" }, 1.4);
+      tl.to("#sh2", { rotation: 65, y: 50, duration: 4, ease: "sine.inOut" }, 1.4);
+      tl.to("#sh3", { rotation: -30, x: -40, duration: 4, ease: "sine.inOut" }, 1.4);
+      tl.to("#sh4", { rotation: 40, y: -60, duration: 4, ease: "sine.inOut" }, 1.4);
+      tl.to("#sh5", { y: 120, duration: 4, ease: "sine.inOut" }, 1.4);
+      tl.to("#sh6", { rotation: 120, y: -80, duration: 4, ease: "sine.inOut" }, 1.4);
+      pop("#s1-eyebrow", 0.3, { opacity: 0, y: 20 }, { opacity: 1, y: 0 }, 0.6);
+      tl.fromTo("#s1-h .w", { opacity: 0, y: 120, rotationX: -60, scale: 0.8 },
+        { opacity: 1, y: 0, rotationX: 0, scale: 1, duration: 0.8, ease: "back.out(1.7)", stagger: 0.14, immediateRender: false }, 0.5);
+      tl.fromTo("#s1-brand", { opacity: 0, scale: 0.4, rotation: -8 }, { opacity: 1, scale: 1, rotation: 0, duration: 0.7, ease: "elastic.out(1, 0.55)", immediateRender: false }, 1.8);
+      tl.to("#s1-inner", { scale: 1.06, duration: 2, ease: "sine.inOut" }, 2.6);
+      wipe(4.6, "#2196f3");
+
+      // ---------- scene 2 : Win+Space (4.6 – 9.0) ----------
+      pop("#taskbar", 4.6, { opacity: 0, y: 90 }, { opacity: 1, y: 0 }, 0.6, "expo.out");
+      pop("#s2-copy", 4.7, { opacity: 0, x: -80 }, { opacity: 1, x: 0 }, 0.7, "expo.out");
+      press("#k-win", 5.5); press("#k-space", 5.6);
+      tl.fromTo("#flyout", { opacity: 0, scale: 0.85, y: 30 }, { opacity: 1, scale: 1, y: 0, duration: 0.5, ease: "back.out(1.8)", immediateRender: false }, 5.75);
+      tl.to("#tb-lang", { backgroundColor: "rgba(0,0,0,0.06)", duration: 0.3 }, 5.75);
+      tl.to("#s2-inner", { scale: 1.06, x: -60, y: -60, duration: 1.4, ease: "power2.inOut" }, 6.6);
+      press("#k-space", 7.6);
+      tl.to(".fly-item.sel", { backgroundColor: "rgba(0,95,184,0.14)", duration: 0.2 }, 7.7);
+      wipe(9.0, "#8e24aa");
+
+      // ---------- scene 3 : Notepad (9.0 – 17.0) ----------
+      tl.fromTo("#win3", { opacity: 0, y: 80, scale: 0.92 }, { opacity: 1, y: 0, scale: 1, duration: 0.7, ease: "expo.out", immediateRender: false }, 9.0);
+      blink("#caret3", 9.2, 16.4);
+      let t = typeText("typed3", "je vais au ", 9.6, 13);        // ≈ 10.45
+      pop("#bar-next", t, { opacity: 0, y: 12, scale: 0.9 }, { opacity: 1, y: 0, scale: 1 }, 0.35, "back.out(2)");
+      pop("#co-next", t + 0.05, { opacity: 0, x: 60, scale: 0.8 }, { opacity: 1, x: 0, scale: 1 }, 0.5, "back.out(2)");
+      fadeOut("#bar-next", t + 0.95, 0.2); fadeOut("#co-next", t + 0.95, 0.2, { x: -30 });
+      t = typeText("typed3", "travail ", t + 0.95, 15);          // ≈ 11.95
+      t = typeText("typed3", "aujourd'", t + 0.15, 13);          // ≈ 12.75
+      tl.to("#ghost3", { opacity: 1, duration: 0.2 }, t);
+      pop("#bar-comp", t, { opacity: 0, y: 12, scale: 0.9 }, { opacity: 1, y: 0, scale: 1 }, 0.35, "back.out(2)");
+      pop("#co-comp", t + 0.05, { opacity: 0, x: 60, scale: 0.8 }, { opacity: 1, x: 0, scale: 1 }, 0.5, "back.out(2)");
+      // camera zoom on the bar
+      tl.to("#s3-inner", { scale: 1.1, x: 180, y: 90, duration: 0.9, ease: "power2.inOut" }, t + 0.1);
+      pop("#space-key", t + 0.5, { opacity: 0, y: 10 }, { opacity: 1, y: 0 }, 0.3);
+      press("#space-key", t + 1.0);
+      tl.to("#ghost3", { color: "#005fb8", duration: 0.2 }, t + 1.05);
+      tl.fromTo("#ghost3", { scale: 1 }, { scale: 1.06, duration: 0.18, yoyo: true, repeat: 1, ease: "power1.inOut", immediateRender: false }, t + 1.05);
+      fadeOut("#bar-comp", t + 1.05, 0.2); fadeOut("#co-comp", t + 1.05, 0.2, { x: -30 }); fadeOut("#space-key", t + 1.4, 0.3);
+      tl.to("#s3-inner", { scale: 1, x: 0, y: 0, duration: 0.9, ease: "power2.inOut" }, t + 1.6);
+      pop("#bar-after", t + 2.0, { opacity: 0, y: 12, scale: 0.9 }, { opacity: 1, y: 0, scale: 1 }, 0.35, "back.out(2)");
+      pop("#co-learn", t + 2.05, { opacity: 0, x: 60, scale: 0.8 }, { opacity: 1, x: 0, scale: 1 }, 0.5, "back.out(2)");
+      wipe(17.0, "#e91e63");
+
+      // ---------- scene 4 : emoji (17.0 – 22.0) ----------
+      tl.fromTo("#win4", { opacity: 0, y: 80, scale: 0.92 }, { opacity: 1, y: 0, scale: 1, duration: 0.7, ease: "expo.out", immediateRender: false }, 17.0);
+      blink("#caret4", 17.2, 21.4);
+      pop("#hotkey", 17.5, { opacity: 0, y: -30 }, { opacity: 1, y: 0 }, 0.4, "back.out(2)");
+      press("#hotkey .key", 17.9);
+      tl.fromTo("#epanel", { opacity: 0, scale: 0.85, y: 20 }, { opacity: 1, scale: 1, y: 0, duration: 0.45, ease: "back.out(1.8)", immediateRender: false }, 18.05);
+      tl.to("#esearch-ph", { opacity: 0, duration: 0.1 }, 18.35);
+      t = typeText("esearch-txt", "coeur", 18.35, 12);           // ≈ 18.77
+      tl.fromTo("#epanel .e", { opacity: 0, scale: 0.4 }, { opacity: 1, scale: 1, duration: 0.4, ease: "back.out(2.5)", stagger: { each: 0.035, from: "start" }, immediateRender: false }, t);
+      pop("#co-emoji", t + 0.1, { opacity: 0, x: 60, scale: 0.8 }, { opacity: 1, x: 0, scale: 1 }, 0.5, "back.out(2)");
+      // Enter → emoji committed
+      tl.fromTo("#heart4", { opacity: 0, scale: 0.2 }, { opacity: 1, scale: 1, duration: 0.5, ease: "back.out(3)", immediateRender: false }, t + 1.0);
+      fadeOut("#epanel", t + 0.95, 0.2, { scale: 0.95 });
+      // hero heart + confetti
+      tl.fromTo("#hero-emoji", { opacity: 0, scale: 0.2, rotation: -20 }, { opacity: 1, scale: 1, rotation: 0, duration: 0.6, ease: "elastic.out(1, 0.5)", immediateRender: false }, t + 1.3);
+      const angles = [0, 36, 72, 108, 144, 180, 216, 252, 288, 324];
+      angles.forEach((a, i) => {
+        const r = 300 + (i % 3) * 70; const rad = a * Math.PI / 180;
+        const sel = `#cf${i}`;
+        tl.fromTo(sel, { opacity: 1, x: 0, y: 0, scale: 0.4 },
+          { x: Math.cos(rad) * r, y: Math.sin(rad) * r, scale: 1, duration: 0.7, ease: "power3.out", immediateRender: false }, t + 1.3);
+        tl.to(sel, { opacity: 0, y: "+=120", duration: 0.5, ease: "power2.in" }, t + 1.9);
+      });
+      tl.to("#hero-emoji", { scale: 1.1, rotation: 6, duration: 0.6, ease: "sine.inOut", yoyo: true, repeat: 1 }, t + 2.0);
+      wipe(22.0, "#ffb300");
+
+      // ---------- scene 5 : features (22.0 – 27.6) ----------
+      shapeIn("#sh7", 22.0, 0, "expo.out"); shapeIn("#sh8", 22.1, 15, "expo.out");
+      tl.to("#sh7", { rotation: 40, x: 60, duration: 5, ease: "sine.inOut" }, 23.0);
+      tl.to("#sh8", { rotation: 60, y: -40, duration: 5, ease: "sine.inOut" }, 23.0);
+      pop("#features-title", 22.05, { opacity: 0, y: 50, scale: 0.9 }, { opacity: 1, y: 0, scale: 1 }, 0.7, "back.out(1.6)");
+      tl.fromTo(".card", { opacity: 0, y: 140, rotation: 4, scale: 0.9 },
+        { opacity: 1, y: 0, rotation: 0, scale: 1, duration: 0.7, ease: "back.out(1.6)", stagger: { each: 0.1, from: "center" }, immediateRender: false }, 22.35);
+      tl.fromTo(".card .ico", { scale: 0, rotation: -90 }, { scale: 1, rotation: 0, duration: 0.6, ease: "back.out(2.5)", stagger: { each: 0.1, from: "center" }, immediateRender: false }, 22.75);
+      tl.to(".features", { y: -14, duration: 4, ease: "sine.inOut" }, 23.4);
+      wipe(27.6, "#4caf50");
+
+      // ---------- scene 6 : offline (27.6 – 32.0) ----------
+      shapeIn("#sh9", 27.6, 0, "expo.out"); shapeIn("#sh10", 27.7, 0, "expo.out");
+      tl.to("#sh9", { y: 60, x: -30, duration: 4, ease: "sine.inOut" }, 28.2);
+      tl.to("#sh10", { y: -50, duration: 4, ease: "sine.inOut" }, 28.2);
+      tl.fromTo("#off-num", { opacity: 0, scale: 0.5, y: 40 }, { opacity: 1, scale: 1, y: 0, duration: 0.7, ease: "back.out(1.8)", immediateRender: false }, 27.65);
+      const counter = { v: 0 }; const counterEl = document.getElementById("off-counter");
+      tl.to(counter, { v: 100, duration: 1.1, ease: "power3.out", onUpdate: () => { counterEl.textContent = Math.round(counter.v); } }, 27.7);
+      pop("#off-txt", 28.2, { opacity: 0, y: 40 }, { opacity: 1, y: 0 }, 0.6, "back.out(1.6)");
+      pop("#off-sub", 28.6, { opacity: 0, y: 20 }, { opacity: 1, y: 0 }, 0.5);
+      tl.fromTo(".setting", { opacity: 0, x: -60 }, { opacity: 1, x: 0, duration: 0.5, ease: "expo.out", stagger: 0.15, immediateRender: false }, 29.0);
+      // toggles : local ON already, telemetry switches OFF live
+      tl.fromTo("#knob2", { x: 44, backgroundColor: "#ffffff" }, { x: 0, backgroundColor: "#5d5d5d", duration: 0.35, ease: "power2.inOut", immediateRender: false }, 30.0);
+      tl.fromTo("#tg2", { backgroundColor: "#005fb8", borderColor: "#005fb8" }, { backgroundColor: "rgba(0,0,0,0)", borderColor: "#8a8a8a", duration: 0.35, immediateRender: false }, 30.0);
+      wipe(32.0, "#3949ab");
+
+      // ---------- scene 7 : platforms (32.0 – 34.6) ----------
+      pop("#plat-title", 32.0, { opacity: 0, y: 40 }, { opacity: 1, y: 0 }, 0.6, "back.out(1.6)");
+      tl.fromTo("#plat-linux", { opacity: 0, x: -400, rotation: -6 }, { opacity: 1, x: 0, rotation: 0, duration: 0.7, ease: "back.out(1.4)", immediateRender: false }, 32.1);
+      tl.fromTo("#plat-win", { opacity: 0, x: 400, rotation: 6 }, { opacity: 1, x: 0, rotation: 0, duration: 0.7, ease: "back.out(1.4)", immediateRender: false }, 32.1);
+      tl.to("#line-l", { width: 70, duration: 0.3, ease: "power2.out" }, 32.7);
+      tl.to("#line-r", { width: 70, duration: 0.3, ease: "power2.out" }, 32.7);
+      tl.fromTo("#core-pill", { opacity: 0, scale: 0.3 }, { opacity: 1, scale: 1, duration: 0.6, ease: "elastic.out(1, 0.5)", immediateRender: false }, 32.9);
+      wipe(34.6, "#1976d2");
+
+      // ---------- scene 8 : outro (34.6 – 36) ----------
+      tl.fromTo("#s8-brand", { opacity: 0, scale: 0.6, y: 20 }, { opacity: 1, scale: 1.35, y: 0, duration: 0.6, ease: "back.out(1.8)", immediateRender: false }, 34.6);
+      pop("#outro-line", 34.85, { opacity: 0, y: 20 }, { opacity: 1, y: 0 }, 0.45);
+      pop("#outro-btn", 35.0, { opacity: 0, scale: 0.7 }, { opacity: 1, scale: 1 }, 0.5, "back.out(2)");
+      pop("#outro-url", 35.2, { opacity: 0, y: 16 }, { opacity: 1, y: 0 }, 0.45);
+
+      window.__timelines = window.__timelines || {};
+      window.__timelines["main"] = tl;
+      tl.seek(0);
+    </script>
+  </body>
+</html>

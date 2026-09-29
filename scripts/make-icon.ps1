@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   Génère win/tsf/predict.ico — l'icône du profil clavier, de l'installeur et
   de « Applications installées ».

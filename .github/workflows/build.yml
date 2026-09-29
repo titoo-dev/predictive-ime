@@ -95,8 +95,10 @@ jobs:
         run: |
           $exe = "build/daemon/Release/predictord.exe"
           $dll = "build/win/tsf/Release/predict-tsf.dll"
+          $adm = "build/win/admin/Release/predict-admin.exe"
           if (-not (Test-Path $exe)) { throw "predictord.exe manquant" }
           if (-not (Test-Path $dll)) { throw "predict-tsf.dll manquante" }
+          if (-not (Test-Path $adm)) { throw "predict-admin.exe manquant" }
           # Les 4 exports COM sont ce qui rend la DLL enregistrable : leur
           # absence ne casse pas la compilation, seulement l'installation.
           # dumpbin n'est pas sur le PATH du runner (hors invite développeur
@@ -112,9 +114,26 @@ jobs:
             # absent) ; -notmatch rendrait les autres lignes, jamais vide.
             if (-not ($exports -match "\b$fn\b")) { throw "export $fn manquant" }
           }
-          Write-Host "OK : daemon + text service, 4 exports COM"
+          Write-Host "OK : daemon + text service (4 exports COM) + panneau d'administration"
       # Non-régression du text service : disposition clavier, validation du
       # caret, placement de la barre, règles du setup. win-layout-installed est
       # sauté ici (Predict n'est pas installé sur le runner).
       - name: Test
         run: ctest --test-dir build -C Release --output-on-failure
+      # L'installeur lui-même : le script de packaging vérifie que les scripts
+      # livrés se parsent sous Windows PowerShell 5.1 (BOM UTF-8), stage le
+      # modèle et compile le .iss. Le build CI est dans build/, pas dans
+      # build-win-x64/ : on aligne d'un lien de jonction.
+      - name: Package installer
+        shell: pwsh
+        run: |
+          choco install innosetup zstandard -y --no-progress | Out-Null
+          if (-not (Test-Path build-win-x64)) { cmd /c mklink /J build-win-x64 build | Out-Null }
+          .\scripts\package-windows.ps1 -SkipBuild -SkipTests
+      - uses: actions/upload-artifact@v4
+        with:
+          name: predictive-ime-windows-x64
+          path: |
+            dist/predictive-ime-*-x64.exe
+            dist/predictive-ime-*-x64.exe.sha256
+          if-no-files-found: error

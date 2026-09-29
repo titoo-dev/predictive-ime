@@ -477,7 +477,7 @@ try:
     check("emoji récents: ':s' — à usage égal, le plus récent devant",
           c.index("🐭") < c.index("😊"), str(c))
 
-    # 8bis) RESTAURATION D'ACCENTS (fold-equal) + ghost découplé + barWords
+    # 8bis) RESTAURATION D'ACCENTS (fold-equal) + barWords
     r = req({"prefix": "etre", "context": []})
     check("accent: etre → être (accentOnly)",
           r.get("autocomplete") == "être" and r.get("accentOnly") is True,
@@ -505,8 +505,6 @@ try:
     r = req({"prefix": "bonjou", "context": []})
     check("autoApply off: l'Espace garde le littéral (pas d'autocomplete)",
           r.get("autocomplete", "") == "", str(r))
-    check("autoApply off: le GHOST reste calculé (→ l'accepte)",
-          r.get("ghost") == "bonjour", str(r))
     r = req({"prefix": "etre", "context": []})
     check("autoApply off: l'accent est restauré quand même (accentRestore)",
           r.get("autocomplete") == "être" and r.get("accentOnly") is True,

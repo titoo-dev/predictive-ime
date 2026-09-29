@@ -1,4 +1,4 @@
-# Règles de disposition clavier de Predict — fonctions PURES, partagées par
+﻿# Règles de disposition clavier de Predict — fonctions PURES, partagées par
 # setup-windows.ps1 et scripts/tests/Test-PredictLayout.ps1.
 #
 # Contexte (cf win/tsf/KeyboardLayout.h) : Predict tape avec la disposition

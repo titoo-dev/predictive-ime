@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   Installe le modèle et l'autodémarrage du daemon predictord sous Windows.
 
@@ -23,6 +23,9 @@
 [CmdletBinding()]
 param(
   [string] $ModelTag = 'model-v1',
+  # Modèle déjà déballé (l'installeur le livre dans {app}model) : aucun
+  # téléchargement, aucun zstd ; la tâche de session pointe directement dessus.
+  [string] $ModelDir = '',
   [switch] $SkipModel,
   [switch] $SkipAutostart,
   [switch] $SkipIme,
@@ -123,9 +126,16 @@ function Remove-PredictFromLanguageList {
 $repo     = Split-Path -Parent $PSScriptRoot
 $dataDir  = Join-Path $env:LOCALAPPDATA 'ime-predictord'   # modèle, socket, appris
 $cfgDir   = Join-Path $env:APPDATA      'ime-predictord'   # réglages éditables
-$modelDir = Join-Path $dataDir 'model'
+$modelHome = Join-Path $dataDir 'model'   # (≠ $ModelDir : PowerShell ignore la casse)
 $binDir   = Join-Path $dataDir 'bin'
 $taskName = 'ime-predictord'
+
+# Journal : lancé caché par l'installeur, ce script n'a pas de console — sans
+# trace, un échec est invisible. (Ignoré si la transcription est indisponible.)
+try {
+  New-Item -ItemType Directory -Force $dataDir | Out-Null
+  Start-Transcript -Path (Join-Path $dataDir 'setup.log') -Force | Out-Null
+} catch { }
 
 # ---------------------------------------------------------------- désinstall --
 if ($Uninstall) {
@@ -154,12 +164,17 @@ if ($Uninstall) {
   return
 }
 
-New-Item -ItemType Directory -Force $dataDir, $cfgDir, $modelDir, $binDir | Out-Null
+New-Item -ItemType Directory -Force $dataDir, $cfgDir, $modelHome, $binDir | Out-Null
 
 # -------------------------------------------------------------------- binaire --
+# Trois provenances : l'arbre de build (dépôt), et — quand ce script tourne
+# depuis {app}\scripts, lancé par l'installeur — le binaire livré à côté, dans
+# Program Files. Sans ce dernier cas, une machine neuve (pas de bin\ encore)
+# échouait ici alors que predictord.exe était à deux dossiers de là.
 $built = @(
   "$repo\build-win-x64\daemon\Release\predictord.exe",
-  "$repo\build-win-x64\daemon\predictord.exe"
+  "$repo\build-win-x64\daemon\predictord.exe",
+  "$repo\predictord.exe"
 ) | Where-Object { Test-Path $_ } | Select-Object -First 1
 
 if ($built) {
@@ -179,7 +194,10 @@ if ($built) {
   # Les DLL deposees a cote par vcpkg (libcurl, zlib) DOIVENT suivre le binaire.
   # Sans elles le chargement echoue au demarrage — et comme le daemon est lie en
   # sous-systeme WINDOWS, il n'a aucune console ou se plaindre : echec silencieux.
-  $dlls = Get-ChildItem (Split-Path $built) -Filter *.dll -EA SilentlyContinue
+  # (predict-tsf.dll et predict-admin.exe vivent à côté dans Program Files :
+  # seules les DLL de vcpkg — libcurl, zlib — suivent le daemon.)
+  $dlls = Get-ChildItem (Split-Path $built) -Filter *.dll -EA SilentlyContinue |
+    Where-Object { $_.Name -notlike 'predict-*' }
   foreach ($d in $dlls) { Copy-Item $d.FullName (Join-Path $binDir $d.Name) -Force }
   Write-Host "binaire  : $binDir\predictord.exe$(if ($dlls) { ' (+ ' + (($dlls.Name) -join ', ') + ')' })"
 } elseif (-not (Test-Path (Join-Path $binDir 'predictord.exe'))) {
@@ -187,9 +205,15 @@ if ($built) {
 }
 
 # --------------------------------------------------------------------- modèle --
-if (-not $SkipModel) {
-  if (Test-Path (Join-Path $modelDir 'words.tsv')) {
-    Write-Host "modèle   : déjà présent ($modelDir)"
+if ($ModelDir) {
+  if (-not (Test-Path (Join-Path $ModelDir 'words.tsv'))) {
+    throw "words.tsv introuvable dans -ModelDir $ModelDir"
+  }
+  $modelHome = $ModelDir
+  Write-Host "modèle   : $modelHome (fourni)"
+} elseif (-not $SkipModel) {
+  if (Test-Path (Join-Path $modelHome 'words.tsv')) {
+    Write-Host "modèle   : déjà présent ($modelHome)"
   } else {
     if (-not (Get-Command zstd -EA SilentlyContinue)) {
       throw 'zstd introuvable — winget install Meta.Zstandard (puis rouvrir le terminal)'
@@ -207,20 +231,20 @@ if (-not $SkipModel) {
     $tar = [IO.Path]::ChangeExtension($zst, $null).TrimEnd('.')
     zstd -d -f $zst -o $tar
     if ($LASTEXITCODE -ne 0) { throw 'zstd -d a échoué' }
-    tar -xf $tar -C $modelDir
+    tar -xf $tar -C $modelHome
     if ($LASTEXITCODE -ne 0) { throw 'tar -xf a échoué' }
     Remove-Item $tar -Force
-    Write-Host "modèle   : $modelDir"
+    Write-Host "modèle   : $modelHome"
   }
 }
 
-$words = Join-Path $modelDir 'words.tsv'
+$words = Join-Path $modelHome 'words.tsv'
 if (-not (Test-Path $words)) {
   # La release peut se déballer dans un sous-dossier selon sa version.
-  $found = Get-ChildItem $modelDir -Recurse -Filter words.tsv -EA SilentlyContinue | Select-Object -First 1
+  $found = Get-ChildItem $modelHome -Recurse -Filter words.tsv -EA SilentlyContinue | Select-Object -First 1
   if ($found) { $words = $found.FullName }
 }
-if (-not (Test-Path $words)) { throw "words.tsv introuvable sous $modelDir" }
+if (-not (Test-Path $words)) { throw "words.tsv introuvable sous $modelHome" }
 
 # --------------------------------------------------------------------- config --
 $cfgFile = Join-Path $cfgDir 'config.json'

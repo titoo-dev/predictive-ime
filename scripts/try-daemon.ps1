@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   Testeur interactif : tape une phrase, vois les suggestions en direct.
 
@@ -83,7 +83,6 @@ $WORD_EXTRA = [char[]] @(0x27, 0x2019, 0x3A, 0x2D)
 $words  = [System.Collections.Generic.List[string]]::new()  # mots valides
 $buffer = ''                                                # mot en cours
 $cands  = @()
-$ghost  = ''
 $auto   = ''
 $sel    = -1        # -1 = aucune navigation ; sinon index dans $cands
 $err    = ''
@@ -95,11 +94,10 @@ function Update-Suggestions {
   try {
     $r = Send-Req @{ context = $ctx; prefix = $buffer }
     $script:cands = @($r.candidates)
-    $script:ghost = [string]$r.ghost
     $script:auto  = [string]$r.autocomplete
     $script:err   = ''
   } catch {
-    $script:cands = @(); $script:ghost = ''; $script:auto = ''
+    $script:cands = @(); $script:auto = ''
     $script:err = $_.Exception.Message
   }
 }
@@ -138,13 +136,7 @@ function Render {
   $typed = ((@($words) + @($buffer)) -join ' ').TrimEnd()
   if ($words.Count -gt 0 -and $buffer -eq '') { $typed = (@($words) -join ' ') + ' ' }
 
-  # Le fantome : la fin du mot que l'Espace completerait.
-  $tail = ''
-  if ($ghost -and $buffer -and $ghost.StartsWith($buffer, 'CurrentCultureIgnoreCase')) {
-    $tail = $ghost.Substring($buffer.Length)
-  }
-
-  Write-Padded "  $typed${DIM}${tail}${RESET}${CYAN}|${RESET}" ($anchor + 1)
+  Write-Padded "  $typed${CYAN}|${RESET}" ($anchor + 1)
 
   if ($err) {
     Write-Padded "  ${RED}$err${RESET}" ($anchor + 3)

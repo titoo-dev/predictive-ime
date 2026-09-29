@@ -73,10 +73,8 @@ public:
 
   // --- insertion -----------------------------------------------------------
   virtual void commitText(const std::string &utf8) = 0;
-  // Préédition : `typed` souligné + `ghost` souligné-italique, curseur entre
-  // les deux. ghost vide = pas de fantôme.
-  virtual void setPreedit(const std::string &typed,
-                          const std::string &ghost) = 0;
+  // Préédition : `typed` souligné, curseur à la fin. Vide = pas de préédition.
+  virtual void setPreedit(const std::string &typed) = 0;
 
   // --- barre de candidats ---------------------------------------------------
   // cursor < 0 : aucun surlignage. `auxTitle` = en-tête (mode reformulation).

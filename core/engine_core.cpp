@@ -144,7 +144,6 @@ void EngineCore::updateCompletion(PredictState &st) {
   st.cands = reply.candidates;
   st.literalIsWord = reply.literalIsWord;
   st.autocomplete = reply.autocomplete;
-  st.ghost = reply.ghost;
   st.accentOnly = reply.accentOnly;
   // Repli « le brut » : le mot tapé reste proposable quand le modèle ne rend
   // rien. PAS pour le picker emoji — proposer ':zzz' comme candidat n'a aucun
@@ -172,25 +171,17 @@ void EngineCore::updateCompletion(PredictState &st) {
       !fe_.surrounding(probe)) {
     st.autocomplete.clear();
     st.accentOnly = false;
-    // le fantôme reste : → est un accept EXPLICITE, pas besoin de revert.
   }
 
   // EFFACEMENT : reculer désarme l'Espace pour ce mot (cf
-  // PredictState::erasing). Le fantôme, lui, est déjà éteint par ghostShown().
-  // Les candidats RESTENT : Tab / 1-6 permettent toujours de choisir
+  // PredictState::erasing). Les candidats RESTENT : Tab / 1-6 permettent toujours de choisir
   // explicitement — c'est l'application AUTOMATIQUE qu'on retire.
   if (st.erasing) {
     st.autocomplete.clear();
     st.accentOnly = false;
   }
 
-  // GHOST TEXT : le reste de la complétion haute-confiance s'affiche dans le
-  // préedit (conditions dans ghostShown(), partagées avec la touche →).
-  std::string ghost;
-  if (ghostShown(st))
-    ghost = st.ghost.substr(st.buffer.size());
-
-  fe_.setPreedit(st.buffer, ghost);
+  fe_.setPreedit(st.buffer);
   setCandidates(st);
 }
 
@@ -199,7 +190,6 @@ void EngineCore::updateCompletion(PredictState &st) {
 // phrase (<s>) — début de champ, ou après « . ! ? ».
 void EngineCore::showNextWord(PredictState &st) {
   st.autocomplete.clear(); // pas de marquage « auto » en mot-suivant
-  st.ghost.clear();
   st.accentOnly = false;
   st.literalIsWord = false;
   if (!engineCfg().nextWordBar) { // mode calme : pas de barre spéculative
@@ -245,7 +235,7 @@ void EngineCore::showNextWord(PredictState &st) {
     return;
   }
   // La barre mot-suivant n'a PAS de préédition : elle est spéculative.
-  fe_.setPreedit(std::string{}, std::string{});
+  fe_.setPreedit(std::string{});
   setCandidates(st);
 }
 
@@ -313,15 +303,6 @@ bool EngineCore::turnPage(PredictState &st, int delta, int column) {
   return true;
 }
 
-bool EngineCore::ghostShown(const PredictState &st) const {
-  // Il ne s'affiche que si la complétion PROLONGE octet-à-octet la frappe
-  // (jamais pour une correction floue : la barre + le liseré s'en chargent),
-  // et jamais après un refus (vetoAuto) ni un effacement (erasing).
-  return engineCfg().ghostText && !st.literalIsWord && !st.vetoAuto &&
-         !st.erasing && st.ghost.size() > st.buffer.size() &&
-         st.ghost.compare(0, st.buffer.size(), st.buffer) == 0;
-}
-
 // Mot retenu quand on appuie sur Espace en cours de composition :
 //  - en navigation → le candidat surligné ;
 //  - sinon, si le préfixe n'est PAS un mot réel → autocomplétion/autocorrection ;
@@ -356,7 +337,7 @@ void EngineCore::navigate(PredictState &st, int dir, bool clamp) {
   // Reflète le candidat surligné dans la préédition — SAUF en mode emoji : la
   // préédition reste vide (la requête vit dans le champ de recherche).
   if (!st.buffer.empty() && !isEmojiBuffer(st.buffer))
-    fe_.setPreedit(applyCase(candOf(st, next), st.buffer), std::string{});
+    fe_.setPreedit(applyCase(candOf(st, next), st.buffer));
   setCandidates(st);
 }
 
@@ -468,7 +449,7 @@ void EngineCore::commitWord(PredictState &st, const std::string &raw,
   st.cands.clear();
   st.navigating = false;
   st.vetoAuto = false; // le veto ne vaut que pour le mot en cours
-  st.erasing = false;  // idem : le mot suivant repart avec le fantôme
+  st.erasing = false;  // idem : le mot suivant repart avec l'auto-application
   st.pageStart = 0;
   if (trailingSpace)
     showNextWord(st);
@@ -847,7 +828,7 @@ bool EngineCore::keyEvent(PredictState &st, const KeyEvent &k) {
     }
     appendCp(st.buffer, k.cp);
     st.navigating = false;
-    st.erasing = false; // retaper réarme fantôme + auto-application
+    st.erasing = false; // retaper réarme l'auto-application
     updateCompletion(st);
     return true;
   }
@@ -905,8 +886,8 @@ bool EngineCore::keyEvent(PredictState &st, const KeyEvent &k) {
             st.ctx.pop_back();
           st.navigating = false;
           // Reculer sur un mot committé est un geste de CORRECTION : le mot
-          // revient tel quel, sans fantôme et sans auto-application (sinon
-          // effacer l'espace après « salut » rendait « salutation »).
+          // revient tel quel, sans auto-application (sinon effacer
+          // l'espace après « salut » rendait « salutation »).
           st.erasing = true;
           updateCompletion(st);
           return true;
@@ -982,12 +963,6 @@ bool EngineCore::keyEvent(PredictState &st, const KeyEvent &k) {
         navigateTo(st, right ? 0 : pageCount(st) - 1); // bord opposé
       else
         navigate(st, right ? +1 : -1, /*clamp=*/emojiGrid);
-      return true;
-    }
-    // → ACCEPTE le texte fantôme (accept explicite, façon Copilot/fish) :
-    // committe la complétion SANS espace — la frappe continue naturellement.
-    if (!k.mod() && k.key == Key::Right && !st.navigating && ghostShown(st)) {
-      commitWord(st, st.ghost, /*trailingSpace=*/false);
       return true;
     }
     if (!k.mod() && k.key == Key::Space) {
@@ -1127,7 +1102,6 @@ void EngineCore::reset(PredictState &st) {
   st.erasing = false;
   st.lastAutoCps = 0;
   st.lastAutoLit.clear();
-  st.ghost.clear();
   st.accentOnly = false;
   st.pageStart = 0;
   st.nextWordGen++; // un refresh neural en vol devient périmé

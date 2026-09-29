@@ -16,6 +16,7 @@ install(TARGETS predict-probe RUNTIME DESTINATION bin)
 add_executable(candidate-preview
   candidate-preview.cpp
   ../tsf/CandidateWindow.cpp
+  ../tsf/Module.cpp
   ../tsf/Theme.cpp
   ../tsf/StatusIcon.cpp)
 target_compile_features(candidate-preview PRIVATE cxx_std_17)

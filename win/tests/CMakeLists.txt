@@ -2,6 +2,7 @@
 add_executable(test_win_tsf
   test_win_tsf.cpp
   ../tsf/CandidateWindow.cpp
+  ../tsf/Module.cpp
   ../tsf/Theme.cpp
   ../tsf/KeyboardLayout.cpp)
 target_compile_features(test_win_tsf PRIVATE cxx_std_17)

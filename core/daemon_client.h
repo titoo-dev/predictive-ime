@@ -25,7 +25,6 @@ struct DaemonReply {
   std::vector<std::string> candidates;
   bool literalIsWord = false;
   std::string autocomplete; // mot à appliquer sur Espace, ou ""
-  std::string ghost;        // complétion affichée en fantôme
   bool accentOnly = false;  // autocomplete = pure restauration d'accents
   bool pending = false;     // un refresh neural suivra sur la même connexion
 };
@@ -156,8 +155,6 @@ inline DaemonReply queryDaemon(const std::vector<std::string> &context,
       out.candidates.push_back(c.get<std::string>());
     out.literalIsWord = resp.value("literalIsWord", false);
     out.autocomplete = resp.value("autocomplete", std::string{});
-    // repli vieux daemon (pas de champ ghost) : le fantôme suit l'autocomplete
-    out.ghost = resp.value("ghost", out.autocomplete);
     out.accentOnly = resp.value("accentOnly", false);
     out.pending = resp.value("pending", false);
   } catch (...) {

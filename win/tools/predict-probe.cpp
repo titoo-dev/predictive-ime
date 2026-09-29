@@ -44,7 +44,7 @@ int main(int argc, char **argv) {
   std::printf("candidats: %d\n", int(r.candidates.size()));
   for (const auto &c : r.candidates)
     std::printf("  - %s\n", c.c_str());
-  std::printf("auto='%s' ghost='%s' literalIsWord=%d\n",
-              r.autocomplete.c_str(), r.ghost.c_str(), int(r.literalIsWord));
+  std::printf("auto='%s' literalIsWord=%d\n",
+              r.autocomplete.c_str(), int(r.literalIsWord));
   return r.candidates.empty() ? 3 : 0;
 }

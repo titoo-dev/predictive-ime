@@ -1,0 +1,70 @@
+// Identifiants des ressources du panneau d'administration (predict-admin).
+#pragma once
+
+#define IDI_PREDICT 1
+
+#define IDD_MAIN 100
+#define IDD_PAGE_GENERAL 101
+#define IDD_PAGE_REFORM 102
+#define IDD_PAGE_ADVANCED 103
+#define IDD_PAGE_SERVICE 104
+
+// --- fenêtre principale
+#define IDC_TABS 1000
+#define IDC_APPLY 1001
+#define IDC_STATUS 1002
+
+// --- Général
+#define IDC_LANG 1100
+#define IDC_BARWORDS 1101
+#define IDC_NEXTWORDBAR 1102
+#define IDC_MULTIWORD 1103
+#define IDC_AUTOAPPLY 1104
+#define IDC_ACCENTRESTORE 1105
+#define IDC_ESCAPEFORWARD 1106
+#define IDC_FRENCHSPACING 1107
+#define IDC_AUTOCAP 1108
+#define IDC_EXCLUDE 1109
+
+// --- Reformulation (IA)
+#define IDC_APIKEY 1200
+#define IDC_SHOWKEY 1201
+#define IDC_KEYSTATUS 1202
+#define IDC_SAVEKEY 1203
+#define IDC_TESTKEY 1204
+#define IDC_DELKEY 1205
+#define IDC_GETKEY 1206
+#define IDC_BASEURL 1207
+#define IDC_MODEL 1208
+#define IDC_TIMEOUT 1209
+#define IDC_REFORMCOUNT 1210
+
+// --- Avancé
+#define IDC_AGREE 1300
+#define IDC_RECENCY 1301
+#define IDC_LEARNED 1302
+#define IDC_LEARNEDFLOOR 1303
+#define IDC_PROCLISIS 1304
+#define IDC_AUTODOM 1305
+#define IDC_SOCKTIMEOUT 1306
+#define IDC_NEXTTIMEOUT 1307
+#define IDC_RESETADV 1308
+
+// --- Service
+#define IDC_DAEMONSTATUS 1400
+#define IDC_START 1401
+#define IDC_STOP 1402
+#define IDC_RESTART 1403
+#define IDC_OPENLOG 1404
+#define IDC_IMESTATUS 1405
+#define IDC_TCONTEXT 1406
+#define IDC_TPREFIX 1407
+#define IDC_TEST 1408
+#define IDC_TRESULT 1409
+#define IDC_OPENCFG 1410
+#define IDC_OPENDICT 1411
+#define IDC_OPENSNIP 1412
+#define IDC_OPENDATA 1413
+#define IDC_CLEARLEARNED 1414
+#define IDC_VERSION 1415
+#define IDC_GITHUB 1416

@@ -51,6 +51,10 @@ LicenseFile=..\..\LICENSE
 SetupIconFile=..\..\win\tsf\predict.ico
 UninstallDisplayIcon={app}\predict-tsf.dll,0
 UninstallDisplayName={#AppName}
+; predict-admin.exe peut être ouvert pendant une mise à jour : on le ferme
+; (et on le rouvre) plutôt que d'échouer sur un fichier verrouillé.
+CloseApplications=yes
+RestartApplications=no
 
 [Languages]
 Name: "french";  MessagesFile: "compiler:Languages\French.isl"
@@ -63,6 +67,14 @@ Source: "{#BuildDir}\win\tsf\Release\predict-tsf.dll"; DestDir: "{app}"; \
 ; Le daemon et ses dépendances vcpkg.
 Source: "{#BuildDir}\daemon\Release\predictord.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#BuildDir}\daemon\Release\*.dll";          DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+; Le panneau d'administration (réglages, clé API, état du daemon) : lancé
+; depuis le menu Démarrer, l'icône de la barre des tâches ou la fin du setup.
+Source: "{#BuildDir}\win\admin\Release\predict-admin.exe"; DestDir: "{app}"; Flags: ignoreversion
+; Le modèle n-gramme, LIVRÉ dans l'installeur (scripts\package-windows.ps1 le
+; dépose dans {#BuildDir}\model) : aucun téléchargement ni zstd à l'installation,
+; donc une machine sans réseau ou sans outils installe quand même quelque chose
+; qui prédit. Partagé par tous les utilisateurs, en lecture seule sous Program Files.
+Source: "{#BuildDir}\model\*"; DestDir: "{app}\model"; Flags: ignoreversion recursesubdirs
 ; Scripts d'exploitation (modèle, tâche de session, sondes).
 Source: "..\..\scripts\setup-windows.ps1";  DestDir: "{app}\scripts"; Flags: ignoreversion
 Source: "..\..\scripts\PredictLayout.ps1";  DestDir: "{app}\scripts"; Flags: ignoreversion
@@ -74,25 +86,26 @@ Source: "..\..\README.md";                  DestDir: "{app}"; Flags: ignoreversi
 Name: "{group}\Tester la prédiction"; Filename: "powershell.exe"; \
   Parameters: "-NoExit -ExecutionPolicy Bypass -File ""{app}\scripts\try-daemon.ps1"""; \
   IconFilename: "{app}\predict-tsf.dll"
-; Les réglages vivent dans %APPDATA% de CHAQUE utilisateur. Un raccourci qui
-; figerait ce chemin à l'installation (faite en admin) pointerait vers le
-; profil de l'administrateur : on résout donc la variable au LANCEMENT.
-Name: "{group}\Réglages (config.json)"; Filename: "{sys}\cmd.exe"; \
-  Parameters: "/c start """" ""%APPDATA%\ime-predictord\config.json"""; \
-  IconFilename: "{app}\predict-tsf.dll"; Flags: runminimized
+; Le panneau lit %APPDATA% de l'utilisateur qui le LANCE (aucun chemin figé
+; à l'installation, qui se fait en admin).
+Name: "{group}\Predict — Administration"; Filename: "{app}\predict-admin.exe"; \
+  Comment: "Réglages, clé API de reformulation, état du daemon"
+Name: "{autodesktop}\Predict — Administration"; Filename: "{app}\predict-admin.exe"; \
+  Tasks: desktopicon
 Name: "{group}\Désinstaller {#AppName}"; Filename: "{uninstallexe}"
 
+[Tasks]
+Name: "desktopicon"; Description: "Créer une icône « Predict — Administration » sur le Bureau"; \
+  GroupDescription: "Raccourcis :"; Flags: unchecked
+
 [Run]
-; Modèle + tâche de session + ajout de « Predict » à Win+Espace, dans le
-; contexte de l'utilisateur qui installe (runasoriginaluser : si l'élévation
-; s'est faite avec un AUTRE compte administrateur, c'est quand même le profil
-; de l'utilisateur qui reçoit le clavier et le modèle). Sans -AddInputMethod,
-; le clavier était inscrit mais introuvable tant qu'on ne l'ajoutait pas à la
-; main dans les Paramètres.
-Filename: "powershell.exe"; \
-  Parameters: "-ExecutionPolicy Bypass -NoProfile -File ""{app}\scripts\setup-windows.ps1"" -SkipIme -AddInputMethod"; \
-  StatusMsg: "Téléchargement du modèle et configuration du daemon…"; \
-  Flags: runhidden waituntilterminated runasoriginaluser
+; (La configuration du daemon — tâche de session, config.json, ajout de
+; « Predict » à Win+Espace — est lancée depuis [Code] : une entrée [Run]
+; ignore le code de retour, et un setup qui échoue passait pour réussi.)
+; Dernière page : proposer d'ouvrir le panneau (clé API, langue…). Jamais en
+; installation silencieuse, et dans le profil de l'utilisateur, pas de l'admin.
+Filename: "{app}\predict-admin.exe"; Description: "Ouvrir le panneau d'administration de Predict"; \
+  Flags: postinstall nowait skipifsilent runasoriginaluser
 
 [UninstallRun]
 Filename: "powershell.exe"; \
@@ -113,8 +126,37 @@ begin
        '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;
 
+// Tâche de session + config.json + ajout de « Predict » à Win+Espace, dans le
+// contexte de l'utilisateur qui installe (ExecAsOriginalUser : si l'élévation
+// s'est faite avec un AUTRE compte administrateur, c'est quand même le profil
+// de l'utilisateur qui reçoit le clavier et le daemon). Le script écrit son
+// journal dans %LOCALAPPDATA%\ime-predictord\setup.log ; un échec est SIGNALÉ.
+procedure RunUserSetup();
+var
+  ResultCode: Integer;
+  Params: String;
+begin
+  Params := '-ExecutionPolicy Bypass -NoProfile -File "' + ExpandConstant('{app}') +
+            '\scripts\setup-windows.ps1" -SkipIme -AddInputMethod -ModelDir "' +
+            ExpandConstant('{app}') + '\model"';
+  if not ExecAsOriginalUser('powershell.exe', Params, '', SW_HIDE,
+                            ewWaitUntilTerminated, ResultCode) then
+    ResultCode := -1;
+  Log('setup-windows.ps1 -> code ' + IntToStr(ResultCode));
+  if ResultCode <> 0 then
+    SuppressibleMsgBox(
+      'Le text service est installé, mais la configuration du daemon de prédiction a échoué (code ' +
+      IntToStr(ResultCode) + ').' + #13#10#13#10 +
+      'Journal : %LOCALAPPDATA%\ime-predictord\setup.log' + #13#10 +
+      'Pour réessayer : ' + ExpandConstant('{app}') + '\scripts\setup-windows.ps1',
+      mbError, MB_OK, IDOK);
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssPostInstall then
+  begin
     GrantAppContainerRead();
+    RunUserSetup();
+  end;
 end;

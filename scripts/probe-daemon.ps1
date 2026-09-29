@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   Sonde le daemon predictord depuis Windows — une requête JSON, une réponse.
 

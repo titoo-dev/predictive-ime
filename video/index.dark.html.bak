@@ -1,0 +1,519 @@
+<!doctype html>
+<html lang="fr" data-resolution="landscape">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=1920, height=1080" />
+    <title>Predict — motion design</title>
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      @font-face { font-family: 'Segoe UI Emoji'; src: local('Segoe UI Emoji'); }
+      @font-face { font-family: 'Apple Color Emoji'; src: local('Apple Color Emoji'); }
+      @font-face { font-family: 'Noto Color Emoji'; src: local('Noto Color Emoji'); }
+      @font-face { font-family: 'Segoe UI Variable Display'; src: local('Segoe UI Variable Display'), local('Segoe UI Variable'); }
+      @font-face { font-family: 'Segoe UI'; src: local('Segoe UI'); }
+      @font-face { font-family: 'Cascadia Code'; src: local('Cascadia Code'); }
+      @font-face { font-family: 'Cascadia Mono'; src: local('Cascadia Mono'); }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      :root {
+        --bg: #070a14;
+        --surface: rgba(20, 26, 44, 0.72);
+        --surface-2: rgba(255, 255, 255, 0.06);
+        --text: #f5f7ff;
+        --dim: #9aa3bd;
+        --accent: #4f8cff;
+        --accent-2: #a56bff;
+        --accent-3: #34d5ff;
+        --ok: #5ce2a8;
+        --font: "Segoe UI Variable Display", "Segoe UI", Inter, ui-sans-serif, system-ui, sans-serif;
+        --mono: "Cascadia Code", "Cascadia Mono", Consolas, ui-monospace, monospace;
+      }
+      html, body {
+        width: 1920px; height: 1080px; overflow: hidden;
+        background: var(--bg);
+        font-family: var(--font);
+        color: var(--text);
+        -webkit-font-smoothing: antialiased;
+      }
+      #root { position: relative; width: 1920px; height: 1080px; overflow: hidden; }
+      .clip { position: absolute; inset: 0; }
+
+      /* ---------- Background (whole video) ---------- */
+      #bg { background: radial-gradient(1200px 800px at 50% 40%, #0d1428 0%, var(--bg) 70%); }
+      .orb {
+        position: absolute; border-radius: 50%; filter: blur(90px); opacity: 0.55;
+        will-change: transform;
+      }
+      #orb-a { width: 900px; height: 900px; left: -250px; top: -300px; background: #2b5cff; }
+      #orb-b { width: 800px; height: 800px; right: -300px; top: 100px; background: #7a3cff; }
+      #orb-c { width: 700px; height: 700px; left: 600px; bottom: -450px; background: #1bb9d8; opacity: 0.35; }
+      #grid {
+        position: absolute; inset: 0;
+        background-image:
+          linear-gradient(rgba(255,255,255,0.045) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(255,255,255,0.045) 1px, transparent 1px);
+        background-size: 64px 64px;
+        mask-image: radial-gradient(900px 600px at 50% 50%, #000 30%, transparent 100%);
+        -webkit-mask-image: radial-gradient(900px 600px at 50% 50%, #000 30%, transparent 100%);
+      }
+      #vignette {
+        position: absolute; inset: 0;
+        background: radial-gradient(1400px 900px at 50% 50%, transparent 55%, rgba(0,0,0,0.55) 100%);
+      }
+
+      /* ---------- Shared ---------- */
+      .scene-inner { position: absolute; inset: 0; }
+      .center { display: flex; flex-direction: column; align-items: center; justify-content: center; }
+      .eyebrow {
+        font-size: 26px; letter-spacing: 0.32em; text-transform: uppercase; color: var(--dim);
+        font-weight: 600;
+      }
+      .headline { font-size: 132px; font-weight: 700; letter-spacing: -0.045em; line-height: 1.02; }
+      .headline .w { display: inline-block; opacity: 0; }
+      .grad {
+        background: linear-gradient(90deg, var(--accent-3), var(--accent), var(--accent-2));
+        -webkit-background-clip: text; background-clip: text; color: transparent;
+      }
+      .sub { font-size: 40px; color: var(--dim); font-weight: 500; letter-spacing: -0.01em; }
+      .hidden { opacity: 0; }
+      .brand {
+        display: inline-flex; align-items: center; gap: 22px;
+      }
+      .mark {
+        width: 84px; height: 84px; border-radius: 22px;
+        background: linear-gradient(135deg, var(--accent-3), var(--accent) 55%, var(--accent-2));
+        display: grid; place-items: center;
+        box-shadow: 0 20px 60px rgba(79, 140, 255, 0.45), inset 0 1px 0 rgba(255,255,255,0.35);
+        font-weight: 800; font-size: 50px; color: #fff; letter-spacing: -0.05em;
+      }
+      .brand-name { font-size: 64px; font-weight: 700; letter-spacing: -0.04em; }
+      .callout {
+        position: absolute; display: inline-flex; align-items: center; gap: 12px;
+        padding: 14px 24px; border-radius: 999px;
+        background: rgba(79, 140, 255, 0.16); border: 1px solid rgba(79, 140, 255, 0.55);
+        color: #cfe0ff; font-size: 28px; font-weight: 600; letter-spacing: -0.01em;
+        opacity: 0;
+      }
+      .callout .dot { width: 12px; height: 12px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 18px var(--accent); }
+
+      /* ---------- Scene 2 : editor + candidate bar ---------- */
+      .window {
+        position: absolute; left: 260px; top: 210px; width: 1400px; height: 620px;
+        border-radius: 22px; overflow: hidden;
+        background: rgba(17, 22, 38, 0.86);
+        border: 1px solid rgba(255,255,255,0.10);
+        box-shadow: 0 40px 120px rgba(0,0,0,0.55), 0 0 0 1px rgba(0,0,0,0.4);
+        backdrop-filter: blur(20px);
+        transform-origin: 50% 60%;
+      }
+      .titlebar {
+        height: 64px; display: flex; align-items: center; gap: 12px; padding: 0 26px;
+        background: rgba(255,255,255,0.04); border-bottom: 1px solid rgba(255,255,255,0.07);
+        font-size: 22px; color: var(--dim);
+      }
+      .titlebar .dots { display: flex; gap: 10px; margin-right: 14px; }
+      .titlebar .dots i { width: 14px; height: 14px; border-radius: 50%; background: rgba(255,255,255,0.18); display: block; }
+      .editor {
+        padding: 70px 90px; font-size: 62px; font-weight: 500; letter-spacing: -0.015em;
+        line-height: 1.35; color: var(--text); white-space: pre-wrap;
+      }
+      .editor .ch { opacity: 0; }
+      .editor .pre { color: var(--dim); }
+      .caret {
+        display: inline-block; width: 5px; height: 66px; background: var(--accent);
+        vertical-align: -10px; margin-left: 2px; border-radius: 2px;
+        box-shadow: 0 0 16px var(--accent);
+      }
+      .ghost { color: rgba(255,255,255,0.5); opacity: 0; }
+      .committed { color: #b9d2ff; text-shadow: 0 0 22px rgba(79,140,255,0.55); opacity: 0; }
+
+      .bar {
+        position: absolute; left: 90px; top: 246px;
+        display: flex; gap: 10px; padding: 10px;
+        background: rgba(36, 43, 66, 0.92);
+        border: 1px solid rgba(255,255,255,0.12);
+        border-radius: 18px;
+        box-shadow: 0 24px 60px rgba(0,0,0,0.5);
+        opacity: 0; transform-origin: 0 0;
+      }
+      .chip {
+        position: relative; padding: 12px 24px; border-radius: 12px;
+        font-size: 34px; font-weight: 500; color: var(--text);
+        background: rgba(255,255,255,0.05); white-space: nowrap;
+      }
+      .chip.hi {
+        background: rgba(79,140,255,0.22);
+        box-shadow: inset 0 0 0 2px var(--accent);
+      }
+      .chip .idx { color: var(--dim); font-size: 22px; margin-right: 10px; }
+      .key {
+        display: inline-flex; align-items: center; justify-content: center;
+        min-width: 150px; height: 60px; padding: 0 24px; border-radius: 12px;
+        background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.18);
+        border-bottom-width: 4px;
+        font-size: 26px; font-weight: 600; color: var(--text); letter-spacing: 0.04em;
+      }
+      #space-key { position: absolute; left: 90px; top: 440px; width: 520px; opacity: 0; transform-origin: 50% 100%; }
+
+      /* ---------- Scene 3 : emoji ---------- */
+      #emoji-window { top: 270px; height: 520px; }
+      #emoji-window .editor { font-size: 58px; }
+      .emoji-grid {
+        position: absolute; left: 90px; top: 230px; display: flex; gap: 12px;
+        padding: 12px; border-radius: 20px;
+        background: rgba(36, 43, 66, 0.92); border: 1px solid rgba(255,255,255,0.12);
+        box-shadow: 0 24px 60px rgba(0,0,0,0.5); opacity: 0; transform-origin: 0 0;
+      }
+      .emoji-grid .e {
+        width: 96px; height: 96px; border-radius: 16px; display: grid; place-items: center;
+        font-size: 58px; font-family: "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif;
+        background: rgba(255,255,255,0.05); opacity: 0;
+      }
+      .emoji-grid .e.hi { background: rgba(79,140,255,0.22); box-shadow: inset 0 0 0 2px var(--accent); }
+      #hero-emoji {
+        position: absolute; left: 1450px; top: 560px; font-size: 260px; opacity: 0;
+        font-family: "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif;
+        transform: translate(-50%, -50%);
+        filter: drop-shadow(0 30px 60px rgba(255, 80, 120, 0.45));
+      }
+      .hotkey { position: absolute; right: 120px; top: 120px; display: flex; gap: 12px; align-items: center; opacity: 0; }
+      .hotkey .plus { color: var(--dim); font-size: 30px; }
+
+      /* ---------- Scene 4 : features ---------- */
+      .features {
+        position: absolute; left: 160px; right: 160px; top: 300px;
+        display: grid; grid-template-columns: repeat(3, 1fr); gap: 28px;
+      }
+      .card {
+        padding: 40px 40px 44px; border-radius: 26px;
+        background: var(--surface); border: 1px solid rgba(255,255,255,0.10);
+        box-shadow: 0 30px 80px rgba(0,0,0,0.4);
+        opacity: 0; transform-origin: 50% 100%;
+      }
+      .card .ico {
+        width: 64px; height: 64px; border-radius: 18px; display: grid; place-items: center;
+        background: linear-gradient(135deg, rgba(52,213,255,0.25), rgba(165,107,255,0.25));
+        border: 1px solid rgba(255,255,255,0.14); margin-bottom: 26px;
+        font-size: 30px; font-weight: 800; color: #dfe9ff;
+      }
+      .card h3 { font-size: 36px; font-weight: 700; letter-spacing: -0.03em; margin-bottom: 12px; }
+      .card p { font-size: 25px; color: var(--dim); line-height: 1.35; }
+      .card code { font-family: var(--mono); color: #cfe0ff; font-size: 23px; }
+      #features-title { position: absolute; left: 0; right: 0; top: 150px; text-align: center; }
+      #features-title h2 { font-size: 78px; font-weight: 700; letter-spacing: -0.04em; opacity: 0; }
+
+      /* ---------- Scene 5 : offline ---------- */
+      #offline-big { font-size: 190px; font-weight: 800; letter-spacing: -0.06em; line-height: 1; opacity: 0; }
+      #offline-sub { margin-top: 26px; font-size: 44px; opacity: 0; }
+      #offline-tags { display: flex; gap: 20px; margin-top: 60px; }
+      .tag {
+        padding: 16px 30px; border-radius: 999px; font-size: 30px; font-weight: 600;
+        background: rgba(92,226,168,0.12); border: 1px solid rgba(92,226,168,0.5); color: #c8f7e3;
+        opacity: 0;
+      }
+      #shield {
+        position: absolute; left: 50%; top: 50%; width: 760px; height: 760px;
+        transform: translate(-50%, -50%); opacity: 0;
+        border-radius: 50%;
+        background: radial-gradient(circle, rgba(92,226,168,0.22) 0%, rgba(92,226,168,0) 65%);
+      }
+
+      /* ---------- Scene 6 : platforms ---------- */
+      .plat {
+        position: absolute; top: 50%; width: 560px; height: 300px; margin-top: -150px;
+        border-radius: 30px; display: flex; flex-direction: column; justify-content: center; gap: 12px;
+        padding: 0 54px; background: var(--surface); border: 1px solid rgba(255,255,255,0.10);
+        box-shadow: 0 30px 80px rgba(0,0,0,0.45); opacity: 0;
+      }
+      .plat .os { font-size: 56px; font-weight: 700; letter-spacing: -0.03em; }
+      .plat .how { font-size: 27px; color: var(--dim); }
+      .plat .pill {
+        align-self: flex-start; margin-top: 8px; padding: 8px 18px; border-radius: 999px;
+        font-family: var(--mono); font-size: 22px; background: rgba(255,255,255,0.07); color: #cfe0ff;
+      }
+      #plat-linux { left: 200px; }
+      #plat-win { right: 200px; }
+      #core-pill {
+        position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+        padding: 20px 34px; border-radius: 999px;
+        background: linear-gradient(135deg, var(--accent-3), var(--accent) 55%, var(--accent-2));
+        font-size: 30px; font-weight: 700; color: #fff; letter-spacing: -0.01em;
+        box-shadow: 0 20px 60px rgba(79,140,255,0.5); opacity: 0;
+      }
+      .link-line {
+        position: absolute; top: 50%; height: 4px; margin-top: -2px; width: 0;
+        background: linear-gradient(90deg, var(--accent-3), var(--accent-2));
+        box-shadow: 0 0 20px rgba(79,140,255,0.8);
+      }
+      #line-l { left: 760px; }
+      #line-r { right: 760px; background: linear-gradient(270deg, var(--accent-3), var(--accent-2)); }
+      #plat-title { position: absolute; left: 0; right: 0; top: 170px; text-align: center; font-size: 78px; font-weight: 700; letter-spacing: -0.04em; opacity: 0; }
+
+      /* ---------- Scene 7 : outro ---------- */
+      #outro-url {
+        margin-top: 46px; font-family: var(--mono); font-size: 40px; color: #cfe0ff;
+        padding: 18px 38px; border-radius: 16px; background: rgba(255,255,255,0.06);
+        border: 1px solid rgba(255,255,255,0.12); opacity: 0;
+      }
+      #outro-tags { display: flex; gap: 18px; margin-top: 40px; }
+      #outro-tags .tag { background: rgba(79,140,255,0.12); border-color: rgba(79,140,255,0.5); color: #cfe0ff; }
+      #outro-line { margin-top: 30px; font-size: 44px; opacity: 0; }
+    </style>
+  </head>
+  <body>
+    <div id="root" data-composition-id="main" data-start="0" data-duration="36" data-width="1920" data-height="1080">
+
+      <!-- Background, whole video -->
+      <div id="bg" class="clip" data-start="0" data-duration="36" data-track-index="0">
+        <div id="orb-a" class="orb"></div>
+        <div id="orb-b" class="orb"></div>
+        <div id="orb-c" class="orb"></div>
+        <div id="grid"></div>
+        <div id="vignette"></div>
+      </div>
+
+      <!-- Scene 1 : hook -->
+      <section id="s1" class="clip" data-start="0" data-duration="5.6" data-track-index="1">
+        <div class="scene-inner center" id="s1-inner">
+          <div class="eyebrow hidden" id="s1-eyebrow">Saisie prédictive · Français / English</div>
+          <h1 class="headline" id="s1-h" style="margin-top: 26px; text-align: center;">
+            <span class="w">Vous</span> <span class="w">tapez.</span><br />
+            <span class="w grad">Il</span> <span class="w grad">devine.</span>
+          </h1>
+          <div class="brand hidden" id="s1-brand" style="margin-top: 54px;">
+            <div class="mark">P</div>
+            <div class="brand-name">Predict</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Scene 2 : completion + next word -->
+      <section id="s2" class="clip" data-start="5.2" data-duration="9.0" data-track-index="1">
+        <div class="scene-inner" id="s2-inner">
+          <div class="window hidden" id="win2">
+            <div class="titlebar"><div class="dots"><i></i><i></i><i></i></div>notes.txt</div>
+            <div class="editor" id="ed2"><span id="typed2"></span><span class="ghost" id="ghost2">hui</span><span class="caret" id="caret2"></span></div>
+            <div class="bar" id="bar-next">
+              <div class="chip hi">travail</div><div class="chip">bureau</div><div class="chip">lit</div><div class="chip">cinéma</div><div class="chip">marché</div>
+            </div>
+            <div class="bar" id="bar-comp">
+              <div class="chip hi">aujourd'hui</div><div class="chip">aujourd'</div>
+            </div>
+            <div class="bar" id="bar-after">
+              <div class="chip hi">et</div><div class="chip">pour</div><div class="chip">à</div><div class="chip">avec</div><div class="chip">mais</div>
+            </div>
+            <div class="key" id="space-key">Espace</div>
+          </div>
+          <div class="callout" id="co-next" style="left: 1240px; top: 470px;"><span class="dot"></span>Mot suivant prédit</div>
+          <div class="callout" id="co-comp" style="left: 1240px; top: 470px;"><span class="dot"></span>Complétion en un geste</div>
+          <div class="callout" id="co-learn" style="left: 1240px; top: 470px;"><span class="dot"></span>Contexte + accord grammatical</div>
+        </div>
+      </section>
+
+      <!-- Scene 3 : emoji -->
+      <section id="s3" class="clip" data-start="14.2" data-duration="5.6" data-track-index="1">
+        <div class="scene-inner" id="s3-inner">
+          <div class="hotkey" id="hotkey"><span class="key">Win</span><span class="plus">+</span><span class="key">;</span></div>
+          <div class="window hidden" id="emoji-window">
+            <div class="titlebar"><div class="dots"><i></i><i></i><i></i></div>message.txt</div>
+            <div class="editor"><span class="pre">Merci pour tout </span><span id="typed3"></span><span class="committed" id="heart3">❤️</span><span class="caret" id="caret3"></span></div>
+            <div class="emoji-grid" id="egrid">
+              <div class="e hi">❤️</div><div class="e">💙</div><div class="e">💛</div><div class="e">💖</div><div class="e">💕</div><div class="e">🫶</div>
+            </div>
+          </div>
+          <div id="hero-emoji">❤️</div>
+          <div class="callout" id="co-emoji" style="left: 260px; top: 850px;"><span class="dot"></span>Emojis par leur nom</div>
+        </div>
+      </section>
+
+      <!-- Scene 4 : features -->
+      <section id="s4" class="clip" data-start="19.6" data-duration="6.4" data-track-index="1">
+        <div class="scene-inner" id="s4-inner">
+          <div id="features-title"><h2>Tout ce qu'il fait <span class="grad">pendant que vous écrivez</span></h2></div>
+          <div class="features">
+            <div class="card"><div class="ico">ab</div><h3>Complétion de mot</h3><p><code>aujourd'</code> → <code>aujourd'hui</code>, jusqu'à cinq suggestions classées.</p></div>
+            <div class="card"><div class="ico">→</div><h3>Mot suivant</h3><p>Un n‑gramme local propose la suite dès que vous validez.</p></div>
+            <div class="card"><div class="ico">✓</div><h3>Correction automatique</h3><p><code>dont</code> → <code>don't</code>, <code>im</code> → <code>I'm</code>, sans quitter le clavier.</p></div>
+            <div class="card"><div class="ico">é</div><h3>Accord grammatical</h3><p><code>les petits chat</code> → <code>chats</code> grâce au lexique Lefff.</p></div>
+            <div class="card"><div class="ico">★</div><h3>Il apprend vos mots</h3><p>Prénoms, jargon, tics de langage : appris et reclassés sur votre usage.</p></div>
+            <div class="card"><div class="ico">☺</div><h3>Emojis par leur nom</h3><p><code>coeur</code> → ❤️, <code>feu</code> → 🔥, en un raccourci.</p></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Scene 5 : offline -->
+      <section id="s5" class="clip" data-start="25.6" data-duration="5.2" data-track-index="1">
+        <div class="scene-inner center" id="s5-inner">
+          <div id="shield"></div>
+          <div id="offline-big"><span class="grad" style="background-image: linear-gradient(90deg, #5ce2a8, #34d5ff);">100 % hors ligne.</span></div>
+          <div id="offline-sub" class="sub">Zéro télémétrie. Vos mots restent sur votre machine.</div>
+          <div id="offline-tags">
+            <div class="tag">Modèle local</div><div class="tag">Aucune requête réseau</div><div class="tag">Open source · MIT</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Scene 6 : platforms -->
+      <section id="s6" class="clip" data-start="30.4" data-duration="3.6" data-track-index="1">
+        <div class="scene-inner" id="s6-inner">
+          <div id="plat-title">Un moteur, <span class="grad">deux systèmes</span></div>
+          <div class="plat" id="plat-linux">
+            <div class="os">Linux</div>
+            <div class="how">Moteur fcitx5 + barre Qt Quick</div>
+            <div class="pill">fcitx5 + ime-predictord.service</div>
+          </div>
+          <div class="plat" id="plat-win">
+            <div class="os">Windows 10 / 11</div>
+            <div class="how">Service TSF natif, Direct2D, couleur d'accent</div>
+            <div class="pill">Win + Espace → Predict</div>
+          </div>
+          <div class="link-line" id="line-l"></div>
+          <div class="link-line" id="line-r"></div>
+          <div id="core-pill">core partagé</div>
+        </div>
+      </section>
+
+      <!-- Scene 7 : outro -->
+      <section id="s7" class="clip" data-start="33.6" data-duration="2.4" data-track-index="1">
+        <div class="scene-inner center" id="s7-inner">
+          <div class="brand hidden" id="s7-brand" style="transform: scale(1.35);">
+            <div class="mark">P</div>
+            <div class="brand-name">Predict</div>
+          </div>
+          <div id="outro-line" class="sub">Écrivez plus vite. Sans rien envoyer.</div>
+          <div id="outro-url">github.com/titoo-dev/predictive-ime</div>
+        </div>
+      </section>
+    </div>
+
+    <script>
+      // ---------- helpers (deterministic, seek-safe) ----------
+      const tl = gsap.timeline({ paused: true });
+      const EASE = "power3.out";
+
+      // Splits `text` into per-character spans and reveals them one by one from `start`.
+      function typeText(target, text, start, cps) {
+        const el = document.getElementById(target);
+        const step = 1 / cps;
+        let t = start;
+        for (const ch of text) {
+          const s = document.createElement("span");
+          s.className = "ch";
+          s.textContent = ch;
+          el.appendChild(s);
+          tl.set(s, { opacity: 1 }, t);
+          t += step;
+        }
+        return t; // time when typing ends
+      }
+      function pop(sel, t, from, to, dur = 0.7, ease = EASE) {
+        tl.fromTo(sel, from, { ...to, duration: dur, ease, immediateRender: false }, t);
+      }
+      function fadeOut(sel, t, dur = 0.4, extra = {}) {
+        tl.to(sel, { opacity: 0, duration: dur, ease: "power2.in", ...extra }, t);
+      }
+      function blink(sel, start, end) {
+        const n = Math.floor((end - start) / 0.5);
+        tl.to(sel, { opacity: 0, duration: 0.5, ease: "steps(1)", repeat: n, yoyo: true }, start);
+      }
+
+      // ---------- background : slow drift the whole time ----------
+      tl.to("#orb-a", { x: 380, y: 220, duration: 36, ease: "sine.inOut" }, 0);
+      tl.to("#orb-b", { x: -420, y: 260, duration: 36, ease: "sine.inOut" }, 0);
+      tl.to("#orb-c", { x: 240, y: -200, duration: 36, ease: "sine.inOut" }, 0);
+
+      // ---------- scene 1 : hook (0 – 5.6) ----------
+      pop("#s1-eyebrow", 0.2, { opacity: 0, y: 20 }, { opacity: 1, y: 0 }, 0.8);
+      tl.fromTo("#s1-h .w", { opacity: 0, y: 90, rotationX: -40 },
+        { opacity: 1, y: 0, rotationX: 0, duration: 0.9, ease: "back.out(1.4)", stagger: 0.16, immediateRender: false }, 0.5);
+      pop("#s1-brand", 1.9, { opacity: 0, y: 30, scale: 0.9 }, { opacity: 1, y: 0, scale: 1 }, 0.8);
+      tl.to("#s1-inner", { opacity: 0, scale: 1.08, y: -40, duration: 0.55, ease: "power2.in" }, 5.0);
+
+      // ---------- scene 2 : editor (5.2 – 14.6) ----------
+      pop("#win2", 5.3, { opacity: 0, y: 60, scale: 0.94 }, { opacity: 1, y: 0, scale: 1 }, 0.9);
+      let t = typeText("typed2", "je vais au ", 6.0, 11);        // ends ≈ 7.0
+      blink("#caret2", 5.3, 14.0);
+
+      // next-word bar after "au "
+      pop("#bar-next", t, { opacity: 0, y: 14, scale: 0.96 }, { opacity: 1, y: 0, scale: 1 }, 0.35);
+      pop("#co-next", t + 0.1, { opacity: 0, x: 30 }, { opacity: 1, x: 0 }, 0.5);
+      fadeOut("#bar-next", t + 1.0, 0.25);
+      fadeOut("#co-next", t + 1.0, 0.25);
+      t = typeText("typed2", "travail ", t + 1.0, 13);          // ≈ 8.6
+
+      // completion of aujourd'
+      t = typeText("typed2", "aujourd'", t + 0.2, 11);          // ≈ 9.5
+      tl.to("#ghost2", { opacity: 1, duration: 0.25 }, t);
+      pop("#bar-comp", t, { opacity: 0, y: 14, scale: 0.96 }, { opacity: 1, y: 0, scale: 1 }, 0.35);
+      pop("#co-comp", t + 0.1, { opacity: 0, x: 30 }, { opacity: 1, x: 0 }, 0.5);
+
+      // press Space → accept
+      pop("#space-key", t + 0.5, { opacity: 0, y: 10 }, { opacity: 1, y: 0 }, 0.3);
+      tl.to("#space-key", { scaleY: 0.85, y: 4, duration: 0.12, ease: "power1.in" }, t + 1.0);
+      tl.to("#space-key", { scaleY: 1, y: 0, duration: 0.2, ease: "back.out(2)" }, t + 1.12);
+      tl.to("#ghost2", { color: "#b9d2ff", textShadow: "0 0 22px rgba(79,140,255,0.7)", duration: 0.25 }, t + 1.05);
+      fadeOut("#bar-comp", t + 1.05, 0.2);
+      fadeOut("#co-comp", t + 1.05, 0.2);
+      fadeOut("#space-key", t + 1.4, 0.3);
+      t = typeText("typed2", "", t + 1.3, 10);
+      // ghost is now committed; show next-word suggestions after the word
+      pop("#bar-after", t + 0.4, { opacity: 0, y: 14, scale: 0.96 }, { opacity: 1, y: 0, scale: 1 }, 0.35);
+      pop("#co-learn", t + 0.5, { opacity: 0, x: 30 }, { opacity: 1, x: 0 }, 0.5);
+      tl.to("#s2-inner", { opacity: 0, y: -40, scale: 1.04, duration: 0.45, ease: "power2.in" }, 13.75);
+
+      // ---------- scene 3 : emoji (14.2 – 19.8) ----------
+      pop("#emoji-window", 14.3, { opacity: 0, y: 60, scale: 0.94 }, { opacity: 1, y: 0, scale: 1 }, 0.9);
+      blink("#caret3", 14.3, 19.0);
+      pop("#hotkey", 14.9, { opacity: 0, y: -20 }, { opacity: 1, y: 0 }, 0.4);
+      tl.to("#hotkey .key", { scaleY: 0.85, y: 4, duration: 0.12, ease: "power1.in" }, 15.3);
+      tl.to("#hotkey .key", { scaleY: 1, y: 0, duration: 0.2, ease: "back.out(2)" }, 15.42);
+      t = typeText("typed3", "coeur", 15.6, 10);                 // ≈ 16.1
+      pop("#egrid", t, { opacity: 0, y: 14, scale: 0.96 }, { opacity: 1, y: 0, scale: 1 }, 0.35);
+      tl.fromTo("#egrid .e", { opacity: 0, scale: 0.5 }, { opacity: 1, scale: 1, duration: 0.4, ease: "back.out(2)", stagger: 0.06, immediateRender: false }, t + 0.1);
+      pop("#co-emoji", t + 0.2, { opacity: 0, x: 30 }, { opacity: 1, x: 0 }, 0.5);
+      // Enter → the typed name becomes the emoji
+      tl.to("#typed3 .ch", { opacity: 0, duration: 0.15 }, t + 1.1);
+      tl.fromTo("#heart3", { opacity: 0, scale: 0.4 }, { opacity: 1, scale: 1, duration: 0.5, ease: "back.out(2.5)", immediateRender: false }, t + 1.15);
+      fadeOut("#egrid", t + 1.1, 0.2);
+      // hero emoji burst
+      tl.fromTo("#hero-emoji", { opacity: 0, scale: 0.3 }, { opacity: 1, scale: 1, duration: 0.55, ease: "back.out(2)", immediateRender: false }, t + 1.7);
+      tl.to("#emoji-window", { opacity: 0.35, scale: 0.97, x: -160, duration: 0.5 }, t + 1.7);
+      tl.to("#co-emoji", { opacity: 0, duration: 0.3 }, t + 1.7);
+      tl.to("#hero-emoji", { scale: 1.12, duration: 0.7, ease: "sine.inOut", yoyo: true, repeat: 1 }, t + 2.3);
+      tl.to("#s3-inner", { opacity: 0, scale: 1.06, duration: 0.45, ease: "power2.in" }, 19.35);
+
+      // ---------- scene 4 : features (19.6 – 26) ----------
+      pop("#features-title h2", 19.7, { opacity: 0, y: 40 }, { opacity: 1, y: 0 }, 0.8);
+      tl.fromTo(".card", { opacity: 0, y: 70, scale: 0.92 },
+        { opacity: 1, y: 0, scale: 1, duration: 0.7, ease: "back.out(1.3)", stagger: { each: 0.12, from: "start" }, immediateRender: false }, 20.1);
+      tl.to(".features", { y: -18, duration: 4.5, ease: "sine.inOut" }, 21);
+      tl.to("#s4-inner", { opacity: 0, y: -50, duration: 0.5, ease: "power2.in" }, 25.5);
+
+      // ---------- scene 5 : offline (25.6 – 30.8) ----------
+      tl.fromTo("#shield", { opacity: 0, scale: 0.4 }, { opacity: 1, scale: 1, duration: 1.4, ease: "power2.out", immediateRender: false }, 25.7);
+      tl.fromTo("#offline-big", { opacity: 0, scale: 0.6, y: 30 }, { opacity: 1, scale: 1, y: 0, duration: 0.9, ease: "back.out(1.6)", immediateRender: false }, 25.8);
+      pop("#offline-sub", 26.5, { opacity: 0, y: 24 }, { opacity: 1, y: 0 }, 0.7);
+      tl.fromTo("#offline-tags .tag", { opacity: 0, y: 24, scale: 0.9 },
+        { opacity: 1, y: 0, scale: 1, duration: 0.5, ease: "back.out(1.6)", stagger: 0.12, immediateRender: false }, 27.1);
+      tl.to("#shield", { scale: 1.25, duration: 3, ease: "sine.inOut" }, 27.2);
+      tl.to("#s5-inner", { opacity: 0, scale: 1.06, duration: 0.5, ease: "power2.in" }, 30.3);
+
+      // ---------- scene 6 : platforms (30.4 – 34) ----------
+      pop("#plat-title", 30.5, { opacity: 0, y: 30 }, { opacity: 1, y: 0 }, 0.7);
+      tl.fromTo("#plat-linux", { opacity: 0, x: -300 }, { opacity: 1, x: 0, duration: 0.8, ease: "power4.out", immediateRender: false }, 30.7);
+      tl.fromTo("#plat-win", { opacity: 0, x: 300 }, { opacity: 1, x: 0, duration: 0.8, ease: "power4.out", immediateRender: false }, 30.7);
+      tl.to("#line-l", { width: 70, duration: 0.5, ease: "power2.out" }, 31.4);
+      tl.to("#line-r", { width: 70, duration: 0.5, ease: "power2.out" }, 31.4);
+      tl.fromTo("#core-pill", { opacity: 0, scale: 0.5 }, { opacity: 1, scale: 1, duration: 0.6, ease: "back.out(2)", immediateRender: false }, 31.8);
+      tl.to("#s6-inner", { opacity: 0, scale: 1.05, duration: 0.45, ease: "power2.in" }, 33.55);
+
+      // ---------- scene 7 : outro (33.6 – 36) ----------
+      tl.fromTo("#s7-brand", { opacity: 0, scale: 1.0, y: 20 }, { opacity: 1, scale: 1.35, y: 0, duration: 0.8, ease: "back.out(1.5)", immediateRender: false }, 33.7);
+      pop("#outro-line", 34.2, { opacity: 0, y: 20 }, { opacity: 1, y: 0 }, 0.6);
+      pop("#outro-url", 34.6, { opacity: 0, y: 20, scale: 0.95 }, { opacity: 1, y: 0, scale: 1 }, 0.6);
+
+      window.__timelines = window.__timelines || {};
+      window.__timelines["main"] = tl;
+      tl.seek(0);
+    </script>
+  </body>
+</html>

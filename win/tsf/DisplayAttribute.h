@@ -1,13 +1,13 @@
-// Attributs d'affichage du préedit.
+// Attribut d'affichage du préedit.
 //
 // Sans provider enregistré, une composition TSF est rendue par l'application
-// comme du texte ORDINAIRE : le mot en cours et le fantôme seraient
-// indiscernables de ce qui est déjà validé. Ces deux attributs donnent le
-// soulignement (ce que je tape) et le gris clair (ce qui est proposé) —
-// l'équivalent des TextFormatFlag::Underline / Italic de fcitx5.
+// comme du texte ORDINAIRE : le mot en cours serait indiscernable de ce qui
+// est déjà validé. Cet attribut lui donne le soulignement — l'équivalent du
+// TextFormatFlag::Underline de fcitx5.
 #pragma once
 
 #include "Guids.h"
+#include "Module.h"
 
 #include <msctf.h>
 #include <new>
@@ -19,7 +19,9 @@ class CDisplayAttributeInfo : public ITfDisplayAttributeInfo {
 public:
   CDisplayAttributeInfo(REFGUID guid, const wchar_t *desc,
                         const TF_DISPLAYATTRIBUTE &attr)
-      : guid_(guid), desc_(desc), attr_(attr), orig_(attr) {}
+      : guid_(guid), desc_(desc), attr_(attr), orig_(attr) {
+    dllAddRef();
+  }
 
   STDMETHODIMP QueryInterface(REFIID riid, void **ppv) override {
     if (!ppv)
@@ -70,7 +72,7 @@ public:
   STDMETHODIMP Reset() override { return SetAttributeInfo(&orig_); }
 
 private:
-  ~CDisplayAttributeInfo() = default;
+  ~CDisplayAttributeInfo() { dllRelease(); }
   LONG ref_ = 1;
   GUID guid_;
   const wchar_t *desc_;
@@ -89,24 +91,10 @@ inline TF_DISPLAYATTRIBUTE inputAttr() {
   return a;
 }
 
-// La complétion PROPOSÉE : grisée, sans soulignement — le rendu des
-// suggestions en ligne modernes (éditeurs, messageries). Elle ne se confond
-// pas avec la frappe, qui reste soulignée ; le gris moyen reste lisible sur
-// fond clair comme sombre.
-inline TF_DISPLAYATTRIBUTE ghostAttr() {
-  TF_DISPLAYATTRIBUTE a{};
-  a.crText.type = TF_CT_COLORREF;
-  a.crText.cr = RGB(138, 138, 138);
-  a.crBk.type = TF_CT_NONE;
-  a.lsStyle = TF_LS_NONE;
-  a.fBoldLine = FALSE;
-  a.crLine.type = TF_CT_NONE;
-  a.bAttr = TF_ATTR_CONVERTED;
-  return a;
-}
-
 class CDisplayAttributeInfoEnum : public IEnumTfDisplayAttributeInfo {
 public:
+  CDisplayAttributeInfoEnum() { dllAddRef(); }
+
   STDMETHODIMP QueryInterface(REFIID riid, void **ppv) override {
     if (!ppv)
       return E_INVALIDARG;
@@ -141,14 +129,9 @@ public:
   STDMETHODIMP Next(ULONG count, ITfDisplayAttributeInfo **info,
                     ULONG *fetched) override {
     ULONG n = 0;
-    while (n < count && idx_ < 2) {
-      info[n] = idx_ == 0
-                    ? new (std::nothrow) CDisplayAttributeInfo(
-                          GUID_PredictDisplayAttributeInput, L"Predict Input",
-                          inputAttr())
-                    : new (std::nothrow) CDisplayAttributeInfo(
-                          GUID_PredictDisplayAttributeGhost, L"Predict Ghost",
-                          ghostAttr());
+    while (n < count && idx_ < 1) {
+      info[n] = new (std::nothrow) CDisplayAttributeInfo(
+          GUID_PredictDisplayAttributeInput, L"Predict Input", inputAttr());
       if (!info[n])
         return E_OUTOFMEMORY;
       n++;
@@ -164,13 +147,13 @@ public:
   }
   STDMETHODIMP Skip(ULONG count) override {
     idx_ += int(count);
-    if (idx_ > 2)
-      idx_ = 2;
+    if (idx_ > 1)
+      idx_ = 1;
     return S_OK;
   }
 
 private:
-  ~CDisplayAttributeInfoEnum() = default;
+  ~CDisplayAttributeInfoEnum() { dllRelease(); }
   LONG ref_ = 1;
   int idx_ = 0;
 };

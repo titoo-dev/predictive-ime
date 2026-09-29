@@ -4,6 +4,7 @@
 #include "StatusIcon.h"
 
 #include "Guids.h"
+#include "Module.h"
 #include "TextService.h"
 
 #include <ctffunc.h>
@@ -27,11 +28,14 @@ void addItem(ITfMenu *menu, UINT id, DWORD flags, const wchar_t *text) {
 
 // ======================================================= CLangBarButton ====
 
-CLangBarButton::CLangBarButton(CTextService *svc) : svc_(svc) {}
+// La barre de langue (dans explorer) garde ce bouton bien après Deactivate :
+// il retient le module tant qu'il vit.
+CLangBarButton::CLangBarButton(CTextService *svc) : svc_(svc) { dllAddRef(); }
 
 CLangBarButton::~CLangBarButton() {
   if (sink_)
     sink_->Release();
+  dllRelease();
 }
 
 bool CLangBarButton::enabled() const {

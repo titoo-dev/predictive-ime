@@ -14,6 +14,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 add_library(predict-tsf SHARED
   dllmain.cpp
+  Module.cpp
   TextService.cpp
   KeyHandling.cpp
   CandidateWindow.cpp

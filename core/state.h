@@ -17,7 +17,6 @@ struct PredictState {
   bool navigating = false;        // l'utilisateur a commencé à choisir (Tab)
   bool literalIsWord = false;     // le préfixe tapé est-il déjà un vrai mot ?
   std::string autocomplete;       // mot appliqué sur Espace (haute confiance)
-  std::string ghost;              // complétion fantôme (→ l'accepte)
   bool accentOnly = false;        // autocomplete = restauration d'accents pure
 
   // Fenêtre de REVERT d'une auto-application (Backspace juste après) :
@@ -26,10 +25,9 @@ struct PredictState {
   uint32_t lastAutoCps = 0; // points de code committés à effacer
   bool vetoAuto = false;    // l'utilisateur a refusé : Espace garde le littéral
   // L'utilisateur vient d'EFFACER (Backspace, ou recomposition d'un mot déjà
-  // committé) : ni fantôme ni auto-application tant qu'il n'a pas retapé un
-  // caractère. Sans ce frein, effacer ne servait à rien — la complétion
-  // remettait aussitôt ce qu'on venait d'enlever (⌫ sur « bonjour » réaffichait
-  // « bonjour » en fantôme), et l'Espace committait la complétion refusée.
+  // committé) : pas d'auto-application tant qu'il n'a pas retapé un
+  // caractère. Sans ce frein, effacer ne servait à rien — l'Espace committait
+  // aussitôt la complétion qu'on venait d'enlever.
   // Comme vetoAuto, ça ne vaut que pour le mot en cours.
   bool erasing = false;
 

@@ -9,7 +9,7 @@
 // détection), auto (vote du contexte — l'ancien comportement), off (aucun
 // boost). Couleurs DMS/matugen comme la barre de candidats.
 //
-// CLI : `ime-preferences --set lang=fr [--set ghostText=false ...]` applique
+// CLI : `ime-preferences --set lang=fr [--set nextWordBar=false ...]` applique
 // sans ouvrir l'UI (scriptable) ; `--smoke` ouvre et quitte (test headless).
 #include <QDir>
 #include <QFile>
@@ -127,8 +127,6 @@ Window {
                   desc: "exige le surrounding-text (revert Backspace possible)" },
                 { key: "nextWordBar",          def: true,  label: "Barre mot-suivant",
                   desc: "suggestions spéculatives après Espace — off = mode calme" },
-                { key: "ghostText",            def: true,  label: "Texte fantôme",
-                  desc: "le reste du mot s'affiche dans le préedit (bonjou‸r)" },
                 { key: "multiWord",            def: true,  label: "Expressions multi-mots",
                   desc: "« sais pas » proposé en fin de barre" },
                 { key: "escapeForward",        def: true,  label: "Échap traverse",

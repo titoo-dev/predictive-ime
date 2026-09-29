@@ -16,7 +16,6 @@
 namespace core {
 
 // Réglages lus par le frontal (l'engine fcitx5 comme le text service TSF) :
-//   ghostText            — le reste du mot auto-appliqué s'affiche dans le préedit
 //   frenchSpacing        — espace fine insécable (U+202F) avant ; : ! ?
 //   autoCapitalize       — majuscule automatique en début de phrase
 //   nextWordBar          — barre mot-suivant après Espace/commit (false = calme)
@@ -25,7 +24,6 @@ namespace core {
 //   escapeForward        — Échap ferme la barre PUIS atteint l'application
 //                          (vim sort du mode insertion) ; false = avalé
 struct EngineCfg {
-  bool ghostText = true;
   bool frenchSpacing = false;
   bool autoCapitalize = false;
   bool nextWordBar = true;
@@ -66,7 +64,6 @@ inline const EngineCfg &engineCfg() {
       try {
         nlohmann::json j =
             nlohmann::json::parse(f, nullptr, true, /*ignore_comments=*/true);
-        fresh.ghostText = j.value("ghostText", fresh.ghostText);
         fresh.frenchSpacing = j.value("frenchSpacing", fresh.frenchSpacing);
         fresh.autoCapitalize = j.value("autoCapitalize", fresh.autoCapitalize);
         fresh.nextWordBar = j.value("nextWordBar", fresh.nextWordBar);

@@ -5,6 +5,7 @@
 #include "Dpi.h"
 #include "KeyboardLayout.h"
 #include "LangBarButton.h"
+#include "Module.h"
 
 #include "../../core/text.h"
 
@@ -21,15 +22,32 @@ constexpr UINT WM_PREDICT_WAKE = WM_APP + 41;    // travail posté depuis un thr
 constexpr UINT WM_PREDICT_SOCKET = WM_APP + 42;  // socket de refresh lisible
 constexpr wchar_t kMsgClass[] = L"PredictImeMsgWindow";
 
-// Fenêtre de dialogue de clé API — sous Windows, l'app de préférences n'existe
-// pas encore : on ouvre le config.json dans l'éditeur par défaut.
-void openConfigInEditor() {
+// Réglages : le panneau d'administration (predict-admin.exe, installé à côté
+// de la DLL) quand il est là ; sinon config.json dans l'éditeur par défaut
+// (build depuis les sources sans l'installeur). `args` ouvre un onglet précis
+// (« --reform » : la clé API, depuis le panneau « fournir une clé »).
+void openAdminPanel(const wchar_t *args) {
+  wchar_t path[MAX_PATH];
+  DWORD n = ::GetModuleFileNameW(win::dllInstance(), path, MAX_PATH);
+  if (n > 0 && n < MAX_PATH) {
+    std::wstring exe(path, n);
+    size_t k = exe.find_last_of(L"\\/");
+    if (k != std::wstring::npos) {
+      exe = exe.substr(0, k + 1) + L"predict-admin.exe";
+      if (::GetFileAttributesW(exe.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        ::ShellExecuteW(nullptr, L"open", exe.c_str(), args, nullptr,
+                        SW_SHOWNORMAL);
+        return;
+      }
+    }
+  }
   std::string p = core::configPath();
   auto w = core::toUtf16(p);
   ::ShellExecuteW(nullptr, L"open",
                   reinterpret_cast<const wchar_t *>(w.c_str()), nullptr,
                   nullptr, SW_SHOWNORMAL);
 }
+void openConfigInEditor() { openAdminPanel(nullptr); }
 
 // Trace de la disposition obtenue. JAMAIS de correction ici : basculer le HKL
 // du thread (ActivateKeyboardLayout) fait resélectionner la disposition simple
@@ -57,7 +75,9 @@ std::string utf8Of(const std::wstring &w) {
 class CEditSession : public ITfEditSession {
 public:
   explicit CEditSession(std::function<void(TfEditCookie)> fn)
-      : fn_(std::move(fn)) {}
+      : fn_(std::move(fn)) {
+    dllAddRef(); // TSF peut retenir une session asynchrone après notre retour
+  }
 
   STDMETHODIMP QueryInterface(REFIID riid, void **ppv) override {
     if (!ppv)
@@ -85,7 +105,7 @@ public:
   }
 
 private:
-  ~CEditSession() = default;
+  ~CEditSession() { dllRelease(); }
   LONG ref_ = 1;
   std::function<void(TfEditCookie)> fn_;
 };
@@ -191,16 +211,15 @@ void TsfFrontend::commitText(const std::string &utf8) {
   s.range->Release();
 }
 
-void TsfFrontend::setPreedit(const std::string &typed,
-                             const std::string &ghost) {
+void TsfFrontend::setPreedit(const std::string &typed) {
   ITfComposition *comp = svc_->composition();
-  const std::wstring wtyped = wideOf(typed), wghost = wideOf(ghost);
+  const std::wstring wtyped = wideOf(typed);
   svc_->setTyped(typed);
 
   // Préedit vide = la composition est ABANDONNÉE (sémantique fcitx5 : le
   // préedit n'est pas du texte du document). Sous TSF il l'est : il faut donc
   // l'effacer explicitement, sans quoi le mot resterait inséré.
-  if (wtyped.empty() && wghost.empty()) {
+  if (wtyped.empty()) {
     if (comp) {
       ITfRange *r = nullptr;
       if (SUCCEEDED(comp->GetRange(&r)) && r) {
@@ -239,33 +258,13 @@ void TsfFrontend::setPreedit(const std::string &typed,
   ITfRange *r = nullptr;
   if (FAILED(comp->GetRange(&r)) || !r)
     return;
-  std::wstring all = wtyped + wghost;
-  r->SetText(ec_, 0, all.c_str(), LONG(all.size()));
+  r->SetText(ec_, 0, wtyped.c_str(), LONG(wtyped.size()));
 
-  // Soulignement sur ce qui est tapé, pointillé gris sur la proposition.
-  ITfRange *typedRange = nullptr;
-  if (SUCCEEDED(r->Clone(&typedRange))) {
-    typedRange->Collapse(ec_, TF_ANCHOR_START);
-    LONG shifted = 0;
-    typedRange->ShiftEnd(ec_, LONG(wtyped.size()), &shifted, nullptr);
-    applyDisplayAttribute(ctx_, ec_, typedRange,
-                          GUID_PredictDisplayAttributeInput);
-    typedRange->Release();
-  }
-  if (!wghost.empty()) {
-    ITfRange *ghostRange = nullptr;
-    if (SUCCEEDED(r->Clone(&ghostRange))) {
-      ghostRange->Collapse(ec_, TF_ANCHOR_START);
-      LONG moved = 0;
-      ghostRange->ShiftStart(ec_, LONG(wtyped.size()), &moved, nullptr);
-      applyDisplayAttribute(ctx_, ec_, ghostRange,
-                            GUID_PredictDisplayAttributeGhost);
-      ghostRange->Release();
-    }
-  }
+  // Soulignement sur ce qui est tapé.
+  applyDisplayAttribute(ctx_, ec_, r, GUID_PredictDisplayAttributeInput);
 
-  // Le caret se place ENTRE le tapé et le fantôme : la frappe continue là où
-  // l'utilisateur l'attend, la proposition reste devant lui.
+  // Le caret se place à la fin du tapé : la frappe continue là où
+  // l'utilisateur l'attend.
   //
   // ShiftEnd puis Collapse(END), surtout PAS ShiftStart : sur une plage vide,
   // pousser le DÉBUT au-delà de la FIN est impossible, la plage est ramenée et
@@ -282,9 +281,8 @@ void TsfFrontend::setPreedit(const std::string &typed,
     sel.style.ase = TF_AE_NONE;
     sel.style.fInterimChar = FALSE;
     HRESULT hrSel = ctx_->SetSelection(ec_, 1, &sel);
-    dbg("setPreedit typed=%u ghost=%u caretShift=%ld selHR=0x%08lx",
-        unsigned(wtyped.size()), unsigned(wghost.size()), moved,
-        (unsigned long)hrSel);
+    dbg("setPreedit typed=%u caretShift=%ld selHR=0x%08lx",
+        unsigned(wtyped.size()), moved, (unsigned long)hrSel);
     caret->Release();
   }
   r->Release();
@@ -308,7 +306,7 @@ void TsfFrontend::setCandidates(const std::vector<core::Candidate> &cands,
 void TsfFrontend::clearPanel() {
   // Côté fcitx5, effacer le panneau jette aussi la préédition : même
   // sémantique ici, donc la composition en cours est abandonnée.
-  setPreedit(std::string{}, std::string{});
+  setPreedit(std::string{});
   svc_->setPickerQuery(std::string{});
   svc_->bar().hide();
 }
@@ -316,7 +314,7 @@ void TsfFrontend::clearPanel() {
 void TsfFrontend::setPanelQuery(const std::string &query,
                                 const std::string &) {
   // Rien dans le document (la préédition est vidée), la barre passe en grille.
-  setPreedit(std::string{}, std::string{});
+  setPreedit(std::string{});
   svc_->setPickerQuery(query);
 }
 
@@ -447,17 +445,56 @@ void TsfFrontend::stopWatch() { svc_->stopWatch(); }
 void TsfFrontend::postToMain(std::function<void()> fn) {
   svc_->postToMain(std::move(fn));
 }
-void TsfFrontend::openKeyDialog() { openConfigInEditor(); }
+void TsfFrontend::openKeyDialog() { openAdminPanel(L"--reform"); }
 
 // =========================================================== CTextService ====
 
-CTextService::CTextService() { ::InitializeCriticalSection(&postedLock_); }
+CTextService::CTextService() : bridge_(std::make_shared<MainBridge>()) {
+  dllAddRef();
+}
 
 CTextService::~CTextService() {
+  // Normalement TSF a déjà appelé Deactivate ; sinon on s'en charge : un
+  // sink, un crochet WinEvent ou une composition qui survivrait à l'objet
+  // serait rappelé sur de la mémoire libérée.
+  if (threadMgr_)
+    Deactivate();
   stopWatch();
-  if (msgWnd_)
+  unwatchLayout();
+  if (composition_) {
+    composition_->Release();
+    composition_ = nullptr;
+  }
+  // Plus aucun travail posté ne doit atteindre `this` : la file est vidée et
+  // les threads encore en vol trouveront une fenêtre nulle.
+  bridge_->close();
+  if (msgWnd_) {
+    ::SetWindowLongPtrW(msgWnd_, GWLP_USERDATA, 0);
     ::DestroyWindow(msgWnd_);
-  ::DeleteCriticalSection(&postedLock_);
+    msgWnd_ = nullptr;
+  }
+  dllRelease();
+}
+
+bool MainBridge::post(std::function<void()> fn) {
+  ::EnterCriticalSection(&lock);
+  HWND target = hwnd;
+  if (target)
+    posted.push_back(std::move(fn));
+  ::LeaveCriticalSection(&lock);
+  if (!target)
+    return false;
+  ::PostMessageW(target, WM_PREDICT_WAKE, 0, 0);
+  return true;
+}
+
+void MainBridge::close() {
+  std::vector<std::function<void()>> drop;
+  ::EnterCriticalSection(&lock);
+  hwnd = nullptr;
+  drop.swap(posted);
+  ::LeaveCriticalSection(&lock);
+  // Détruit hors du verrou : les lambdas peuvent porter des objets COM.
 }
 
 STDMETHODIMP CTextService::QueryInterface(REFIID riid, void **ppv) {
@@ -609,6 +646,7 @@ STDMETHODIMP CTextService::Deactivate() {
     threadMgr_ = nullptr;
   }
   states_.clear();
+  reformCtx_.clear();
   return S_OK;
 }
 
@@ -632,6 +670,7 @@ STDMETHODIMP CTextService::OnPushContext(ITfContext *) { return S_OK; }
 
 STDMETHODIMP CTextService::OnPopContext(ITfContext *ctx) {
   states_.erase(ctx); // pas de fuite d'état sur les champs fermés
+  reformCtx_.erase(ctx);
   if (ctx == layoutCtx_)
     unwatchLayout();
   if (ctx == anchorCtx_)
@@ -767,7 +806,7 @@ void CTextService::settleComposition() {
   ITfContext *ctx = nullptr;
   if (SUCCEEDED(dim->GetTop(&ctx)) && ctx) {
     if (composition_) {
-      // Le mot tapé est validé tel quel ; seul le fantôme disparaît.
+      // Le mot tapé est validé tel quel.
       // Session ASYNCHRONE : elle peut courir après notre retour, elle tient
       // donc sa propre référence sur le contexte.
       Microsoft::WRL::ComPtr<ITfContext> keep(ctx);
@@ -820,7 +859,7 @@ bool CTextService::caretRect(ITfContext *ctx, TfEditCookie ec, RECT &out,
   }
 
   // Ancre = PREMIER caractère du mot en cours, pas toute la composition :
-  // quand l'application renvoie le fantôme à la ligne, l'union des deux lignes
+  // quand l'application renvoie la composition à la ligne, l'union des deux lignes
   // commence en début de ligne et la barre sautait à gauche.
   ITfRange *range = nullptr;
   if (composition_) {
@@ -1053,9 +1092,10 @@ LRESULT CALLBACK CTextService::msgProc(HWND hwnd, UINT msg, WPARAM wp,
     }
     if (msg == WM_PREDICT_WAKE) {
       std::vector<std::function<void()>> todo;
-      ::EnterCriticalSection(&self->postedLock_);
-      todo.swap(self->posted_);
-      ::LeaveCriticalSection(&self->postedLock_);
+      MainBridge &b = *self->bridge_;
+      ::EnterCriticalSection(&b.lock);
+      todo.swap(b.posted);
+      ::LeaveCriticalSection(&b.lock);
       for (auto &fn : todo)
         fn();
       return 0;
@@ -1073,22 +1113,22 @@ LRESULT CALLBACK CTextService::msgProc(HWND hwnd, UINT msg, WPARAM wp,
 bool CTextService::ensureMessageWindow() {
   if (msgWnd_)
     return true;
-  HINSTANCE inst = ::GetModuleHandleW(nullptr);
-  static bool registered = false;
-  if (!registered) {
-    WNDCLASSEXW wc{};
-    wc.cbSize = sizeof(wc);
-    wc.lpfnWndProc = msgProc;
-    wc.hInstance = inst;
-    wc.lpszClassName = kMsgClass;
-    if (!::RegisterClassExW(&wc) &&
-        ::GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
-      return false;
-    registered = true;
-  }
+  // Classe inscrite sous le HINSTANCE de la DLL, jamais celui de l'hôte : une
+  // classe de l'hôte survivrait au déchargement de la DLL et son WndProc
+  // pointerait dans le vide à la prochaine activation (cf Module.h).
+  WNDCLASSEXW wc{};
+  wc.lpfnWndProc = msgProc;
+  wc.lpszClassName = kMsgClass;
+  if (!registerWindowClass(wc))
+    return false;
   msgWnd_ = ::CreateWindowExW(0, kMsgClass, L"", 0, 0, 0, 0, 0, HWND_MESSAGE,
-                              nullptr, inst, this);
-  return msgWnd_ != nullptr;
+                              nullptr, dllInstance(), this);
+  if (!msgWnd_)
+    return false;
+  ::EnterCriticalSection(&bridge_->lock);
+  bridge_->hwnd = msgWnd_;
+  ::LeaveCriticalSection(&bridge_->lock);
+  return true;
 }
 
 // WSAAsyncSelect route la lisibilité de la socket vers la file de messages du
@@ -1113,13 +1153,12 @@ void CTextService::stopWatch() {
   watchCb_ = nullptr;
 }
 
+// Toujours appelé sur le thread de saisie (les threads passent par le
+// MainBridge qu'ils détiennent, cf installReformRunner).
 void CTextService::postToMain(std::function<void()> fn) {
   if (!ensureMessageWindow())
     return;
-  ::EnterCriticalSection(&postedLock_);
-  posted_.push_back(std::move(fn));
-  ::LeaveCriticalSection(&postedLock_);
-  ::PostMessageW(msgWnd_, WM_PREDICT_WAKE, 0, 0);
+  bridge_->post(std::move(fn));
 }
 
 } // namespace win

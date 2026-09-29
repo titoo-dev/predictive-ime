@@ -35,7 +35,7 @@ ime/
 ```
 -> {"context":["je"],"prefix":"v","wide":"Il fait beau. Je"}
 <- {"candidates":["veux","vais",...],"literalIsWord":false,
-    "autocomplete":"veux","ghost":"veux","accentOnly":false}
+    "autocomplete":"veux","accentOnly":false}
 -> {"learn":{"prev":"je","word":"code"}}            <- {"ok":true}
 
 # deux phases (mot-suivant neural, E5) :
@@ -46,9 +46,7 @@ ime/
 `literalIsWord` dit si le préfixe tapé est déjà un mot réel — l'engine ne
 remplace alors le mot que sur sélection explicite (jamais d'autocorrection d'un
 mot valide). `autocomplete` est le mot que l'Espace applique (haute confiance).
-`ghost` est la complétion haute-confiance TOUJOURS calculée (mêmes garde-fous),
-même quand `autoApply` est off : l'engine l'affiche en texte fantôme et **→ la
-committe explicitement** (sans espace). `accentOnly` signale que `autocomplete`
+`accentOnly` signale que `autocomplete`
 est une pure RESTAURATION D'ACCENTS (fold-equal : francais→français,
 oeuvre→œuvre, c'etait→c'était) — l'engine l'applique alors même si le tapé est
 un vrai mot du corpus (`literalIsWord`), car elle ne change jamais le mot.
@@ -140,14 +138,14 @@ P1(w)    = 0.7·Pcont(w) + 0.3·Pfreq(w)
   stow (le fichier des dotfiles est mis à jour), chaque bascule est
   appliquée à la volée. Section « Langue des suggestions » : Français /
   English / Auto / Aucune. CLI scriptable :
-  `ime-preferences --set lang=fr --set ghostText=false`.
+  `ime-preferences --set lang=fr --set nextWordBar=false`.
 - **`config.json`** — daemon : `lang` (`fr`/`en`/`auto`/`off`), `autoApply`,
   `autoDom`, `autoMinLen`, `accentRestore` (restauration d'accents/ligatures
   fold-equal sur Espace, même avec `autoApply:false`), `accentDom` (seuil de
   dominance quand la graphie brute est aussi au corpus ; défaut 4.0),
   `barWords` (taille max de la barre, 1-8),
   `langBoost`, `recencyBoost` (boost des mots déjà dans le document ;
-  ≤1.0 = off), `multiWord` ; engine : `ghostText`, `frenchSpacing` (espace
+  ≤1.0 = off), `multiWord` ; engine : `frenchSpacing` (espace
   fine insécable U+202F avant `; : ! ?`), `autoCapitalize` (majuscule en
   début de phrase), `nextWordBar` (false = pas de barre spéculative après
   Espace — mode calme), `autoApplyNeedsRevert` (défaut true : l'Espace ne
@@ -309,11 +307,10 @@ P1(w)    = 0.7·Pcont(w) + 0.3·Pfreq(w)
   raccourcis à modificateur (Ctrl+Tab, Ctrl+Entrée…) committent le littéral
   puis **passent** à l'application. Un appui de modificateur seul (Shift…)
   ne touche à rien — ni au mot en cours, ni à la barre, ni au revert.
-- **Ghost text** : le reste de la complétion haute-confiance s'affiche dans le
-  préedit, curseur entre le tapé et le fantôme (`bonjou‸r`) — jamais pour une
-  correction floue (la barre + liseré s'en chargent). **→ l'accepte
-  explicitement** (commit sans espace), que `autoApply` soit actif ou non —
-  le mode prudent (`autoApply:false`) garde ainsi ses complétions.
+- **Pas de texte fantôme** : le préedit ne montre que ce qui est tapé ; la
+  complétion proposée vit uniquement dans la barre de candidats (le texte
+  fantôme a été retiré le 2026-09-29 : le panneau fait déjà tout, et la
+  proposition insérée dans le texte gênait la frappe).
 - **Espace** : complète/corrige (garde-fous ci-dessus) — le candidat qui sera
   appliqué porte un **liseré accent** dans la barre ; sans marquage, Espace
   garde le littéral. La **ponctuation** (`. , ; : ! ?`) corrige aussi
@@ -324,17 +321,13 @@ P1(w)    = 0.7·Pcont(w) + 0.3·Pfreq(w)
   est effacé, le littéral tapé revient en composition, et l'Espace suivant le
   respecte (pas de re-correction). La fenêtre survit aux modificateurs.
 - **Effacer n'applique jamais** (`erasing`) : après un Backspace — dans la
-  composition comme sur un mot recomposé — plus de **fantôme** ni
-  d'**auto-application** tant qu'un caractère n'a pas été retapé. Sans ce frein,
-  effacer ne servait à rien : la complétion du préfixe raccourci remettait
-  aussitôt ce qu'on venait d'enlever (⌫ sur `bonjour` réaffichait `bonjour`,
-  cursor entre `bonjou` et `r`), et l'Espace committait la complétion refusée —
-  pire sur une recomposition, où effacer l'espace après `salut` proposait
+  composition comme sur un mot recomposé — plus d'**auto-application** tant
+  qu'un caractère n'a pas été retapé. Sans ce frein, effacer ne servait à
+  rien : l'Espace committait la complétion du préfixe raccourci, celle qu'on
+  venait d'enlever — pire sur une recomposition, où effacer l'espace après `salut` proposait
   `salutation` que l'Espace appliquait. Les **candidats restent** (Tab/1-6
   choisissent encore) : c'est l'application AUTOMATIQUE qu'on retire, pas la
   suggestion. Même durée de vie que `vetoAuto` (le mot en cours).
-  `ghostShown()` centralise les conditions d'affichage du fantôme, parce que la
-  touche → s'en sert aussi : sinon → accepterait une complétion invisible.
 - **Ctrl+Backspace en composition** : ABANDONNE le mot en cours — rien n'est
   committé, rien n'est appris.
 
@@ -538,7 +531,9 @@ nix build ./ime#checks.x86_64-linux.panel
       l'engine applique malgré `literalIsWord`. (2) GHOST découplé de
       autoApply : le champ `ghost` est toujours calculé ; **→ l'accepte
       explicitement** (commit sans espace, façon Copilot/fish) — le mode
-      prudent garde ses complétions. (3) `barWords` (1-8, défaut 6) : la barre
+      prudent garde ses complétions. *Retiré le 2026-09-29 (texte fantôme,
+      champ `ghost`, touche →) : la barre de candidats suffit.*
+      (3) `barWords` (1-8, défaut 6) : la barre
       ne montre que les N meilleurs. (4) UI : fondu de contenu 80 ms quand la
       barre PASSIVE se rafraîchit (swap asynchrone du neural — plus de
       « pop »). Les indices 1-6 sur les chips (essai) ont été retirés à

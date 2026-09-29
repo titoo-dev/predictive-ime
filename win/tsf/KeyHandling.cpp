@@ -9,9 +9,11 @@
 #include "TextService.h"
 
 #include "Debug.h"
+#include "Module.h"
 
 #include "../../core/engine_core.h"
 
+#include <memory>
 #include <windows.h>
 
 namespace win {
@@ -211,23 +213,40 @@ STDMETHODIMP CTextService::OnPreservedKey(ITfContext *, REFGUID, BOOL *eaten) {
 
 // La reformulation part sur un thread (réseau : des secondes) et revient par
 // la file de messages. Sans ça, Word gèlerait pendant l'appel à l'API.
+//
+// Le thread ne touche NI au service NI au contexte : il n'emporte que des
+// chaînes, la clé opaque du contexte et le MainBridge partagé. Le service
+// peut être désactivé, détruit, et la DLL déchargée pendant l'appel réseau —
+// runDetached retient le module, et un bridge fermé jette le résultat.
 void CTextService::installReformRunner(core::EngineCore &core,
                                        ITfContext *ctx) {
   core.setReformRunner([this, ctx](std::string text, std::string mode,
                                    uint32_t nonce, int n, uint32_t gen) {
-    std::thread([this, ctx, text, mode, nonce, n, gen]() {
-      auto deliver = [this, ctx, gen](bool partial,
-                                      std::vector<std::string> vars,
-                                      core::ReformResult res) {
-        postToMain([this, ctx, partial, vars, res, gen]() {
-          withEditSession(ctx, [&](TfEditCookie ec) {
-            TsfFrontend fe(this, ctx, ec);
-            core::EngineCore c(fe, prefs_);
-            installReformRunner(c, ctx);
+    // Référence COM prise ICI, sur le thread de saisie, et rendue par
+    // OnPopContext/Deactivate — jamais depuis le thread réseau.
+    if (!reformCtx_.count(ctx))
+      reformCtx_[ctx] = ctx;
+    std::shared_ptr<MainBridge> bridge = bridge_;
+    CTextService *self = this;
+    runDetached([self, bridge, ctx, text, mode, nonce, n, gen]() {
+      auto deliver = [self, bridge, ctx, gen](bool partial,
+                                              std::vector<std::string> vars,
+                                              core::ReformResult res) {
+        bridge->post([self, ctx, partial, vars, res, gen]() {
+          // Exécuté sur le thread de saisie, donc `self` est vivant (le bridge
+          // est fermé avant sa destruction). Le contexte, lui, a pu fermer.
+          auto it = self->reformCtx_.find(ctx);
+          if (it == self->reformCtx_.end())
+            return;
+          Microsoft::WRL::ComPtr<ITfContext> keep = it->second;
+          self->withEditSession(keep.Get(), [&](TfEditCookie ec) {
+            TsfFrontend fe(self, keep.Get(), ec);
+            core::EngineCore c(fe, self->prefs_);
+            self->installReformRunner(c, keep.Get());
             if (partial)
-              c.onReformPartial(stateFor(ctx), vars, gen);
+              c.onReformPartial(self->stateFor(keep.Get()), vars, gen);
             else
-              c.onReformResult(stateFor(ctx), res, gen);
+              c.onReformResult(self->stateFor(keep.Get()), res, gen);
           });
         });
       };
@@ -237,7 +256,7 @@ void CTextService::installReformRunner(core::EngineCore &core,
       core::ReformResult r =
           core::reformulateDaemon(text, mode, nonce, n, onPartial);
       deliver(false, {}, r);
-    }).detach();
+    });
   });
 }
 

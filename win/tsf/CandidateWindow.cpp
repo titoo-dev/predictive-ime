@@ -2,6 +2,7 @@
 
 #include "Debug.h"
 #include "Dpi.h"
+#include "Module.h"
 
 #include "../../core/text.h"
 
@@ -167,27 +168,21 @@ LRESULT CALLBACK CandidateWindow::wndProc(HWND hwnd, UINT msg, WPARAM wp,
 bool CandidateWindow::ensureCreated() {
   if (hwnd_)
     return true;
-  HINSTANCE inst = ::GetModuleHandleW(nullptr);
-  static bool registered = false;
-  if (!registered) {
-    WNDCLASSEXW wc{};
-    wc.cbSize = sizeof(wc);
-    wc.style = CS_DROPSHADOW;
-    wc.lpfnWndProc = wndProc;
-    wc.hInstance = inst;
-    wc.hCursor = ::LoadCursorW(nullptr, IDC_ARROW);
-    wc.lpszClassName = kClassName;
-    if (!::RegisterClassExW(&wc) &&
-        ::GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
-      return false;
-    registered = true;
-  }
+  // Classe inscrite sous le HINSTANCE de la DLL (cf Module.h) : inscrite sous
+  // celui de l'hôte, elle lui survivrait avec un WndProc dans le vide.
+  WNDCLASSEXW wc{};
+  wc.style = CS_DROPSHADOW;
+  wc.lpfnWndProc = wndProc;
+  wc.hCursor = ::LoadCursorW(nullptr, IDC_ARROW);
+  wc.lpszClassName = kClassName;
+  if (!registerWindowClass(wc))
+    return false;
   // Per-Monitor V2 quel que soit l'hôte : c'est ce qui garde le texte net
   // dans les applications qui ne gèrent pas le DPI (cf Dpi.h).
   auto scope = dpi::perMonitor();
   hwnd_ = ::CreateWindowExW(
       WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW, kClassName, L"",
-      WS_POPUP, 0, 0, 10, 10, nullptr, nullptr, inst, this);
+      WS_POPUP, 0, 0, 10, 10, nullptr, nullptr, dllInstance(), this);
   if (!hwnd_)
     return false;
   themeDirty_ = true;

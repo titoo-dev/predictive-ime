@@ -17,10 +17,13 @@
 #include "../../core/state.h"
 
 #include <ctffunc.h>
-#include <thread>
+#include <functional>
 #include <map>
+#include <memory>
+#include <vector>
 #include <msctf.h>
 #include <windows.h>
+#include <wrl/client.h>
 
 namespace win {
 
@@ -34,7 +37,7 @@ public:
       : svc_(svc), ctx_(ctx), ec_(ec) {}
 
   void commitText(const std::string &utf8) override;
-  void setPreedit(const std::string &typed, const std::string &ghost) override;
+  void setPreedit(const std::string &typed) override;
   void setCandidates(const std::vector<core::Candidate> &cands, int cursor,
                      const std::string &auxTitle) override;
   void clearPanel() override;
@@ -61,6 +64,26 @@ private:
 };
 
 class CLangBarButton;
+
+// Boîte aux lettres entre les threads de reformulation et le thread de
+// saisie. Partagée (shared_ptr) : un thread peut survivre au service — il
+// trouve alors `hwnd` nul et jette son résultat au lieu de toucher un objet
+// détruit.
+struct MainBridge {
+  MainBridge() { ::InitializeCriticalSection(&lock); }
+  ~MainBridge() { ::DeleteCriticalSection(&lock); }
+  MainBridge(const MainBridge &) = delete;
+  MainBridge &operator=(const MainBridge &) = delete;
+
+  CRITICAL_SECTION lock;
+  HWND hwnd = nullptr; // fenêtre de messages du service ; nul après sa mort
+  std::vector<std::function<void()>> posted;
+
+  // Depuis n'importe quel thread. false : le service n'existe plus.
+  bool post(std::function<void()> fn);
+  // Depuis le thread de saisie : coupe le lien et vide la file.
+  void close();
+};
 
 class CTextService : public ITfTextInputProcessorEx,
                      public ITfThreadMgrEventSink,
@@ -214,8 +237,11 @@ private:
   HWND msgWnd_ = nullptr;
   sock_t watchFd_ = kBadSock;
   std::function<void()> watchCb_;
-  std::vector<std::function<void()>> posted_;
-  CRITICAL_SECTION postedLock_{};
+  std::shared_ptr<MainBridge> bridge_;
+  // Contextes visés par une reformulation en cours. Le thread réseau ne
+  // porte qu'une CLÉ (pointeur opaque) ; la référence COM, elle, ne vit et ne
+  // meurt que sur ce thread. Une clé absente = champ fermé, résultat jeté.
+  std::map<ITfContext *, Microsoft::WRL::ComPtr<ITfContext>> reformCtx_;
 };
 
 } // namespace win

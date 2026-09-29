@@ -11,3 +11,9 @@ result-*
 
 # artefacts de packaging Windows (installeur genere)
 /dist/
+/video/renders/
+/video/node_modules/
+/video/.hyperframes/
+
+# musique de fond de la vidéo : régénérée par video/scripts/make-bgm.mjs (le .m4a est celui utilisé)
+/video/assets/bgm.wav

@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   Non-régression des règles de disposition du setup (scripts/PredictLayout.ps1).
 

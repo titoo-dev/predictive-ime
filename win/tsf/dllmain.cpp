@@ -8,6 +8,7 @@
 // écran de connexion) — c'est le piège classique.
 #include "Guids.h"
 #include "KeyboardLayout.h"
+#include "Module.h"
 #include "TextService.h"
 
 #include <msctf.h>
@@ -19,7 +20,6 @@
 namespace {
 
 HINSTANCE g_inst = nullptr;
-LONG g_dllRefs = 0;
 
 // Langues sous lesquelles le profil est proposé. Le modèle est FR/EN : on
 // s'inscrit sous les deux, l'utilisateur retire ce qu'il ne veut pas.
@@ -78,11 +78,11 @@ public:
     return S_OK;
   }
   STDMETHODIMP_(ULONG) AddRef() override {
-    ::InterlockedIncrement(&g_dllRefs);
+    win::dllAddRef();
     return 2; // singleton statique : le compte n'a pas à être exact
   }
   STDMETHODIMP_(ULONG) Release() override {
-    ::InterlockedDecrement(&g_dllRefs);
+    win::dllRelease();
     return 1;
   }
   STDMETHODIMP CreateInstance(IUnknown *outer, REFIID riid,
@@ -101,9 +101,9 @@ public:
   }
   STDMETHODIMP LockServer(BOOL lock) override {
     if (lock)
-      ::InterlockedIncrement(&g_dllRefs);
+      win::dllAddRef();
     else
-      ::InterlockedDecrement(&g_dllRefs);
+      win::dllRelease();
     return S_OK;
   }
 };
@@ -112,10 +112,18 @@ CClassFactory g_factory;
 
 } // namespace
 
-BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID) {
+BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
   if (reason == DLL_PROCESS_ATTACH) {
     g_inst = inst;
     ::DisableThreadLibraryCalls(inst);
+  } else if (reason == DLL_PROCESS_DETACH) {
+    // FreeLibrary explicite (reserved == nullptr) : on rend les classes de
+    // fenêtre, sans quoi un rechargement de la DLL à une autre adresse
+    // retrouverait une classe dont le WndProc pointe dans l'ancien module.
+    // À la fin du process, inutile — et dangereux — de toucher à quoi que ce
+    // soit.
+    if (reserved == nullptr)
+      win::unregisterWindowClasses();
   }
   return TRUE;
 }
@@ -129,7 +137,10 @@ STDAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, void **ppv) {
   return g_factory.QueryInterface(riid, ppv);
 }
 
-STDAPI DllCanUnloadNow() { return g_dllRefs > 0 ? S_FALSE : S_OK; }
+// S_OK ici = COM appelle FreeLibrary sur-le-champ. Le compteur couvre la
+// fabrique, LockServer et CHAQUE objet COM vivant (service, bouton de la barre
+// de langue, sessions d'édition) — cf Module.h.
+STDAPI DllCanUnloadNow() { return win::dllHasRefs() ? S_FALSE : S_OK; }
 
 STDAPI DllRegisterServer() {
   wchar_t path[MAX_PATH]{};

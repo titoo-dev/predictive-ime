@@ -208,10 +208,6 @@ struct Result {
   // d'apostrophe/trait d'union (sinon c'est une contraction qu'on ne mutile pas,
   // ex. "j'ai" qui ne doit jamais devenir "jail").
   std::string autocomplete;
-  // Complétion haute-confiance TOUJOURS calculée (mêmes garde-fous), même
-  // quand autoApply est off : l'engine l'affiche en texte fantôme et → la
-  // committe EXPLICITEMENT. L'Espace, lui, n'applique que `autocomplete`.
-  std::string ghost;
   // autocomplete est une RESTAURATION D'ACCENTS pure (fold-equal au tapé :
   // francais→français, oeuvre→œuvre, c'etait→c'était) : l'engine peut alors
   // l'appliquer même si le tapé est un vrai mot du corpus (literalIsWord).
@@ -1610,8 +1606,8 @@ private:
       if (push(p.first))
         res.scores.push_back(p.second); // parallèle à candidates (rerank E3)
 
-    // GHOST — complétion haute confiance, TOUJOURS calculée (les candidats
-    // restent affichés, on bride uniquement le remplacement automatique) :
+    // COMPLÉTION HAUTE CONFIANCE (les candidats restent affichés, on bride
+    // uniquement le remplacement automatique) :
     //  - préfixe assez long (un sigle de 2 lettres « az » ne devient pas
     //    « aziz ») ;
     //  - le top doit DOMINER le 2e candidat (ambigu → on garde le littéral,
@@ -1620,10 +1616,10 @@ private:
     //  - une correction FLOUE ne raccourcit jamais la frappe (« pcq » ne
     //    devient pas « pc ») et jamais à travers une apostrophe/trait d'union
     //    (on ne mutile pas une contraction, « j'ai » ≠ jail).
-    // L'Espace ne l'applique que si autoApply (cf plus bas) ; sinon elle
-    // reste un texte fantôme que → committe explicitement.
+    // L'Espace ne l'applique que si autoApply (cf plus bas).
+    std::string strong;
     if (!snippetExact.empty()) {
-      res.ghost = snippetExact; // déclencheur explicite → toujours
+      strong = snippetExact; // déclencheur explicite → toujours
     } else if (!res.candidates.empty() && fp.size() >= size_t(cfg.autoMinLen)) {
       const std::string &top = res.candidates.front();
       const std::string ftop = foldStr(top);
@@ -1639,7 +1635,7 @@ private:
       bool fuzzyOk = ftop.size() >= fp.size() && !fpHasPunct &&
                      ftop.find(' ') == std::string::npos;
       if (dominant && (topIsPrefix || fuzzyOk))
-        res.ghost = top;
+        strong = top;
     }
 
     // RESTAURATION D'ACCENTS : meilleure forme FOLD-EQUAL ≠ tapé — n'ajoute
@@ -1699,14 +1695,14 @@ private:
     // restauration d'accents (accentRestore) — sinon rien, littéral gardé.
     if (cfg.autoApply) {
       // le garde apostrophe bloque les restaurations d'élision (c'était) dans
-      // le ghost — l'accent fold-equal, sûr par construction, le complète.
-      // Ghost == le littéral lui-même (graphie brute plus fréquente au corpus,
-      // ex. « coeur » vs « cœur ») : sans intérêt pour l'Espace → on retombe
-      // sur la restauration d'accents (la ligature doit gagner).
-      bool ghostIsLiteral =
-          !res.ghost.empty() && lowerKeep(res.ghost) == lowerKeep(prefix);
+      // la complétion — l'accent fold-equal, sûr par construction, le complète.
+      // Complétion == le littéral lui-même (graphie brute plus fréquente au
+      // corpus, ex. « coeur » vs « cœur ») : sans intérêt pour l'Espace → on
+      // retombe sur la restauration d'accents (la ligature doit gagner).
+      bool strongIsLiteral =
+          !strong.empty() && lowerKeep(strong) == lowerKeep(prefix);
       res.autocomplete =
-          (!res.ghost.empty() && !ghostIsLiteral) ? res.ghost : accentWord;
+          (!strong.empty() && !strongIsLiteral) ? strong : accentWord;
       // RESTAURATION pure = ne diffère du tapé que par accents et/ou
       // APOSTROPHES (« jai » → j'ai : mêmes lettres). L'engine peut alors
       // appliquer même si le tapé traîne dans le vocab comme bruit de corpus
@@ -2533,7 +2529,6 @@ int main(int argc, char **argv) {
         resp["candidates"] = r.candidates;
         resp["literalIsWord"] = r.literalIsWord;
         resp["autocomplete"] = r.autocomplete;
-        resp["ghost"] = r.ghost;
         resp["accentOnly"] = r.accentOnly;
       }
     } catch (const std::exception &e) {
